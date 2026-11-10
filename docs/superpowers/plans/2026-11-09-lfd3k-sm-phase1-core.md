@@ -19,7 +19,7 @@
 - User-facing text (result codes, `ATI` banner, FEATURES.md, README) never uses em dashes or double hyphens.
 - Commits carry no AI attribution (Rev's rule; a global commit-msg hook also strips it).
 - All tiers in this phase are LoRa at BW 500 kHz, CR 4/5. Tier names and air rates are exactly: `LORA SF12 BW500` 1172, `LORA SF11 BW500` 2148, `LORA SF10 BW500` 3906, `LORA SF9 BW500` 7031, `LORA SF8 BW500` 12500, `LORA SF7 BW500` 21875, `LORA SF6 BW500` 37500, `LORA SF5 BW500` 62500 (bits per second).
-- `ATI` prints exactly `LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM` on its first line and `v0.1.0 "H4CK3R 3L337 N00DL3 V.69 SOFTMODEM"` on its second (version and leet release name in separate consts) (Rev, 2026-11-09: the whole name with - LFD3K-SM).
+- `ATI` prints exactly `LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM` on its first line, `v0.1.0 V.420 BL4Z3B4ND ULTR4M0D3M` on its second and `S0N1C B00M R4D10 PR0 MAX` on its third (version, release name and tagline in separate consts) (Rev, 2026-11-09: the whole name with - LFD3K-SM).
 - Per Rev's standing preference, build tasks end with a clean build and a commit; all tests are written and run in the final task (Task 8).
 - Keep `docs/FEATURES.md` updated in the same task that adds a feature or setting.
 
