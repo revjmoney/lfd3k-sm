@@ -760,6 +760,20 @@ fn wire_bytes_cross_in_order() {
 #[test]
 fn settings_load_save_roundtrip_c_abi() {
     let _g = serial();
+    // Not initialised (a failed init leaves the device empty): every settings
+    // entry point refuses or does nothing.
+    assert_eq!(init(""), -4);
+    assert_eq!(load(&[0u8; 899]), -1);
+    assert!(take_save().is_none());
+    unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
+    assert!(take_save().is_none());
+    assert!(!lfd3k_take_wifi_changed() && !lfd3k_show_ap_pass());
+    lfd3k_note_ap_client_joined();
+    lfd3k_set_stack_free(5);
+    let c = wifi_cfg();
+    assert_eq!((c.ap_on, c.sta_set), (0, 0));
+    assert_eq!(cfg_str(&c.ap_ssid), "");
+    assert_eq!(cfg_str(&c.ap_pass), "");
     assert_eq!(init("AXISMODEM-1234"), 0);
     cmd("ATE0", 0);
     // First boot: no blob, or a rejected one. The platform loads, gets -1,
@@ -1144,6 +1158,12 @@ fn rf_trace_samples_while_listening() {
     let _g = serial();
     let mut dbm = [0i8; 64];
     let mut tx = [9u8; 64];
+    // Not initialised (a failed init leaves the device empty): nothing to read.
+    assert_eq!(init(""), -4);
+    assert_eq!(
+        unsafe { lfd3k_rf_trace(dbm.as_mut_ptr(), tx.as_mut_ptr(), 64) },
+        0
+    );
     assert_eq!(init("CALLER"), 0);
     fake_hal::with(|h| h.rssi_inst = 200); // -100 dBm
     let trace = |cap: usize| {
@@ -1218,17 +1238,13 @@ fn rf_trace_marks_tx() {
     }
     let before = trace().0.len();
     assert!(before >= 3);
-    // On the air, a transmission is marked tx with no level (the chip cannot
-    // measure while sending), and there is no SPI read for it.
-    // SimNet: the simulated radio is transmitting for the frame's airtime on
-    // the HAL clock, which the fake advances by hand.
+    // SimNet branch: the simulated radio is transmitting for the frame's
+    // airtime on the HAL clock, which the fake advances by hand. (The chip
+    // branch is f_trace_marks_tx_on_the_chip.)
     cmd("AT+SIMNET=10.0.0.2", 210);
     lfd3k_poll(215);
     host_out();
     cmd("ATDT PEER", 220);
-    fake_hal::with(|h| {
-        h.step_us = 1;
-    });
     fake_hal::with(|h| h.xfers.clear());
     for ms in (230..=400).step_by(10) {
         lfd3k_poll(ms);
@@ -1250,4 +1266,50 @@ fn rf_trace_marks_tx() {
     }
     let (_, t2) = trace();
     assert_eq!(t2.last(), Some(&0), "listening again after the airtime");
+}
+
+#[test]
+fn rf_trace_marks_tx_on_the_chip() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    fake_hal::with(|h| h.rssi_inst = 200); // -100 dBm
+    let newest = || {
+        let (mut d, mut t) = ([0i8; 1], [9u8; 1]);
+        let n = unsafe { lfd3k_rf_trace(d.as_mut_ptr(), t.as_mut_ptr(), 1) };
+        assert_eq!(n, 1);
+        (d[0], t[0])
+    };
+    for ms in (0..=200).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    assert_eq!(newest(), (-100, 0), "listening sample with the level");
+    // The fake chip raises TxDone inside SetTx, so a real transmission (it
+    // lasts the airtime) is made by taking the bit away again: the driver
+    // stays in TX until it sees TxDone. Dial without polling first.
+    assert_eq!(host_in(b"ATDT PEER\r", 205), 10);
+    assert!(
+        fake_hal::with(|h| !h.tx_frames.is_empty()),
+        "the chip was told to send"
+    );
+    fake_hal::with(|h| {
+        h.irq &= !0x0001;
+        h.xfers.clear();
+    });
+    // 50 ms after the last sample: due. The chip is in TX, so the sample is
+    // a tx mark with no level, and it costs no SPI read (GetRssiInst, 0x15).
+    lfd3k_poll(250);
+    assert_eq!(newest(), (0, 1), "tx sample");
+    assert!(
+        !spi_ops().contains(&0x15),
+        "no RSSI read while transmitting: {:?}",
+        spi_ops()
+    );
+    lfd3k_poll(300);
+    assert_eq!(newest(), (0, 1), "still transmitting");
+    // TxDone arrives: back to listening, and the next sample has the level.
+    fake_hal::with(|h| h.irq |= 0x0001);
+    lfd3k_poll(310);
+    lfd3k_poll(360);
+    assert_eq!(newest(), (-100, 0), "listening again");
+    assert!(spi_ops().contains(&0x15));
 }
