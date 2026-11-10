@@ -1,0 +1,11 @@
+[package]
+name = "lfd3k-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+lfd3k-core = { path = "../core" }

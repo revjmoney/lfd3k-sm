@@ -1,0 +1,12 @@
+[package]
+name = "lfd3k-sim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lfd3k-core = { path = "../core" }
+
+[dev-dependencies]
+# Fuzz tests only (MIT OR Apache-2.0). Default features off: no fork/timeout crates.
+proptest = { version = "1", default-features = false, features = ["std"] }
