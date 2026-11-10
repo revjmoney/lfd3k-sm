@@ -425,7 +425,18 @@ fn plus_plus_plus_without_guard_is_data() {
     // +++ then a guard, but data came just before it.
     h.send_a_data(b"c+++");
     h.run_ms(3_000);
-    let want: &[u8] = b"a+++b+++bc+++";
+    // Separate keystrokes, every gap under the guard: x, 200 ms, then each
+    // + 300 ms apart, then y 300 ms after the last +.
+    h.send_a_data(b"x");
+    h.run_ms(200);
+    for _ in 0..3 {
+        h.send_a_data(b"+");
+        h.run_ms(300);
+    }
+    h.send_a_data(b"y");
+    h.run_ms(3_000);
+    assert!(h.a.is_connected());
+    let want: &[u8] = b"a+++b+++bc+++x+++y";
     assert!(h.a.is_connected());
     let since = String::from_utf8_lossy(&h.screen_a_bytes()[mark..]).into_owned();
     assert!(!since.contains(OK), "CALLER escaped: {since:?}");
