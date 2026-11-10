@@ -84,13 +84,22 @@ impl Tier {
         }
     }
 
+    /// Programmed preamble length in symbols: 12 at SF5 and SF6, else 8.
+    pub fn preamble_symbols(self) -> u16 {
+        if self.sf() <= 6 {
+            12
+        } else {
+            8
+        }
+    }
+
     /// Time on air in microseconds for a PHY payload of `payload_len` bytes.
     ///
     /// Formula used: SX1261/2 datasheet "LoRa time-on-air" form, BW 500 kHz,
     /// CR 4/5, explicit header, CRC on, no low-data-rate optimize.
     /// SF7..SF12: preamble = (8 + 4.25) symbols, payload numerator
-    /// 8*PL - 4*SF + 28 + 16. SF5/SF6: preamble = (12 + 6.25) symbols,
-    /// payload numerator 8*PL - 4*SF + 8 + 16 (no extra header constant).
+    /// 8*PL + 16 - 4*SF + 28. SF5/SF6: preamble = (12 + 6.25) symbols,
+    /// payload numerator 8*PL + 16 - 4*SF + 20.
     /// Integer math, saturating, never panics.
     pub fn airtime_us(self, payload_len: usize) -> u32 {
         let sf = self.sf() as i64;
@@ -98,9 +107,9 @@ impl Tier {
         // Symbol time in microseconds: 2^SF / 500 kHz = 2^SF * 2 us.
         let tsym_us = (1i64 << sf) * 2;
         // Preamble length in quarter symbols.
-        let pre_q: i64 = if small { 4 * 12 + 25 } else { 4 * 8 + 17 };
+        let pre_q: i64 = 4 * i64::from(self.preamble_symbols()) + if small { 25 } else { 17 };
         let pl = payload_len.min(1 << 20) as i64;
-        let k = if small { 8 } else { 28 };
+        let k = if small { 20 } else { 28 };
         let num = 8 * pl - 4 * sf + k + 16;
         let den = 4 * sf;
         let blocks = if num > 0 { (num + den - 1) / den } else { 0 };

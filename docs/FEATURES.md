@@ -5,7 +5,7 @@
 | Name | Status | Date |
 |------|--------|------|
 | Speed tier ladder: 8 LoRa tiers SF12 to SF5 at BW 500 kHz, CR 4/5 (1172 to 62500 bps air rate), SNR floors, best-tier pick, time-on-air estimate | done | 2026-11-09 |
-| Frame format: 4 byte header, 11 frame types, validated encode/decode (no panics), CallReq name payloads, Radio trait | done | 2026-11-09 |
+| Frame format: 5 byte header (air id byte first), 11 frame types, validated encode/decode (no panics), CallReq name payloads, Radio trait | done | 2026-11-09 |
 | AT command set: ATD/ATDT, ATA, ATH, ATO, ATI, ATV, ATE, ATSn=v, ATSn?, AT&V, ATZ; verbose and numeric result codes; S registers with bounds | done | 2026-11-09 |
 | Selective repeat ARQ: window 8, 200 byte chunks, SACK bitmap, timeout retransmit, wrapping u8 seq | done | 2026-11-09 |
 | Call setup and training: ATDT by name on SF12 (DIALING, RINGING), RING and auto-answer (S0), CallAck plus Train with measured SNR, tier pick with S20 margin and S21 cap, TierSet and TierAck, Keepalive probe with step-down to SF12, CONNECT | done | 2026-11-09 |
@@ -16,6 +16,10 @@
 | ATI banner: name, version with release name, release tagline | done | 2026-11-09 |
 | PC simulator: seeded half duplex LoRa channel (SNR profiles, loss by margin, collisions, drop hook, frame trace) and a two modem harness (CALLER and AXIS) | done | 2026-11-10 |
 | Phase 1 demo: `cargo run -p lfd3k-sim -- [--snr <dB>] [--seed <n>] [--out <file>] [--trace <file>]`, two 4 KB ANSI screens, SNR dip and recovery, escape, ATO, AT&V, ATH | done | 2026-11-10 |
+| Air id: every frame starts with one byte 0xD1 (0xD = LFD3K-SM, 1 = air protocol version 1); any other first byte decodes as Foreign and is ignored. Max payload 250 bytes | done | 2026-11-10 |
+| Calling channel: 918.5 MHz (`CHANNEL_HZ`, SX1262 frequency word 0x3968_0000), BW 500 kHz, CR 4/5, preamble 8 symbols (12 at SF5 and SF6) | done | 2026-11-10 |
+| SF5 and SF6 time on air fixed to the SX1261/2 datasheet form (payload numerator 8*PL + 16 - 4*SF + 20); SF5 with 1 payload byte is 2320 us | done | 2026-11-10 |
+| TX power setting S30 (SX1262 chip output in dBm, signed) and the TX POWER line in AT&V | done | 2026-11-10 |
 | Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library and logs LFD3K-SM core <version> once a second; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs | done | 2026-11-10 |
 
 ## Settings
@@ -29,6 +33,7 @@
 | S20 training margin, dB x4 | 20 (5 dB) | 0 to 200 |
 | S21 tier cap, tier index (7 = SF5) | 7 | 0 to 7 |
 | S22 resync timeout seconds | 20 | 1 to 255 |
+| S30 TX power, dBm at the SX1262 chip (the V4 GC1109 adds about 12 dB, so the default is about 14 dBm out) | 2 | -9 to 22 |
 
 ## AT commands
 
@@ -63,6 +68,8 @@ Notes:
 - The station name is 1 to 16 printable ASCII characters (Config::new refuses anything else).
 - ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
 
+- S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.
+
 ## Change log
 
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.
@@ -74,3 +81,4 @@ Notes:
 - 2026-11-10: Phase 1 test suite: 14 core unit tests (tiers, frames, AT parser and result codes, S registers, ARQ, ATI banner), 12 two modem scenario tests on the simulator (connects at SF5 and SF12, data both ways, retrain down and up, link loss, hang-up, flow control, unguarded +++, +++ under flow control, lost TierAck, NO ANSWER, stray frames) and 4 proptest fuzz tests with a fixed seed (frames into idle modems including ring and auto-answer, 10,000 cases; decode, 10,000; AT lines, 10,000; frames into a fresh connected call per case, 3,000). 30 tests, all passing, none ignored.
 - 2026-11-10: +++ under backpressure stays data: any data the host offers (even bytes the full send window refuses) counts against the escape guard time, and held + characters followed by more input are sent as data.
 - 2026-11-10: Final review wave. ATA in online command mode prints ERROR and keeps the call (was NO CARRIER). A partial command line from before CONNECT is dropped. Config::new checks the station name (1 to 16 printable ASCII) and returns None otherwise. Escape timing fix found by the new fuzz test: a completed +++ whose closing guard has run out now escapes when the host's next byte arrives, even before the next tick (the byte was sent as data with the +++ before). New tests: S21 tier cap held against the answerer's up retrain, answerer cap lower than caller's, manual ATA with S0=0, BUSY for a third caller while in a call, numeric result codes, ATZ in a call, ATA online, partial line before CONNECT, Config name check, and a data mode escape fuzz (600 cases, fresh call each, S12 from 0 to 50, random gaps around the guard). 40 tests (15 core unit, 20 scenario, 5 fuzz), all passing, none ignored.
+- 2026-11-10: Phase 2 task 1, core prep for the air: link.rs split into link/{mod,setup,data,retrain}.rs (no behavior change), air id byte 0xD1 in front of the header (HEADER_LEN 5, MAX_PAYLOAD 250, byte 1 now carries type and flags, so the MORE flag is set there), SF5/SF6 airtime fixed, S30 TX power, CHANNEL_HZ. Existing tests updated only for the header layout (frame byte offsets in frame.rs, calls.rs and fuzz.rs); no timing expectation needed to change.

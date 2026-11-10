@@ -122,7 +122,7 @@ impl Link {
         };
         let more = turns && !end_turn && self.burst + 1 < BURST_MAX && self.has_more(now);
         if more {
-            if let Some(b0) = buf.get_mut(0) {
+            if let Some(b0) = buf.get_mut(1) {
                 *b0 |= FLAG_MORE;
             }
         }

@@ -10,7 +10,7 @@
 //! modem, right after the received in-order data that fits in the host
 //! buffer (the call never leaves NO CARRIER pending).
 
-use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs};
+use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::frame::{valid_name, NAME_MAX};
 use crate::link::{Event, Link};
 use crate::radio::{Radio, RxInfo};
@@ -22,6 +22,9 @@ pub const BANNER: &str = "LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM"
 pub const RELEASE_NAME: &str = "r.420 BL4Z3B4ND ULTR4M0D3M";
 /// ATI line 3.
 pub const RELEASE_TAGLINE: &str = "S0N1C B00M R4D10 PR0 MAX";
+
+/// Gain of the Heltec V4 GC1109 front end, shown in AT&V.
+const GC1109_GAIN_DB: i32 = 12;
 
 const OUT_CAP: usize = 1024;
 /// Output space kept free of call data so result codes always fit.
@@ -167,6 +170,28 @@ impl Txt {
         self.put(tmp.get(start..).unwrap_or(&[]))
     }
 
+    /// Signed decimal, no padding.
+    fn int(&mut self, v: i32) -> &mut Self {
+        if v < 0 {
+            self.put(b"-");
+        }
+        self.num(v.unsigned_abs(), 1)
+    }
+
+    /// S register value as `AT S n ?` prints it: zero padded to 3 digits,
+    /// S30 signed.
+    fn sreg_val(&mut self, n: u8, v: u16) -> &mut Self {
+        if n == REG_TX_POWER {
+            let s = i32::from(v as i16);
+            if s < 0 {
+                self.put(b"-");
+            }
+            self.num(s.unsigned_abs(), 3)
+        } else {
+            self.num(u32::from(v), 3)
+        }
+    }
+
     fn bytes(&self) -> &[u8] {
         self.b.get(..self.n).unwrap_or(&[])
     }
@@ -288,6 +313,12 @@ impl Modem {
 
     pub fn host_output(&mut self, out: &mut [u8]) -> usize {
         self.out.pop(out)
+    }
+
+    /// S30: SX1262 chip output power in dBm (-9 to 22).
+    pub fn tx_power_dbm(&self) -> i8 {
+        let v = self.cfg.sregs.get(REG_TX_POWER).unwrap_or(2) as i16;
+        v.clamp(-9, 22) as i8
     }
 
     pub fn lights(&self, now_ms: u32) -> Lights {
@@ -485,7 +516,9 @@ impl Modem {
             }
             AtCmd::GetReg(n) => match self.cfg.sregs.get(n) {
                 Some(v) => {
-                    self.info(Txt::new().num(u32::from(v), 3).bytes());
+                    let mut t = Txt::new();
+                    t.sreg_val(n, v);
+                    self.info(t.bytes());
                     self.result(ResultCode::Ok);
                 }
                 None => self.result(ResultCode::Error),
@@ -504,11 +537,16 @@ impl Modem {
                         t.put(b" ");
                     }
                     let v = self.cfg.sregs.get(*r).unwrap_or(0);
-                    t.put(b"S")
-                        .num(u32::from(*r), 2)
-                        .put(b"=")
-                        .num(u32::from(v), 3);
+                    t.put(b"S").num(u32::from(*r), 2).put(b"=");
+                    t.sreg_val(*r, v);
                 }
+                self.info(t.bytes());
+                let dbm = self.tx_power_dbm();
+                let mut t = Txt::new();
+                t.put(b"TX POWER S30=").int(i32::from(dbm));
+                t.put(b" dBm chip, about ")
+                    .int(i32::from(dbm) + GC1109_GAIN_DB)
+                    .put(b" dBm out");
                 self.info(t.bytes());
                 let mut t = Txt::new();
                 t.put(b"TIER ");

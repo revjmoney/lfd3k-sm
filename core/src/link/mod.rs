@@ -141,7 +141,7 @@ fn caller_probe_ms(t: Tier) -> u32 {
 
 fn is_tierset(f: &QFrame) -> bool {
     f.buf
-        .first()
+        .get(1)
         .is_some_and(|b| b >> 4 == FrameType::TierSet as u8)
 }
 

@@ -115,10 +115,21 @@ fn parse_sreg(arg: &str) -> Result<AtCmd<'_>, AtError> {
         return Ok(AtCmd::GetReg(n));
     }
     let val = tail.strip_prefix('=').ok_or(AtError::BadArg)?.trim();
-    if val.is_empty() || !val.bytes().all(|b| b.is_ascii_digit()) {
+    // S30 (TX power in dBm) is the only signed register: it alone takes a
+    // leading '-', stored as the two's complement of an i16.
+    let (neg, digits) = match val.strip_prefix('-') {
+        Some(d) if n == REG_TX_POWER => (true, d),
+        _ => (false, val),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(AtError::BadArg);
     }
-    let v: u16 = val.parse().map_err(|_| AtError::BadArg)?;
+    if n == REG_TX_POWER {
+        let m: i16 = digits.parse().map_err(|_| AtError::BadArg)?;
+        let v = if neg { m.wrapping_neg() } else { m };
+        return Ok(AtCmd::SetReg(n, v as u16));
+    }
+    let v: u16 = digits.parse().map_err(|_| AtError::BadArg)?;
     Ok(AtCmd::SetReg(n, v))
 }
 
@@ -223,8 +234,12 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
     }
 }
 
-/// (register, min, max, default)
-const REGS: [(u8, u16, u16, u16); 7] = [
+/// S30: SX1262 chip output power in dBm (signed, -9 to 22, default 2).
+pub const REG_TX_POWER: u8 = 30;
+
+/// (register, min, max, default). Values are compared as i16; S30 is stored
+/// as the two's complement of its i16 value, the others are never negative.
+const REGS: [(u8, i16, i16, i16); 8] = [
     (0, 0, 255, 0),
     (2, 0, 127, 43),
     (7, 1, 255, 30),
@@ -232,11 +247,12 @@ const REGS: [(u8, u16, u16, u16); 7] = [
     (20, 0, 200, 20),
     (21, 0, 7, 7),
     (22, 1, 255, 20),
+    (REG_TX_POWER, -9, 22, 2),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SRegs {
-    vals: [u16; 7],
+    vals: [u16; 8],
 }
 
 impl Default for SRegs {
@@ -247,12 +263,12 @@ impl Default for SRegs {
 
 impl SRegs {
     /// Register numbers present, for `AT&V`.
-    pub const NUMBERS: [u8; 7] = [0, 2, 7, 12, 20, 21, 22];
+    pub const NUMBERS: [u8; 8] = [0, 2, 7, 12, 20, 21, 22, 30];
 
     pub fn new() -> Self {
-        let mut vals = [0u16; 7];
+        let mut vals = [0u16; 8];
         for (v, r) in vals.iter_mut().zip(REGS.iter()) {
-            *v = r.3;
+            *v = r.3 as u16;
         }
         SRegs { vals }
     }
@@ -269,7 +285,8 @@ impl SRegs {
     pub fn set(&mut self, n: u8, v: u16) -> bool {
         let Some(i) = Self::index(n) else { return false };
         let Some(r) = REGS.get(i) else { return false };
-        if v < r.1 || v > r.2 {
+        let sv = v as i16;
+        if sv < r.1 || sv > r.2 {
             return false;
         }
         match self.vals.get_mut(i) {
@@ -431,6 +448,6 @@ mod tests {
             assert_eq!(s.get(n), None, "S{n} should not exist");
             assert!(!SRegs::new().set(n, 0));
         }
-        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22]);
+        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30]);
     }
 }
