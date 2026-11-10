@@ -76,6 +76,17 @@ Notes:
 - AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
 - S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.
 
+## Front panel (OLED)
+
+- 0.96 inch SSD1306 (128x64) front panel drawn by the panel task (core 0, priority 2, 20 fps cap). The modem task publishes a status copy each loop; the panel never calls the core.
+- Top row: eight blinky lights OH CD SD RD HS EC DC AA, boxed and filled when lit. SD and RD are held lit 80 ms so short bursts stay visible. DC stays dark until compression exists. The board LED (GPIO35) follows SD or RD.
+- Middle: the state word (IDLE, DIALING, RING, TRAINING, ONLINE, CMD) or, in a call, the tier (`SF7 BW500`) with `ONLINE 21875 BPS` (or `CMD ...` in online command mode) and an eight cell tier ladder. `RADIO FAIL` replaces it when the radio is not usable.
+- Bottom: `LFD3K-SM`, the last heard RSSI (dBm) and SNR (dB), and an RSSI bar (-130 to -30 dBm) and SNR bar (-20 to +10 dB).
+- Animations: OH blinks while dialing (2.5 Hz), a sweep runs across the eight tiers while training and the chosen tier flashes when training ends, idle shows a breathing carrier bar (2 s), RING flashes inverted.
+- Boot splash for 1 s: `LFD3K-SM`, `r.420`, `BL4Z3B4ND`.
+- `panel_snapshot` returns the last drawn frame (1024 bytes, SSD1306 page order, bit 0 = top row) for AT+FB. The drawing code is the pure function `panel_render` (no ESP-IDF calls) so the PC tool can render the same screens.
+- Own hand-made 5x7 ASCII font (font5x7.h), no library fonts.
+
 ## Change log
 
 - 2026-11-10: FFI device glue (lfd3k.h C ABI), AT+FB, LAST CRASH on ATI, RADIO line in AT&V, resetting device panic handler.
@@ -89,3 +100,4 @@ Notes:
 - 2026-11-10: +++ under backpressure stays data: any data the host offers (even bytes the full send window refuses) counts against the escape guard time, and held + characters followed by more input are sent as data.
 - 2026-11-10: Final review wave. ATA in online command mode prints ERROR and keeps the call (was NO CARRIER). A partial command line from before CONNECT is dropped. Config::new checks the station name (1 to 16 printable ASCII) and returns None otherwise. Escape timing fix found by the new fuzz test: a completed +++ whose closing guard has run out now escapes when the host's next byte arrives, even before the next tick (the byte was sent as data with the +++ before). New tests: S21 tier cap held against the answerer's up retrain, answerer cap lower than caller's, manual ATA with S0=0, BUSY for a third caller while in a call, numeric result codes, ATZ in a call, ATA online, partial line before CONNECT, Config name check, and a data mode escape fuzz (600 cases, fresh call each, S12 from 0 to 50, random gaps around the guard). 40 tests (15 core unit, 20 scenario, 5 fuzz), all passing, none ignored.
 - 2026-11-10: Phase 2 task 1, core prep for the air: link.rs split into link/{mod,setup,data,retrain}.rs (no behavior change), air id byte 0xD1 in front of the header (HEADER_LEN 5, MAX_PAYLOAD 250, byte 1 now carries type and flags, so the MORE flag is set there), SF5/SF6 airtime fixed, S30 TX power, CHANNEL_HZ. Existing tests updated only for the header layout (frame byte offsets in frame.rs, calls.rs and fuzz.rs); no timing expectation needed to change.
+- 2026-11-10: Phase 2 task 5, OLED front panel (SSD1306 over the IDF I2C master driver), lights, animations, splash, thread-safe snapshot for AT+FB.

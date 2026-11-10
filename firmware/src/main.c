@@ -90,6 +90,7 @@ static void modem_task(void *arg)
 {
     (void)arg;
     hal_radio_init(xTaskGetCurrentTaskHandle());
+    panel_start(); /* after Vext is on */
     usb_link_init();
     usb_link_set_notify(xTaskGetCurrentTaskHandle());
 
@@ -125,6 +126,9 @@ static void modem_task(void *arg)
         }
 
         lfd3k_poll(now_ms);
+        lfd3k_status_t st;
+        lfd3k_status(now_ms, &st);
+        panel_publish(&st);
 
         /* Out to the host, never waiting. During a dump the core's own ring holds output. */
         if (s_dump_active) {
