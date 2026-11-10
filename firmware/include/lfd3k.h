@@ -90,8 +90,11 @@ int      lfd3k_load_settings(const uint8_t *blob, size_t len);
  * request is kept. */
 #define LFD3K_BLOB_LEN 1024
 bool     lfd3k_take_save(uint8_t *blob, size_t cap, size_t *len);
-/* First boot: factory settings, hotspot password ap_pass (8 to 63 printable
- * characters); asks for a save. A bad password changes nothing. */
+/* First boot only: call it just after lfd3k_load_settings returned -1. It
+ * replaces ALL settings with factory ones: S registers, E and V go back to
+ * their power-on values and the hotspot reuses the current AP ssid, with
+ * password ap_pass (8 to 63 printable characters, no comma); asks for a
+ * save. A bad password changes nothing. */
 void     lfd3k_default_settings(const char *ap_pass);
 void     lfd3k_get_wifi_config(lfd3k_wifi_cfg_t *out);
 /* True once after AT+WAP, AT+WSTA, ATZ or a load changed Wi-Fi settings. */

@@ -11,11 +11,15 @@
 #include "hal_radio.h"
 #include "lfd3k.h"
 #include "panel.h"
+#include "settings_store.h"
+#include "tcp_link.h"
 #include "usb_link.h"
+#include "wifi_link.h"
+#include "wire_pump.h"
 
 static const char *TAG = "lfd3k";
 
-#define MODEM_STACK   16384 /* Modem (~5.2 KB) is built on this stack inside lfd3k_init */
+#define MODEM_STACK   16384 /* the Modem is built in place in the core's static slot; STACK FREE in AT&V shows the headroom */
 #define OUT_CHUNK     128
 #define IN_PENDING    256
 
@@ -25,6 +29,12 @@ static const char *TAG = "lfd3k";
 #define DUMP_HEX      (FB_BYTES * 2)
 #define DUMP_TAIL     6
 #define DUMP_TOTAL    (DUMP_HEAD + DUMP_HEX + DUMP_TAIL)
+
+/* Settings save: held until no call is active, then written to NVS. */
+static uint8_t s_blob[LFD3K_BLOB_LEN];
+static size_t s_blob_len;
+static bool s_save_held;
+static uint32_t s_save_retry_ms;
 
 static uint8_t s_fb[FB_BYTES];
 static bool s_fb_wanted;   /* AT+FB seen, waiting for earlier output to drain */
@@ -86,6 +96,38 @@ static bool drain_host_out(void)
     }
 }
 
+/* Boot: load the saved settings, or make factory ones with a fresh hotspot password. */
+static void load_or_default_settings(void)
+{
+    size_t len = 0;
+    if (settings_store_load(s_blob, sizeof(s_blob), &len) && lfd3k_load_settings(s_blob, len) == 0) {
+        ESP_LOGI(TAG, "settings loaded (%u bytes)", (unsigned)len);
+        return;
+    }
+    char pass[13];
+    settings_store_gen_ap_pass(pass);
+    lfd3k_default_settings(pass); /* only valid after a rejected load; asks for a save */
+    memset(pass, 0, sizeof(pass));
+    ESP_LOGI(TAG, "first boot: factory settings");
+}
+
+/* Saves wait for the call to end (a flash write must not stall a live call). */
+static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
+{
+    if (lfd3k_take_save(s_blob, sizeof(s_blob), &s_blob_len)) {
+        s_save_held = true; /* a newer blob replaces a held one */
+        s_save_retry_ms = 0;
+    }
+    if (s_save_held && st->state == 0 && st->wire == 0 &&
+        (int32_t)(now_ms - s_save_retry_ms) >= 0) {
+        if (settings_store_save(s_blob, s_blob_len)) {
+            s_save_held = false;
+        } else {
+            s_save_retry_ms = now_ms + 5000;
+        }
+    }
+}
+
 static void modem_task(void *arg)
 {
     (void)arg;
@@ -106,7 +148,18 @@ static void modem_task(void *arg)
     int rc = lfd3k_init(name, note_len ? note : NULL, note_len);
     ESP_LOGI(TAG, "%s core init rc=%d, last crash note %u bytes", name, rc, (unsigned)note_len);
 
+    load_or_default_settings();
+    tcp_link_init(xTaskGetCurrentTaskHandle());
+    {
+        lfd3k_wifi_cfg_t wc;
+        (void)lfd3k_take_wifi_changed(); /* the load just reported; the config below is current */
+        lfd3k_get_wifi_config(&wc);
+        wifi_link_apply(&wc);
+        memset(&wc, 0, sizeof(wc));
+    }
+
     esp_task_wdt_add(NULL);
+    uint32_t last_second = (uint32_t)(esp_timer_get_time() / 1000);
 
     uint8_t pend[IN_PENDING];
     size_t pend_len = 0;
@@ -128,9 +181,30 @@ static void modem_task(void *arg)
         }
 
         lfd3k_poll(now_ms);
+        wire_pump(now_ms);
+
+        if (lfd3k_take_wifi_changed()) {
+            lfd3k_wifi_cfg_t wc;
+            lfd3k_get_wifi_config(&wc);
+            wifi_link_apply(&wc);
+            memset(&wc, 0, sizeof(wc));
+        }
+        if (wifi_link_take_ap_joined()) {
+            lfd3k_note_ap_client_joined();
+        }
+
         lfd3k_status_t st;
         lfd3k_status(now_ms, &st);
         panel_publish(&st);
+        save_step(now_ms, &st);
+
+        if ((uint32_t)(now_ms - last_second) >= 1000) {
+            last_second = now_ms;
+            char line[96];
+            wifi_link_get_status(line, sizeof(line));
+            lfd3k_set_wifi_status(line);
+            lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+        }
 
         /* Out to the host, never waiting. During a dump the core's own ring holds output. */
         if (s_dump_active) {
@@ -153,5 +227,7 @@ static void modem_task(void *arg)
 
 void app_main(void)
 {
+    settings_store_init();
+    wifi_link_init(); /* driver only; the radio starts when the modem task applies the config */
     xTaskCreatePinnedToCore(modem_task, "modem", MODEM_STACK, NULL, 20, NULL, 1);
 }

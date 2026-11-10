@@ -291,8 +291,9 @@ fn onoff(on: bool) -> &'static [u8] {
 }
 
 impl Modem {
-    /// Never inlined: the result is returned through a caller supplied slot
-    /// (see `lfd3k_init`), so a 11 KB `Modem` is built where it will live.
+    /// Builds a `Modem` by value (the host tests and the sim use this). It is
+    /// large (about 11 KB); the firmware does not call it: `lfd3k_init` starts
+    /// from the const `Modem::blank()` in a static slot and calls `reset`.
     #[inline(never)]
     pub fn new(cfg: Config) -> Self {
         let mut m = Self::blank();
