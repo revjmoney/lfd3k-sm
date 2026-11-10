@@ -26,5 +26,8 @@ bool udp_link_open(const uint8_t ip[4]);
 bool udp_link_close(void);
 /* One received datagram, if any. */
 bool udp_link_recv(udp_dgram_t *out);
+/* True while SimNet is on but the socket could not be opened (socket or bind
+ * failed). A new open (AT+SIMNET=<ip> again) retries; a close clears it. */
+bool udp_link_net_failed(void);
 
 #endif

@@ -294,6 +294,8 @@ pub struct Modem {
     simnet: Option<[u8; 4]>,
     /// A switch the platform has not taken yet (see `take_simnet_request`).
     simnet_req: Option<Option<[u8; 4]>>,
+    /// The platform could not open the SimNet UDP socket (AT&V `NET FAIL`).
+    simnet_fail: bool,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -355,6 +357,7 @@ impl Modem {
             stack_free: None,
             simnet: None,
             simnet_req: None,
+            simnet_fail: false,
         }
     }
 
@@ -393,6 +396,7 @@ impl Modem {
         self.stack_free = None;
         self.simnet = None;
         self.simnet_req = None;
+        self.simnet_fail = false;
     }
 
     /// The platform's live Wi-Fi status line for `AT+WIFI?`
@@ -500,6 +504,14 @@ impl Modem {
     /// The simulated radio's peer while `AT+SIMNET` has it on.
     pub fn simnet(&self) -> Option<[u8; 4]> {
         self.simnet
+    }
+
+    /// The platform's SimNet socket state: `true` when it could not be
+    /// opened (socket or bind failed). AT&V then shows `NET FAIL` after the
+    /// `RADIO SIMNET <ip>` line's address; the modem stays on SimNet and
+    /// `AT+SIMNET=0` (or `AT+SIMNET=<ip>` again, a retry) recovers.
+    pub fn set_simnet_net_fail(&mut self, fail: bool) {
+        self.simnet_fail = fail;
     }
 
     /// The radio was swapped: listen again on the next pump.
@@ -1046,6 +1058,9 @@ impl Modem {
                     let mut t = Txt::new();
                     t.put(b"RADIO SIMNET ");
                     put_ip(&mut t, ip);
+                    if self.simnet_fail {
+                        t.put(b" NET FAIL");
+                    }
                     self.info(t.bytes());
                 } else if let Some((code, errs)) = self.radio_diag {
                     let mut t = Txt::new();
@@ -1250,6 +1265,7 @@ impl Modem {
                 if idle {
                     self.simnet = ip;
                     self.simnet_req = Some(ip);
+                    self.simnet_fail = false;
                 }
                 self.ok_or_error(idle);
             }

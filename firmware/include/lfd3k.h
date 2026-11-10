@@ -94,6 +94,12 @@ int      lfd3k_take_simnet(uint8_t ip[4]);
 /* A datagram from the peer (header and frame). Returns len (always all of
  * it), 0 before init. Call lfd3k_poll after a batch. now_ms is unused. */
 size_t   lfd3k_udp_in(const uint8_t *d, size_t len, uint32_t now_ms);
+/* The UDP socket could not be opened (socket or bind failed): AT&V shows
+ * RADIO SIMNET <ip> NET FAIL. Call each loop with the UDP task's state. */
+void     lfd3k_set_simnet_net_fail(bool fail);
+/* Milliseconds until the simulated radio needs lfd3k_poll again (a frame's
+ * airtime ends), UINT32_MAX when nothing is pending or SimNet is off. */
+uint32_t lfd3k_simnet_due_ms(void);
 
 /* ---- Settings (NVS blob) and Wi-Fi. ---- */
 

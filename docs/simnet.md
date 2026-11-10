@@ -18,8 +18,16 @@ SimNet is never saved: every boot starts on the real radio.
 - The repo at `F:\lfd3k-sm` with Rust installed (the same setup as the demo).
 
 The first time the PC tool opens UDP port 4210, Windows may ask whether to
-allow it through the firewall. Allow it on private networks, or the V4's
-datagrams never reach the PC. Nothing here changes firewall settings for you.
+allow it through the firewall. Allow it, or the V4's datagrams never reach
+the PC. Nothing here changes firewall settings for you. Two things to know:
+
+- The allow applies to one network profile. If your home network is set to
+  Public in Windows, allowing "private networks" is not enough: set the
+  network to Private, or allow `lfd3k-pcmodem.exe` for the Public profile.
+- The debug build (`cargo run`) and a release build (`cargo run --release`)
+  are two different programs to Windows, so each asks once.
+
+If the V4 shows nothing when you dial, check this first.
 
 ## Plain call: PC dials the V4
 
@@ -100,7 +108,7 @@ after `+++` and in `AT&V`). `--snr 3` sets a fixed signal level instead
 |--------|---------|
 | `--peer <ip>` | The V4's address (required) |
 | `--port <n>` | The peer's UDP port (default 4210) |
-| `--bind <addr:port>` | The PC's own UDP socket (default `0.0.0.0:4210`) |
+| `--bind <addr:port>` | The PC's own UDP socket (default `0.0.0.0:4210`). When calling the V4, keep port 4210: the V4 always sends to port 4210 of the PC. Other ports are only for two PC modems on one PC |
 | `--name <NAME>` | The PC modem's station name (default `PCMODEM`) |
 | `--snr <dB>` | What the V4 hears from the PC (default 8) |
 | `--profile dip` | 12 dB dip from 15 s to 35 s into each call |

@@ -47,12 +47,15 @@ static uint8_t s_udp_ip[4];
 /* AT+SIMNET: open or close the UDP socket as the core switched radios. */
 static void simnet_step(void)
 {
-    uint8_t ip[4];
+    uint8_t ip[4] = {0};
     int sw = lfd3k_take_simnet(ip);
     if (sw >= 0) {
         s_udp_want = sw;
-        memcpy(s_udp_ip, ip, sizeof(ip));
+        if (sw == 1) {
+            memcpy(s_udp_ip, ip, sizeof(ip));
+        }
     }
+    lfd3k_set_simnet_net_fail(udp_link_net_failed());
     if (s_udp_want == 1 && udp_link_open(s_udp_ip)) {
         s_udp_want = -1;
     } else if (s_udp_want == 0 && udp_link_close()) {
@@ -201,7 +204,11 @@ static void modem_task(void *arg)
 
     for (;;) {
         esp_task_wdt_reset();
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        /* 10 ms tick, or sooner when a SimNet frame's airtime ends then. */
+        uint32_t wait_ms = lfd3k_simnet_due_ms();
+        if (wait_ms > 10) wait_ms = 10;
+        if (wait_ms < 1) wait_ms = 1;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
         /* Host bytes in; whatever the core does not take stays for next time. */

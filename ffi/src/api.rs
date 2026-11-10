@@ -519,6 +519,30 @@ pub unsafe extern "C" fn lfd3k_udp_in(d: *const u8, len: usize, now_ms: u32) -> 
     .unwrap_or(0)
 }
 
+/// The firmware's SimNet socket state: nonzero when the UDP socket could
+/// not be opened (AT&V shows `RADIO SIMNET <ip> NET FAIL`). Call each loop.
+#[no_mangle]
+pub extern "C" fn lfd3k_set_simnet_net_fail(fail: bool) {
+    with_device(|d| d.modem.set_simnet_net_fail(fail));
+}
+
+/// Milliseconds until the simulated radio needs `lfd3k_poll` again (a
+/// transmission or a held frame ends), rounded up; `u32::MAX` when nothing
+/// is pending, SimNet is off, or before init. The modem task waits at most
+/// this long so frames are delivered on time.
+#[no_mangle]
+pub extern "C" fn lfd3k_simnet_due_ms() -> u32 {
+    with_device(|d| {
+        if !d.radio.on_sim() {
+            return u32::MAX;
+        }
+        d.radio.sim.next_due_us().map_or(u32::MAX, |us| {
+            u32::try_from(us.saturating_add(999) / 1000).unwrap_or(u32::MAX)
+        })
+    })
+    .unwrap_or(u32::MAX)
+}
+
 /// Status for the lights and the OLED. Mirrored in `lfd3k.h`.
 #[allow(non_camel_case_types)]
 #[repr(C)]

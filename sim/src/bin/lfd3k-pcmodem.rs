@@ -31,7 +31,8 @@
 //!   output or in the bytes received over the wire, after the last match;
 //! - `sleep <ms>`.
 //!
-//! Everything is logged with timestamps; exit 0 when the script ends, 1 on a
+//! Everything is logged with timestamps (`>>` typed, `<<` host output, `<w`
+//! wire bytes, `*` notes); exit 0 when the script ends, 1 on a
 //! failed expect.
 
 use std::collections::VecDeque;
@@ -48,6 +49,9 @@ const DIP_START_MS: u32 = 15_000;
 const DIP_LEN_MS: u32 = 20_000;
 const DIP_DB: i16 = 12;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Most bytes kept for a socket that is not taking them; past this the
+/// modem's own wire ring and backpressure hold the rest.
+const WIRE_OUT_CAP: usize = 64 * 1024;
 
 struct Args {
     peer: IpAddr,
@@ -234,7 +238,7 @@ fn wire_service(w: &mut Wire, m: &mut Modem, now: u32, got: &mut Vec<u8>, log: &
     // 4. Move bytes.
     let mut closed = false;
     if let Wire::Open { s, pend, out, eof } = w {
-        loop {
+        while out.len() < WIRE_OUT_CAP {
             let n = m.wire_output(&mut buf);
             if n == 0 {
                 break;
@@ -300,7 +304,7 @@ impl Log {
 
     fn note(&mut self, now: u32, s: &str) {
         if self.script {
-            println!("{} -- {s}", Self::stamp(now));
+            println!("{} *  {s}", Self::stamp(now));
         } else {
             eprintln!("[pcmodem] {s}");
         }

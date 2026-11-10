@@ -203,6 +203,20 @@ impl<T: DatagramPort> SimNetRadio<T> {
         self.receiving().map_or(RSSI_FLOOR, |h| h.info.rssi_dbm)
     }
 
+    /// Microseconds from now until `service` has something to do (a
+    /// transmission or a held frame ends), `None` when nothing is pending.
+    /// The platform can sleep that long instead of its usual tick.
+    pub fn next_due_us(&self) -> Option<u64> {
+        let now = self.port.now_us();
+        let tx = self.tx_end_us;
+        let rx = self.front().map(|h| h.end_us);
+        let due = match (tx, rx) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        due.map(|d| d.saturating_sub(now))
+    }
+
     /// A datagram from the peer. Malformed ones, wrong-tier ones, any while
     /// transmitting, and any beyond the queue are dropped.
     pub fn on_datagram(&mut self, d: &[u8]) {

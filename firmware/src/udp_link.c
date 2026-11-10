@@ -1,6 +1,7 @@
 #include "udp_link.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <string.h>
 #include "esp_log.h"
 #include "freertos/queue.h"
@@ -22,6 +23,7 @@ static QueueHandle_t s_cmdq;
 static QueueHandle_t s_txq; /* modem -> socket */
 static QueueHandle_t s_rxq; /* socket -> modem */
 static TaskHandle_t s_notify;
+static atomic_bool s_net_fail; /* written by the UDP task, read by the modem task */
 
 static void drain_tx(void)
 {
@@ -55,6 +57,9 @@ static void udp_task(void *arg)
 {
     (void)arg;
     static udp_dgram_t d; /* this task only; kept off the small stack */
+    /* One byte more than the largest datagram, so a longer one is seen and
+     * dropped (lwip truncates silently, with no MSG_TRUNC). */
+    static uint8_t rxb[LFD3K_SIMNET_DGRAM_MAX + 1];
     int fd = -1;
     struct sockaddr_in peer = { .sin_family = AF_INET, .sin_port = htons(LFD3K_SIMNET_PORT) };
     for (;;) {
@@ -68,12 +73,14 @@ static void udp_task(void *arg)
                 if (fd < 0) {
                     fd = open_socket();
                 }
+                atomic_store(&s_net_fail, fd < 0);
                 ESP_LOGI(TAG, "simnet on, peer %u.%u.%u.%u", c.ip[0], c.ip[1], c.ip[2], c.ip[3]);
             } else {
                 if (fd >= 0) {
                     close(fd);
                     fd = -1;
                 }
+                atomic_store(&s_net_fail, false);
                 drain_tx(); /* nothing from the old peer goes out later */
                 ESP_LOGI(TAG, "simnet off");
             }
@@ -106,13 +113,15 @@ static void udp_task(void *arg)
         for (int i = 0; i < QUEUE_DEPTH; i++) {
             struct sockaddr_in from;
             socklen_t fl = sizeof(from);
-            ssize_t n = recvfrom(fd, d.data, sizeof(d.data), MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
+            ssize_t n = recvfrom(fd, rxb, sizeof(rxb), MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
             if (n < 0) {
                 break;
             }
-            if (from.sin_addr.s_addr != peer.sin_addr.s_addr || n < LFD3K_SIMNET_HDR_LEN) {
-                continue; /* only the peer, only whole headers */
+            if (from.sin_addr.s_addr != peer.sin_addr.s_addr || n < LFD3K_SIMNET_HDR_LEN ||
+                n > LFD3K_SIMNET_DGRAM_MAX) {
+                continue; /* only the peer, only whole headers, never a cut datagram */
             }
+            memcpy(d.data, rxb, (size_t)n);
             d.len = (uint16_t)n;
             if (xQueueSend(s_rxq, &d, 0) == pdTRUE) { /* full: dropped, like a missed frame */
                 got = true;
@@ -145,6 +154,11 @@ bool udp_link_close(void)
 {
     udp_cmd_t c = { .type = CMD_CLOSE };
     return xQueueSend(s_cmdq, &c, 0) == pdTRUE;
+}
+
+bool udp_link_net_failed(void)
+{
+    return atomic_load(&s_net_fail);
 }
 
 bool udp_link_recv(udp_dgram_t *out)
