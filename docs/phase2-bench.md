@@ -1,4 +1,4 @@
-# Phase 2 bench sheet
+﻿# Phase 2 bench sheet
 
 For Rev. This is the list you follow to back up the V4, flash the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM onto it, check it on the air, and put Radar back.
 
@@ -30,7 +30,7 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 2. Read the whole flash. Use today's date in the file name:
 
    ```
-   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --no-stub --after no-reset read_flash 0 0x1000000 F:\lfd3k-sm\backups\v4-simian-radar-YYYY-MM-DD.bin
+   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --no-stub --after no_reset read_flash 0 0x1000000 F:\lfd3k-sm\backups\v4-simian-radar-YYYY-MM-DD.bin
    ```
 
 3. Wait. It takes about 8 minutes on this V4 (the `--no-stub` read is slow). Do not unplug.
@@ -43,7 +43,7 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 5. Read the first 64 KB a second time into a new file:
 
    ```
-   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --no-stub --after no-reset read_flash 0 0x10000 F:\lfd3k-sm\backups\check-first64k.bin
+   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --no-stub --after no_reset read_flash 0 0x10000 F:\lfd3k-sm\backups\check-first64k.bin
    ```
 
 6. Compare it with the start of the backup. Make a 64 KB copy of the backup's start, then compare:
@@ -82,7 +82,7 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 2. Erase the chip. This clears the old otadata and the Radar settings, so the chip cannot boot the wrong slot:
 
    ```
-   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --after no-reset erase_flash
+   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --after no_reset erase_flash
    ```
 
 3. It stays in download mode for the next step. If the port vanished anyway, unplug the V4, hold the PRG button while you plug it back in (that forces download mode), then check the COM number again in Device Manager.
@@ -186,3 +186,16 @@ The bench terminal only opens the port once it has checked the USB identity. It 
    ```
    python F:\lfd3k-sm\tools\fb2png.py saved.txt oled.png
    ```
+
+## Bench results, 2026-11-10 (first flash)
+
+- Board: Heltec V4, ESP32-S3 (QFN56) rev v0.2, 2 MB PSRAM, MAC 88:56:A6:96:16:FC, on COM11 (VID 303A PID 1001). Modem name AXISMODEM-16FC.
+- Backup: `backups\v4-simian-radar-2026-11-10.bin`, 16,777,216 bytes, SHA256 8DF2531CB7ABDA3F630F0199B68080FDD59944408A89CEFE4874AD96B86A0B55. First 64 KB re-read matched (`fc.exe`: no differences). The `--no-stub` read took 1540 s (about 26 minutes, not 8).
+- esptool 4.9 spells the flag `--after no_reset` (underscore); this sheet now uses it.
+- Erase 14.8 s, flash via `pio run -t upload`: bootloader, partition table, otadata and app (332,896 B) all hash-verified, watchdog reset into the app.
+- Terminal (`lfd3k_term.py`, DTR and RTS held off): opening and closing the port does not reset the board, and no ROM banner shows on USB.
+- `ATI`: the three banner lines. `AT&V`: S30=2, `TX POWER S30=2 dBm chip, about 14 dBm out`, `RADIO OK`, `TIER NONE`.
+- `ATDT TEST` (antenna on, 918.5 MHz, SF12): `DIALING TEST`, `RINGING` every few seconds, `NO ANSWER` after the 30 s S7 timeout. Proves TX, TX done, return to receive and the call timers on real hardware. `RADIO OK` afterwards.
+- OLED screenshots: `docs/phase2-bench/oled-idle.png`, `oled-dialing.png`, `oled-after.png`. Orientation correct, font and lights as in the mockups.
+- Not done: SDR decode (NESDR availability not confirmed). Two-radio call waits for the second V4.
+- Noticed: `AT` typed while dialing answered `OK` and the dial carried on; a classic Hayes modem aborts a dial on any key. Decide later.
