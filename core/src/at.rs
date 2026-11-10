@@ -22,6 +22,8 @@ pub enum AtCmd<'a> {
     GetReg(u8),
     ShowConfig,
     Reset,
+    /// `AT+FB`: dump the frame buffer (the firmware answers).
+    FrameBuffer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,6 +60,13 @@ pub fn parse_line(line: &str) -> Result<AtCmd<'_>, AtError> {
         b'&' => {
             if arg.eq_ignore_ascii_case("V") {
                 Ok(AtCmd::ShowConfig)
+            } else {
+                Err(AtError::Unknown)
+            }
+        }
+        b'+' => {
+            if arg.eq_ignore_ascii_case("FB") {
+                Ok(AtCmd::FrameBuffer)
             } else {
                 Err(AtError::Unknown)
             }

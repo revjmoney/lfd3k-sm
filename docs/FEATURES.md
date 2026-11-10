@@ -20,6 +20,8 @@
 | Calling channel: 918.5 MHz (`CHANNEL_HZ`, SX1262 frequency word 0x3968_0000), BW 500 kHz, CR 4/5, preamble 8 symbols (12 at SF5 and SF6) | done | 2026-11-10 |
 | SF5 and SF6 time on air fixed to the SX1261/2 datasheet form (payload numerator 8*PL + 16 - 4*SF + 20); SF5 with 1 payload byte is 2320 us | done | 2026-11-10 |
 | TX power setting S30 (SX1262 chip output in dBm, signed) and the TX POWER line in AT&V | done | 2026-11-10 |
+| FFI device glue: one static Modem plus SX1262 driver behind a C ABI (`lfd3k_init`, `lfd3k_poll`, `lfd3k_host_in`, `lfd3k_host_out`, `lfd3k_take_fb_request`, `lfd3k_status`), S30 changes applied to the radio at runtime, device panic handler stores `file:line` through the HAL and restarts | done | 2026-11-10 |
+| AT+FB frame buffer dump request (the modem only raises a flag; the firmware writes the dump and OK), LAST CRASH line on ATI, RADIO line in AT&V | done | 2026-11-10 |
 | Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library and logs LFD3K-SM core <version> once a second; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs | done | 2026-11-10 |
 
 ## Settings
@@ -51,6 +53,7 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | ATE0, ATE1 | Echo off or on |
 | ATSn=v, ATSn? | Set or read S register |
 | AT&V | Show configuration |
+| AT+FB | Dump the frame buffer (answered by the firmware: no OK from the modem) |
 | ATZ | Reset |
 
 Result codes: OK 0, CONNECT 1, RING 2, NO CARRIER 3, ERROR 4, BUSY 7, NO ANSWER 8.
@@ -68,10 +71,13 @@ Notes:
 - The station name is 1 to 16 printable ASCII characters (Config::new refuses anything else).
 - ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
 
+- ATI gets a fourth line `LAST CRASH: <note>` only when the previous boot ended in a panic (the note is `file:line`, up to 64 printable characters). With no crash it prints three lines, as before.
+- AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
 - S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.
 
 ## Change log
 
+- 2026-11-10: FFI device glue (lfd3k.h C ABI), AT+FB, LAST CRASH on ATI, RADIO line in AT&V, resetting device panic handler.
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.
 - 2026-11-09: Call state machine and Modem: call setup, training, data, retrain, resync, escape, online command mode, ATI release name.
 - 2026-11-10: Retrain notices kept off the data stream, tier cap honored both ways, resync and queue fixes.

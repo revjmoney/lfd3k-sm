@@ -30,6 +30,7 @@ pub const GET_RX_BUFFER_STATUS: u8 = 0x13;
 pub const GET_PACKET_STATUS: u8 = 0x14;
 pub const GET_STATUS: u8 = 0xC0;
 pub const CLEAR_DEVICE_ERRORS: u8 = 0x07;
+pub const GET_DEVICE_ERRORS: u8 = 0x17;
 pub const SET_RX_TX_FALLBACK_MODE: u8 = 0x93;
 
 /// Filler byte clocked out while reading.
@@ -224,6 +225,11 @@ pub const fn get_packet_status() -> [u8; 5] {
 /// Frame for GetStatus: reply is `[_, status]`.
 pub const fn get_status() -> [u8; 2] {
     [GET_STATUS, NOP]
+}
+
+/// GetDeviceErrors: reply is status, then OpErrors MSB and LSB.
+pub const fn get_device_errors() -> [u8; 4] {
+    [GET_DEVICE_ERRORS, NOP, NOP, NOP]
 }
 
 pub const fn clear_device_errors() -> [u8; 3] {

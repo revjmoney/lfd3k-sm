@@ -67,6 +67,7 @@ name = "lfd3k-ffi"
 version = "0.1.0"
 dependencies = [
  "lfd3k-core",
+ "sx1262",
 ]
 
 [[package]]

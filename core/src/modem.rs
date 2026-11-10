@@ -12,7 +12,7 @@
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::frame::{valid_name, NAME_MAX};
-use crate::link::{Event, Link};
+use crate::link::{Event, Link, State};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::Tier;
 
@@ -30,6 +30,8 @@ const OUT_CAP: usize = 1024;
 /// Output space kept free of call data so result codes always fit.
 const OUT_RESERVE: usize = 96;
 const LINE_CAP: usize = 64;
+/// Longest crash note kept for ATI.
+pub const NOTE_MAX: usize = 64;
 const LIGHT_MS: u32 = 100;
 /// Retrains remembered for AT&V.
 const HISTORY: usize = 4;
@@ -132,13 +134,13 @@ impl OutRing {
 
 /// Small text builder for info lines.
 struct Txt {
-    b: [u8; 160],
+    b: [u8; 256],
     n: usize,
 }
 
 impl Txt {
     fn new() -> Self {
-        Txt { b: [0; 160], n: 0 }
+        Txt { b: [0; 256], n: 0 }
     }
 
     fn put(&mut self, s: &[u8]) -> &mut Self {
@@ -192,6 +194,15 @@ impl Txt {
         }
     }
 
+    /// Hexadecimal, 4 digits.
+    fn hex16(&mut self, v: u16) -> &mut Self {
+        for shift in [12u32, 8, 4, 0] {
+            let d = ((v >> shift) & 0xF) as u8;
+            self.put(&[if d < 10 { b'0' + d } else { b'A' + d - 10 }]);
+        }
+        self
+    }
+
     fn bytes(&self) -> &[u8] {
         self.b.get(..self.n).unwrap_or(&[])
     }
@@ -220,6 +231,15 @@ pub struct Modem {
     retrains: [Option<Tier>; HISTORY],
     /// NO CARRIER waits until received data has drained.
     closing: bool,
+    /// `AT+FB` was seen; the firmware answers it.
+    fb_request: bool,
+    /// Crash note from the last boot (printable ASCII), for ATI.
+    note: [u8; NOTE_MAX],
+    note_len: usize,
+    /// Radio bring-up result for AT&V: (code, device errors word).
+    radio_diag: Option<(i8, u16)>,
+    /// Metadata of the last frame handed to `radio_rx`.
+    last_rx: Option<RxInfo>,
 }
 
 impl Modem {
@@ -245,6 +265,61 @@ impl Modem {
             retrain_note: None,
             retrains: [None; HISTORY],
             closing: false,
+            fb_request: false,
+            note: [0; NOTE_MAX],
+            note_len: 0,
+            radio_diag: None,
+            last_rx: None,
+        }
+    }
+
+    /// Remember the previous boot's crash note for ATI. Only printable
+    /// ASCII is kept (anything else becomes `?`), at most `NOTE_MAX` bytes.
+    pub fn set_last_panic(&mut self, note: &[u8]) {
+        self.note_len = 0;
+        for (d, &c) in self.note.iter_mut().zip(note.iter()) {
+            *d = if (0x20..0x7F).contains(&c) { c } else { b'?' };
+            self.note_len += 1;
+        }
+    }
+
+    /// Radio bring-up result for AT&V: `code` 0 is OK, negative is the
+    /// driver error (-1 busy timeout, -2 no chip, -3 config); `errs` is the
+    /// chip's device-errors word.
+    pub fn set_radio_diag(&mut self, code: i8, errs: u16) {
+        self.radio_diag = Some((code, errs));
+    }
+
+    /// True once after `AT+FB` was entered (clears the flag).
+    pub fn take_fb_request(&mut self) -> bool {
+        core::mem::take(&mut self.fb_request)
+    }
+
+    /// Metadata of the last received frame, if any.
+    pub fn last_rx(&self) -> Option<RxInfo> {
+        self.last_rx
+    }
+
+    /// Current tier while a call is up or training.
+    pub fn tier(&self) -> Option<Tier> {
+        self.link.tier()
+    }
+
+    /// Call state for the status light panel: 0 idle, 1 dialing, 2 ringing,
+    /// 3 training, 4 online (data mode), 5 command-online.
+    pub fn call_state(&self) -> u8 {
+        match self.link.state() {
+            State::Idle => 0,
+            State::Dialing | State::AwaitTrain => 1,
+            State::Ringing => 2,
+            State::AwaitTierSet | State::AwaitTierAck | State::Probe => 3,
+            State::Connected | State::Resync => {
+                if self.mode == Mode::Data {
+                    4
+                } else {
+                    5
+                }
+            }
         }
     }
 
@@ -277,6 +352,7 @@ impl Modem {
     }
 
     pub fn radio_rx<R: Radio>(&mut self, frame: &[u8], info: RxInfo, radio: &mut R, now_ms: u32) {
+        self.last_rx = Some(info);
         self.link
             .on_frame(frame, info, name_of(&self.cfg), &self.cfg.sregs, now_ms);
         self.after(radio, now_ms);
@@ -495,9 +571,14 @@ impl Modem {
                     .put(RELEASE_NAME.as_bytes())
                     .put(b"\r\n")
                     .put(RELEASE_TAGLINE.as_bytes());
+                if self.note_len > 0 {
+                    t.put(b"\r\nLAST CRASH: ")
+                        .put(self.note.get(..self.note_len).unwrap_or(&[]));
+                }
                 self.info(t.bytes());
                 self.result(ResultCode::Ok);
             }
+            AtCmd::FrameBuffer => self.fb_request = true,
             AtCmd::Verbose(v) => {
                 self.verbose = v;
                 self.result(ResultCode::Ok);
@@ -548,6 +629,16 @@ impl Modem {
                     .int(i32::from(dbm) + GC1109_GAIN_DB)
                     .put(b" dBm out");
                 self.info(t.bytes());
+                if let Some((code, errs)) = self.radio_diag {
+                    let mut t = Txt::new();
+                    if code == 0 {
+                        t.put(b"RADIO OK");
+                    } else {
+                        t.put(b"RADIO FAIL ").int(i32::from(code));
+                        t.put(b" ERR 0x").hex16(errs);
+                    }
+                    self.info(t.bytes());
+                }
                 let mut t = Txt::new();
                 t.put(b"TIER ");
                 match self.link.tier().filter(|_| self.link.is_connected()) {

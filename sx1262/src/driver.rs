@@ -195,6 +195,15 @@ impl<B: Bus> Sx1262<B> {
         Ok(())
     }
 
+    /// The chip's device-errors word (GetDeviceErrors, opcode 0x17), for
+    /// diagnostics after a failed `init`. Does not clear it.
+    pub fn device_errors(&mut self) -> Result<u16, Error> {
+        let mut rx = [0u8; 4];
+        self.read(&cmd::get_device_errors(), &mut rx)?;
+        let [_, _, hi, lo] = rx;
+        Ok(u16::from_be_bytes([hi, lo]))
+    }
+
     /// Set chip output power in dBm, clamped to -9..=22. Applied now when
     /// the chip is idle, otherwise at the next `send`. Before `init` the
     /// value is only stored, and `init(power_dbm)` replaces it: init's
