@@ -115,6 +115,153 @@ static void bar(uint8_t *fb, int x, int y, int w, int h, int filled)
     fill(fb, x + 1, y + 1, clampi(filled, 0, w - 2), h - 2, 1);
 }
 
+/* ---- Idle word: digital disintegrate and reintegrate ----
+ * An 8 s loop, a pure function of now_ms (same picture on the PC and the V4):
+ *   0..4000 ms     "IDLE" solid
+ *   4000..5000     it breaks into its 2x2 pixel cells, left to right with jitter;
+ *                  each cell shrinks to one dot and flies off
+ *   ..6000         the dots bounce around the open band, little 0 and 1 bits fly too
+ *   6000..7000     each dot homes back to its cell (eased), the bits vanish
+ *   7000..8000     solid again
+ * Dots and bits fly inside x 0..127, y 13..44, between the lights and the name row. */
+#define DIS_LOOP_MS   8000u
+#define DIS_START_MS  4000u
+#define DIS_SPREAD_MS 600u  /* left to right stagger of the break */
+#define DIS_HOME_MS   6000u
+#define DIS_BACK_MS   500u  /* each dot's trip home */
+#define DIS_JITTER_MS 400u  /* stagger of the trips home */
+#define FLY_X0 0
+#define FLY_X1 127
+#define FLY_Y0 13
+#define FLY_Y1 44
+#define NBITS 7
+
+static uint32_t mix(uint32_t v)
+{
+    v ^= v >> 16;
+    v *= 0x7FEB352Du;
+    v ^= v >> 15;
+    v *= 0x846CA68Bu;
+    v ^= v >> 16;
+    return v;
+}
+
+/* Position along one axis bouncing between lo and hi: start + speed * dt, folded.
+ * Units: 1/256 pixel; speed in 1/256 pixel per ms. */
+static int bounce(int start_q, int speed_q, int dt, int lo, int hi)
+{
+    int lo_q = lo * 256, span = (hi - lo) * 256;
+    if (span <= 0) {
+        return lo;
+    }
+    long long raw = (long long)start_q - lo_q + (long long)speed_q * dt;
+    long long per = 2LL * span;
+    long long p = raw % per;
+    if (p < 0) {
+        p += per;
+    }
+    if (p > span) {
+        p = per - p;
+    }
+    return (int)((lo_q + p) / 256);
+}
+
+/* Signed speed from a hash: 10..30 (1/256 px per ms, about 40 to 120 px/s). */
+static int speed_from(uint32_t h)
+{
+    int s = 10 + (int)(h % 21);
+    return (h & 0x100u) ? s : -s;
+}
+
+/* 3x5 bits, our own: rows top to bottom, bit 2 = left column. */
+static const uint8_t BIT0[5] = {7, 5, 5, 5, 7};
+static const uint8_t BIT1[5] = {2, 6, 2, 2, 7};
+
+static void tiny_bit(uint8_t *fb, int x, int y, int one)
+{
+    const uint8_t *g = one ? BIT1 : BIT0;
+    for (int r = 0; r < 5; r++) {
+        for (int c = 0; c < 3; c++) {
+            if (g[r] & (4u >> c)) {
+                px(fb, x + c, y + r, 1);
+            }
+        }
+    }
+}
+
+static void idle_word(uint8_t *fb, uint32_t now_ms)
+{
+    static const char word[] = "IDLE";
+    const int sc = 2, y0 = 14;
+    const int x0 = (W - text_w(word, sc)) / 2;
+    uint32_t t = now_ms % DIS_LOOP_MS;
+
+    if (t < DIS_START_MS || t >= DIS_HOME_MS + DIS_BACK_MS + DIS_JITTER_MS) {
+        text(fb, x0, y0, word, sc, 1);
+        return;
+    }
+
+    int ndx = 0;
+    for (int ci = 0; word[ci]; ci++) {
+        unsigned c = (unsigned char)word[ci];
+        const uint8_t *g = &font5x7[(c - FONT_FIRST) * 5];
+        for (int col = 0; col < 5; col++) {
+            for (int row = 0; row < 7; row++) {
+                if (!(g[col] & (1u << row))) {
+                    continue;
+                }
+                int hx = x0 + ci * 6 * sc + col * sc;
+                int hy = y0 + row * sc;
+                uint32_t h1 = mix((uint32_t)ndx * 2654435761u + 0x1F3Du);
+                uint32_t h2 = mix(h1 ^ 0xA5A5A5A5u);
+                ndx++;
+
+                /* when this cell breaks: left to right plus jitter */
+                uint32_t brk = DIS_START_MS + (uint32_t)(hx - x0) * DIS_SPREAD_MS / 64u + (h1 % 120u);
+                if (t < brk) {
+                    fill(fb, hx, hy, sc, sc, 1);
+                    continue;
+                }
+                int dt = (int)(t - brk);
+                int vx = speed_from(h1), vy = speed_from(h2) * 2 / 3;
+                int fx = bounce(hx * 256, vx, dt, FLY_X0, FLY_X1);
+                int fy = bounce(hy * 256, vy, dt, FLY_Y0, FLY_Y1);
+
+                uint32_t back = DIS_HOME_MS + (h2 % DIS_JITTER_MS);
+                if (t >= back) {
+                    uint32_t k = t - back; /* 0..DIS_BACK_MS */
+                    if (k >= DIS_BACK_MS) {
+                        fill(fb, hx, hy, sc, sc, 1);
+                        continue;
+                    }
+                    /* ease out: e = 1 - (1 - k)^2, in 1/1024 */
+                    int u = (int)((DIS_BACK_MS - k) * 1024u / DIS_BACK_MS);
+                    int e = 1024 - u * u / 1024;
+                    fx = fx + (hx - fx) * e / 1024;
+                    fy = fy + (hy - fy) * e / 1024;
+                }
+                px(fb, fx, fy, 1);
+            }
+        }
+    }
+
+    /* the bits: born as the word breaks, gone before it is whole again */
+    if (t >= DIS_START_MS + 200u && t < DIS_HOME_MS + 300u) {
+        int dt = (int)(t - DIS_START_MS);
+        for (int b = 0; b < NBITS; b++) {
+            uint32_t h1 = mix((uint32_t)(b + 101) * 40503u);
+            uint32_t h2 = mix(h1 + 0x9E3779B9u);
+            int sx = (x0 + (int)(h1 % 46u)) * 256;
+            int sy = (y0 + (int)(h2 % 10u)) * 256;
+            int x = bounce(sx, speed_from(h2) * 3 / 2, dt, FLY_X0, FLY_X1 - 2);
+            int y = bounce(sy, speed_from(h1), dt, FLY_Y0, FLY_Y1 - 4);
+            /* flip between 0 and 1 now and then */
+            int one = (int)((h1 >> 3) + (uint32_t)dt / (180u + h2 % 200u)) & 1;
+            tiny_bit(fb, x, y, one);
+        }
+    }
+}
+
 void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES])
 {
     memset(fb, 0, PANEL_FB_BYTES);
@@ -197,7 +344,7 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
             }
             break;
         default: {
-            text_c(fb, 14, "IDLE", 2);
+            idle_word(fb, now_ms);
             /* carrier pulse: a bar that breathes, 2 s triangle */
             int t = (int)(now_ms % 2000);
             int tri = t < 1000 ? t : 2000 - t;
