@@ -351,6 +351,65 @@ static void idle_word(uint8_t *fb, uint32_t now_ms)
     }
 }
 
+/* ---- Idle lights shuffle ----
+ * While idle the eight light boxes slide into a new order once per 8 s loop, between
+ * 1000 and 2200 ms of the loop; every fourth loop they sort back to OH CD SD RD HS EC
+ * DC AA. Boxes moving right duck down up to 2 px on the way so they pass under the
+ * ones moving left. Out of idle (a call, RADIO FAIL) they are at home at once. Each
+ * light keeps showing its real state wherever it is. Pure function of now_ms. */
+#define SHUF_LOOP_MS 8000u
+#define SHUF_START   1000u
+#define SHUF_LEN     1200u
+
+static void light_order(uint32_t k, int slot[8])
+{
+    for (int i = 0; i < 8; i++) {
+        slot[i] = i;
+    }
+    if (k % 4u == 0u) {
+        return; /* home order */
+    }
+    uint32_t h = mix(k * 0x9E3779B9u + 0x5EEDu);
+    for (int i = 7; i > 0; i--) {
+        h = mix(h + (uint32_t)i);
+        int j = (int)(h % (uint32_t)(i + 1));
+        int t = slot[i];
+        slot[i] = slot[j];
+        slot[j] = t;
+    }
+}
+
+static void light_layout(int idle, uint32_t now_ms, int lx[8], int ly[8], int moving[8])
+{
+    uint32_t k = now_ms / SHUF_LOOP_MS, t = now_ms % SHUF_LOOP_MS;
+    int cur[8], prev[8];
+    light_order(k, cur);
+    light_order(k == 0u ? 0u : k - 1u, prev);
+    for (int i = 0; i < 8; i++) {
+        lx[i] = i * 16;
+        ly[i] = 0;
+        moving[i] = 0;
+        if (!idle) {
+            continue;
+        }
+        int from = prev[i], to = cur[i];
+        if (t < SHUF_START) {
+            lx[i] = from * 16; /* still in last loop's places */
+        } else if (t >= SHUF_START + SHUF_LEN || from == to) {
+            lx[i] = to * 16;
+        } else {
+            /* ease in and out: smoothstep in 1/1024 */
+            int u = (int)((t - SHUF_START) * 1024u / SHUF_LEN);
+            int e = u * u / 1024 * (3072 - 2 * u) / 1024;
+            lx[i] = from * 16 + (to - from) * 16 * e / 1024;
+            if (to > from) {
+                ly[i] = 2 * 4 * e / 1024 * (1024 - e) / 1024; /* 0..2 px dip */
+            }
+            moving[i] = 1;
+        }
+    }
+}
+
 void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES])
 {
     memset(fb, 0, PANEL_FB_BYTES);
@@ -371,14 +430,23 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
     }
     lights &= (uint8_t)~(1u << 6); /* DC stays off until compression exists */
 
-    for (int i = 0; i < 8; i++) {
-        int x = i * 16;
-        if (lights & (1u << i)) {
-            fill(fb, x, 0, 15, 11, 1);
-            text(fb, x + 2, 2, LIGHT[i], 1, 0);
-        } else {
-            frame(fb, x, 0, 15, 11);
-            text(fb, x + 2, 2, LIGHT[i], 1, 1);
+    int lx[8], ly[8], moving[8];
+    light_layout(s->state == 0 && s->radio_ok, now_ms, lx, ly, moving);
+    /* boxes that stay put first, the ones on the move on top */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < 8; i++) {
+            if (moving[i] != pass) {
+                continue;
+            }
+            int x = lx[i], y = ly[i];
+            if (lights & (1u << i)) {
+                fill(fb, x, y, 15, 11, 1);
+                text(fb, x + 2, y + 2, LIGHT[i], 1, 0);
+            } else {
+                fill(fb, x, y, 15, 11, 0); /* a mover hides what it passes over */
+                frame(fb, x, y, 15, 11);
+                text(fb, x + 2, y + 2, LIGHT[i], 1, 1);
+            }
         }
     }
 
