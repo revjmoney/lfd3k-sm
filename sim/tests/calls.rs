@@ -461,7 +461,7 @@ static TIERACK_DROPPED: AtomicBool = AtomicBool::new(false);
 
 /// Drops the first TierAck on the air, nothing else.
 fn drop_first_tierack(_ms: u32, bytes: &[u8]) -> bool {
-    let is_tierack = bytes.first().map(|b| b >> 4) == Some(FrameType::TierAck as u8);
+    let is_tierack = bytes.get(1).map(|b| b >> 4) == Some(FrameType::TierAck as u8);
     is_tierack && !TIERACK_DROPPED.swap(true, Ordering::SeqCst)
 }
 
@@ -623,11 +623,11 @@ fn stray_frames_ignored_while_idle() {
 }
 
 /// Header length: the first payload byte of a frame is at this index.
-const HDR: usize = 4;
+const HDR: usize = 5;
 
-/// The frame type nibble of raw frame bytes.
+/// The frame type nibble of raw frame bytes (byte 0 is the air id).
 fn ftype_of(bytes: &[u8]) -> Option<u8> {
-    bytes.first().map(|b| b >> 4)
+    bytes.get(1).map(|b| b >> 4)
 }
 
 /// `(send ms, tier index asked)` of every TierSet on the air, per test.
@@ -842,7 +842,7 @@ fn third_caller_gets_busy() {
     third.host_input(b"ATDT AXIS\r", &mut radio, t);
     let req = radio.sent.first().cloned().expect("THIRD sent no CallReq");
     assert_eq!(ftype_of(&req), Some(FrameType::CallReq as u8));
-    let id = req[1];
+    let id = req[2];
     assert_ne!(id, live);
     h.inject_b(&req, Tier::Sf12);
     let rejected = h.run_until(5_000, |h| {
@@ -856,7 +856,7 @@ fn third_caller_gets_busy() {
         .lock()
         .unwrap()
         .iter()
-        .find(|f| f.get(1) == Some(&id))
+        .find(|f| f.get(2) == Some(&id))
         .cloned()
         .expect("CallReject bytes not captured");
     let info = RxInfo {

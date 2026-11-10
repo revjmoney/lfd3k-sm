@@ -14,7 +14,12 @@ struct TxSlot {
     last_ms: u32,
 }
 
-const EMPTY_TX: TxSlot = TxSlot { len: 0, sent: false, acked: false, last_ms: 0 };
+const EMPTY_TX: TxSlot = TxSlot {
+    len: 0,
+    sent: false,
+    acked: false,
+    last_ms: 0,
+};
 
 pub struct ArqTx {
     buf: [[u8; CHUNK]; WINDOW],
@@ -227,9 +232,11 @@ impl ArqRx {
         if self.have.get(r).copied().unwrap_or(true) {
             return true;
         }
-        if let (Some(dst), Some(l), Some(h)) =
-            (self.buf.get_mut(r), self.len.get_mut(r), self.have.get_mut(r))
-        {
+        if let (Some(dst), Some(l), Some(h)) = (
+            self.buf.get_mut(r),
+            self.len.get_mut(r),
+            self.have.get_mut(r),
+        ) {
             if let Some(d) = dst.get_mut(..data.len()) {
                 d.copy_from_slice(data);
             }
@@ -270,7 +277,9 @@ impl ArqRx {
                 // Partial: copy what fits and stop.
                 if let (Some(dst), Some(src)) = (
                     out.get_mut(written..written + n),
-                    self.buf.get(h).and_then(|b| b.get(self.read_off..self.read_off + n)),
+                    self.buf
+                        .get(h)
+                        .and_then(|b| b.get(self.read_off..self.read_off + n)),
                 ) {
                     dst.copy_from_slice(src);
                 }
@@ -280,7 +289,9 @@ impl ArqRx {
             }
             if let (Some(dst), Some(src)) = (
                 out.get_mut(written..written + n),
-                self.buf.get(h).and_then(|b| b.get(self.read_off..self.read_off + n)),
+                self.buf
+                    .get(h)
+                    .and_then(|b| b.get(self.read_off..self.read_off + n)),
             ) {
                 dst.copy_from_slice(src);
             }
@@ -305,7 +316,9 @@ mod tests {
     use super::*;
 
     fn pattern(len: usize, salt: usize) -> Vec<u8> {
-        (0..len).map(|i| ((i * 31 + salt * 17) % 251) as u8).collect()
+        (0..len)
+            .map(|i| ((i * 31 + salt * 17) % 251) as u8)
+            .collect()
     }
 
     fn read_all(rx: &mut ArqRx) -> Vec<u8> {

@@ -5,7 +5,7 @@
 | Name | Status | Date |
 |------|--------|------|
 | Speed tier ladder: 8 LoRa tiers SF12 to SF5 at BW 500 kHz, CR 4/5 (1172 to 62500 bps air rate), SNR floors, best-tier pick, time-on-air estimate | done | 2026-11-09 |
-| Frame format: 4 byte header, 11 frame types, validated encode/decode (no panics), CallReq name payloads, Radio trait | done | 2026-11-09 |
+| Frame format: 5 byte header (air id byte first), 11 frame types, validated encode/decode (no panics), CallReq name payloads, Radio trait | done | 2026-11-09 |
 | AT command set: ATD/ATDT, ATA, ATH, ATO, ATI, ATV, ATE, ATSn=v, ATSn?, AT&V, ATZ; verbose and numeric result codes; S registers with bounds | done | 2026-11-09 |
 | Selective repeat ARQ: window 8, 200 byte chunks, SACK bitmap, timeout retransmit, wrapping u8 seq | done | 2026-11-09 |
 | Call setup and training: ATDT by name on SF12 (DIALING, RINGING), RING and auto-answer (S0), CallAck plus Train with measured SNR, tier pick with S20 margin and S21 cap, TierSet and TierAck, Keepalive probe with step-down to SF12, CONNECT | done | 2026-11-09 |
@@ -16,7 +16,14 @@
 | ATI banner: name, version with release name, release tagline | done | 2026-11-09 |
 | PC simulator: seeded half duplex LoRa channel (SNR profiles, loss by margin, collisions, drop hook, frame trace) and a two modem harness (CALLER and AXIS) | done | 2026-11-10 |
 | Phase 1 demo: `cargo run -p lfd3k-sim -- [--snr <dB>] [--seed <n>] [--out <file>] [--trace <file>]`, two 4 KB ANSI screens, SNR dip and recovery, escape, ATO, AT&V, ATH | done | 2026-11-10 |
-| Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library and logs LFD3K-SM core <version> once a second; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs | done | 2026-11-10 |
+| Air id: every frame starts with one byte 0xD1 (0xD = LFD3K-SM, 1 = air protocol version 1); any other first byte decodes as Foreign and is ignored. Max payload 250 bytes | done | 2026-11-10 |
+| Calling channel: 918.5 MHz (`CHANNEL_HZ`, SX1262 frequency word 0x3968_0000), BW 500 kHz, CR 4/5, preamble 8 symbols (12 at SF5 and SF6) | done | 2026-11-10 |
+| SF5 and SF6 time on air fixed to the SX1261/2 datasheet form (payload numerator 8*PL + 16 - 4*SF + 20); SF5 with 1 payload byte is 2320 us | done | 2026-11-10 |
+| TX power setting S30 (SX1262 chip output in dBm, signed) and the TX POWER line in AT&V | done | 2026-11-10 |
+| FFI device glue: one static Modem plus SX1262 driver behind a C ABI (`lfd3k_init`, `lfd3k_poll`, `lfd3k_host_in`, `lfd3k_host_out`, `lfd3k_take_fb_request`, `lfd3k_status`), S30 changes applied to the radio at runtime, device panic handler stores `file:line` through the HAL and restarts | done | 2026-11-10 |
+| AT+FB frame buffer dump request (the modem only raises a flag; the firmware writes the dump and OK), LAST CRASH line on ATI, RADIO line in AT&V | done | 2026-11-10 |
+| Firmware platform: modem task (core 1, priority 20) runs the Rust core; SX1262 on SPI2 with the GC1109 front end, native USB carries only the modem stream (console on UART0), station name AXISMODEM-XXXX from the MAC, AT+FB dump streamed without blocking, crash note kept across the restart | done | 2026-11-10 |
+| Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs. Phase 1 logged the core version once a second; phase 2 replaced that with the modem task (see Firmware platform above) | done | 2026-11-10 |
 
 ## Settings
 
@@ -29,6 +36,7 @@
 | S20 training margin, dB x4 | 20 (5 dB) | 0 to 200 |
 | S21 tier cap, tier index (7 = SF5) | 7 | 0 to 7 |
 | S22 resync timeout seconds | 20 | 1 to 255 |
+| S30 TX power, dBm at the SX1262 chip (the V4 GC1109 adds about 12 dB, so the default is about 14 dBm out) | 2 | -9 to 22 |
 
 ## AT commands
 
@@ -46,6 +54,7 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | ATE0, ATE1 | Echo off or on |
 | ATSn=v, ATSn? | Set or read S register |
 | AT&V | Show configuration |
+| AT+FB | Dump the frame buffer (answered by the firmware: no OK from the modem) |
 | ATZ | Reset |
 
 Result codes: OK 0, CONNECT 1, RING 2, NO CARRIER 3, ERROR 4, BUSY 7, NO ANSWER 8.
@@ -62,9 +71,24 @@ Notes:
 - A partial command line typed before a call connects (during RING or while dialing) is dropped at CONNECT.
 - The station name is 1 to 16 printable ASCII characters (Config::new refuses anything else).
 - ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
+- ATI gets a fourth line `LAST CRASH: <note>` only when the previous boot ended in a panic (the note is `file:line`, up to 64 printable characters). With no crash it prints three lines, as before.
+- AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
+- S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.
+
+## Front panel (OLED)
+
+- 0.96 inch SSD1306 (128x64) front panel drawn by the panel task (core 0, priority 2, 20 fps cap). The modem task publishes a status copy each loop; the panel never calls the core.
+- Top row: eight blinky lights OH CD SD RD HS EC DC AA, boxed and filled when lit. SD and RD are held lit 80 ms so short bursts stay visible. DC stays dark until compression exists. The board LED (GPIO35) follows SD or RD.
+- Middle: the state word (IDLE, DIALING, RING, TRAINING, ONLINE, CMD) or, in a call, the tier (`SF7 BW500`) with `ONLINE 21875 BPS` (or `CMD ...` in online command mode) and an eight cell tier ladder. `RADIO FAIL` replaces it when the radio is not usable.
+- Bottom: `LFD3K-SM`, the last heard RSSI (dBm) and SNR (dB), and an RSSI bar (-130 to -30 dBm) and SNR bar (-20 to +10 dB).
+- Animations: OH blinks while dialing (2.5 Hz), a sweep runs across the eight tiers while training and the chosen tier flashes when training ends, idle shows a breathing carrier bar (2 s), RING flashes inverted.
+- Boot splash for 1 s: `LFD3K-SM`, `r.420`, `BL4Z3B4ND`.
+- `panel_snapshot` returns the last drawn frame (1024 bytes, SSD1306 page order, bit 0 = top row) for AT+FB. The drawing code is the pure function `panel_render` (no ESP-IDF calls) so the PC tool can render the same screens.
+- Own hand-made 5x7 ASCII font (font5x7.h), no library fonts.
 
 ## Change log
 
+- 2026-11-10: FFI device glue (lfd3k.h C ABI), AT+FB, LAST CRASH on ATI, RADIO line in AT&V, resetting device panic handler.
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.
 - 2026-11-09: Call state machine and Modem: call setup, training, data, retrain, resync, escape, online command mode, ATI release name.
 - 2026-11-10: Retrain notices kept off the data stream, tier cap honored both ways, resync and queue fixes.
@@ -74,3 +98,9 @@ Notes:
 - 2026-11-10: Phase 1 test suite: 14 core unit tests (tiers, frames, AT parser and result codes, S registers, ARQ, ATI banner), 12 two modem scenario tests on the simulator (connects at SF5 and SF12, data both ways, retrain down and up, link loss, hang-up, flow control, unguarded +++, +++ under flow control, lost TierAck, NO ANSWER, stray frames) and 4 proptest fuzz tests with a fixed seed (frames into idle modems including ring and auto-answer, 10,000 cases; decode, 10,000; AT lines, 10,000; frames into a fresh connected call per case, 3,000). 30 tests, all passing, none ignored.
 - 2026-11-10: +++ under backpressure stays data: any data the host offers (even bytes the full send window refuses) counts against the escape guard time, and held + characters followed by more input are sent as data.
 - 2026-11-10: Final review wave. ATA in online command mode prints ERROR and keeps the call (was NO CARRIER). A partial command line from before CONNECT is dropped. Config::new checks the station name (1 to 16 printable ASCII) and returns None otherwise. Escape timing fix found by the new fuzz test: a completed +++ whose closing guard has run out now escapes when the host's next byte arrives, even before the next tick (the byte was sent as data with the +++ before). New tests: S21 tier cap held against the answerer's up retrain, answerer cap lower than caller's, manual ATA with S0=0, BUSY for a third caller while in a call, numeric result codes, ATZ in a call, ATA online, partial line before CONNECT, Config name check, and a data mode escape fuzz (600 cases, fresh call each, S12 from 0 to 50, random gaps around the guard). 40 tests (15 core unit, 20 scenario, 5 fuzz), all passing, none ignored.
+- 2026-11-10: Phase 2 task 1, core prep for the air: link.rs split into link/{mod,setup,data,retrain}.rs (no behavior change), air id byte 0xD1 in front of the header (HEADER_LEN 5, MAX_PAYLOAD 250, byte 1 now carries type and flags, so the MORE flag is set there), SF5/SF6 airtime fixed, S30 TX power, CHANNEL_HZ. Existing tests updated only for the header layout (frame byte offsets in frame.rs, calls.rs and fuzz.rs); no timing expectation needed to change.
+- 2026-11-10: Phase 2 task 5, OLED front panel (SSD1306 over the IDF I2C master driver), lights, animations, splash, thread-safe snapshot for AT+FB.
+- 2026-11-10: Phase 2 task 7, tests: 14 driver tests on a mock SX1262 bus (sx1262/tests/mock_bus.rs), 10 more core unit tests (air id, SF5 airtime, S30, AT+FB, ATI crash line, AT&V radio line), 7 FFI host tests with a fake HAL chip and a peer modem (ffi/tests/host_api.rs), and tools/panel_check (PC test of the panel renderer plus PNG mockups in docs/phase2-bench/mockups). phase1-demo.txt regenerated (S30 and TX POWER lines now in AT&V).
+- 2026-11-10: Final review wave (phase 2). Data mode input change (160aaf8): in data mode `lfd3k_host_in` hands all offered bytes to the modem in one piece instead of one line at a time, so CRLF-heavy screens fill whole 200 byte ARQ chunks (command mode still feeds one line at a time and syncs S30 after each). Pinned by a new FFI host test (about 400 bytes of "x\r" in one call, first data frame carries 200 payload bytes). The build now fails with "Stale Rust core" when any Rust source is newer than firmware/lib/liblfd3k_ffi.a, and a new library relinks the app. The OLED shows a single "-" (not two) for RSSI and SNR before anything is heard. Bench sheet fixes (fc.exe, rebuild step, expected output). 72 tests.
+
+- 2026-11-10: startup hardening after the first bench run. The SX1262 is held in reset before the front end gets power and gets 1 ms to settle after reset; all radio pins are set up with pulls off (no GPIO46 blip). Safe mode: two Rust panics in a row within 10 s of boot leave the radio and front end off, so AT, ATI (with LAST CRASH) and AT&V still work and AT&V shows RADIO FAIL -1. Task watchdog is 2 s (was 5 s).

@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 
-use lfd3k_core::frame::{call_req_payload, decode, encode, FrameType, Header};
+use lfd3k_core::frame::{call_req_payload, decode, encode, FrameType, Header, AIR_ID, HEADER_LEN};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 use lfd3k_sim::{Harness, SimChannel};
 use proptest::prelude::*;
@@ -57,7 +57,7 @@ struct Fz {
     clean_call_for_axis: bool,
     /// Rewrite the type nibble to a valid type (1 to 11).
     fix_type: bool,
-    /// Rewrite byte 1 to the call id of the live call.
+    /// Rewrite byte 2 to the call id of the live call.
     use_call_id: bool,
 }
 
@@ -136,12 +136,15 @@ fn any_frame() -> impl Strategy<Value = Fz> {
 fn patched(f: &Fz, call_id: Option<u8>) -> Vec<u8> {
     let mut b = f.bytes.clone();
     if f.use_call_id {
-        if let (Some(id), Some(x)) = (call_id, b.get_mut(1)) {
+        if let (Some(id), Some(x)) = (call_id, b.get_mut(2)) {
             *x = id;
         }
     }
     if f.fix_type {
-        if let Some(x) = b.first_mut() {
+        if let Some(id) = b.first_mut() {
+            *id = AIR_ID;
+        }
+        if let Some(x) = b.get_mut(1) {
             *x = ((*x % 11 + 1) << 4) | (*x & 0x0F);
         }
     }
@@ -197,8 +200,8 @@ proptest! {
         // The call id a CallReq opened, for the follow-up frames.
         let call_id = frames
             .iter()
-            .find(|f| f.bytes.first().map(|b| b >> 4) == Some(FrameType::CallReq as u8))
-            .and_then(|f| f.bytes.get(1).copied());
+            .find(|f| f.bytes.get(1).map(|b| b >> 4) == Some(FrameType::CallReq as u8))
+            .and_then(|f| f.bytes.get(2).copied());
         for (side, m) in modems.iter_mut().enumerate() {
             let mut r = NullRadio;
             let mut now = 1_000 * side as u32;
@@ -225,7 +228,7 @@ proptest! {
     #[test]
     fn fuzz_decode_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..=300)) {
         if let Ok(f) = decode(&bytes) {
-            prop_assert_eq!(f.payload.len() + 4, bytes.len());
+            prop_assert_eq!(f.payload.len() + HEADER_LEN, bytes.len());
         }
     }
 

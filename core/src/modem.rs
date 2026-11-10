@@ -10,9 +10,9 @@
 //! modem, right after the received in-order data that fits in the host
 //! buffer (the call never leaves NO CARRIER pending).
 
-use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs};
+use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::frame::{valid_name, NAME_MAX};
-use crate::link::{Event, Link};
+use crate::link::{Event, Link, State};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::Tier;
 
@@ -23,10 +23,15 @@ pub const RELEASE_NAME: &str = "r.420 BL4Z3B4ND ULTR4M0D3M";
 /// ATI line 3.
 pub const RELEASE_TAGLINE: &str = "S0N1C B00M R4D10 PR0 MAX";
 
+/// Gain of the Heltec V4 GC1109 front end, shown in AT&V.
+const GC1109_GAIN_DB: i32 = 12;
+
 const OUT_CAP: usize = 1024;
 /// Output space kept free of call data so result codes always fit.
 const OUT_RESERVE: usize = 96;
 const LINE_CAP: usize = 64;
+/// Longest crash note kept for ATI.
+pub const NOTE_MAX: usize = 64;
 const LIGHT_MS: u32 = 100;
 /// Retrains remembered for AT&V.
 const HISTORY: usize = 4;
@@ -129,13 +134,13 @@ impl OutRing {
 
 /// Small text builder for info lines.
 struct Txt {
-    b: [u8; 160],
+    b: [u8; 256],
     n: usize,
 }
 
 impl Txt {
     fn new() -> Self {
-        Txt { b: [0; 160], n: 0 }
+        Txt { b: [0; 256], n: 0 }
     }
 
     fn put(&mut self, s: &[u8]) -> &mut Self {
@@ -167,6 +172,37 @@ impl Txt {
         self.put(tmp.get(start..).unwrap_or(&[]))
     }
 
+    /// Signed decimal, no padding.
+    fn int(&mut self, v: i32) -> &mut Self {
+        if v < 0 {
+            self.put(b"-");
+        }
+        self.num(v.unsigned_abs(), 1)
+    }
+
+    /// S register value as `AT S n ?` prints it: zero padded to 3 digits,
+    /// S30 signed.
+    fn sreg_val(&mut self, n: u8, v: u16) -> &mut Self {
+        if n == REG_TX_POWER {
+            let s = i32::from(v as i16);
+            if s < 0 {
+                self.put(b"-");
+            }
+            self.num(s.unsigned_abs(), 3)
+        } else {
+            self.num(u32::from(v), 3)
+        }
+    }
+
+    /// Hexadecimal, 4 digits.
+    fn hex16(&mut self, v: u16) -> &mut Self {
+        for shift in [12u32, 8, 4, 0] {
+            let d = ((v >> shift) & 0xF) as u8;
+            self.put(&[if d < 10 { b'0' + d } else { b'A' + d - 10 }]);
+        }
+        self
+    }
+
     fn bytes(&self) -> &[u8] {
         self.b.get(..self.n).unwrap_or(&[])
     }
@@ -195,6 +231,15 @@ pub struct Modem {
     retrains: [Option<Tier>; HISTORY],
     /// NO CARRIER waits until received data has drained.
     closing: bool,
+    /// `AT+FB` was seen; the firmware answers it.
+    fb_request: bool,
+    /// Crash note from the last boot (printable ASCII), for ATI.
+    note: [u8; NOTE_MAX],
+    note_len: usize,
+    /// Radio bring-up result for AT&V: (code, device errors word).
+    radio_diag: Option<(i8, u16)>,
+    /// Metadata of the last frame handed to `radio_rx`.
+    last_rx: Option<RxInfo>,
 }
 
 impl Modem {
@@ -220,11 +265,71 @@ impl Modem {
             retrain_note: None,
             retrains: [None; HISTORY],
             closing: false,
+            fb_request: false,
+            note: [0; NOTE_MAX],
+            note_len: 0,
+            radio_diag: None,
+            last_rx: None,
+        }
+    }
+
+    /// Remember the previous boot's crash note for ATI. Only printable
+    /// ASCII is kept (anything else becomes `?`), at most `NOTE_MAX` bytes.
+    pub fn set_last_panic(&mut self, note: &[u8]) {
+        self.note_len = 0;
+        for (d, &c) in self.note.iter_mut().zip(note.iter()) {
+            *d = if (0x20..0x7F).contains(&c) { c } else { b'?' };
+            self.note_len += 1;
+        }
+    }
+
+    /// Radio bring-up result for AT&V: `code` 0 is OK, negative is the
+    /// driver error (-1 busy timeout, -2 no chip, -3 config); `errs` is the
+    /// chip's device-errors word.
+    pub fn set_radio_diag(&mut self, code: i8, errs: u16) {
+        self.radio_diag = Some((code, errs));
+    }
+
+    /// True once after `AT+FB` was entered (clears the flag).
+    pub fn take_fb_request(&mut self) -> bool {
+        core::mem::take(&mut self.fb_request)
+    }
+
+    /// Metadata of the last received frame, if any.
+    pub fn last_rx(&self) -> Option<RxInfo> {
+        self.last_rx
+    }
+
+    /// Current tier while a call is up or training.
+    pub fn tier(&self) -> Option<Tier> {
+        self.link.tier()
+    }
+
+    /// Call state for the status light panel: 0 idle, 1 dialing, 2 ringing,
+    /// 3 training, 4 online (data mode), 5 command-online.
+    pub fn call_state(&self) -> u8 {
+        match self.link.state() {
+            State::Idle => 0,
+            State::Dialing | State::AwaitTrain => 1,
+            State::Ringing => 2,
+            State::AwaitTierSet | State::AwaitTierAck | State::Probe => 3,
+            State::Connected | State::Resync => {
+                if self.mode == Mode::Data {
+                    4
+                } else {
+                    5
+                }
+            }
         }
     }
 
     pub fn is_connected(&self) -> bool {
         self.link.is_connected()
+    }
+
+    /// True while host bytes are call data (online, not escaped by `+++`).
+    pub fn in_data_mode(&self) -> bool {
+        self.mode == Mode::Data
     }
 
     /// Bytes from the host. Command modes always take every byte; data
@@ -252,6 +357,7 @@ impl Modem {
     }
 
     pub fn radio_rx<R: Radio>(&mut self, frame: &[u8], info: RxInfo, radio: &mut R, now_ms: u32) {
+        self.last_rx = Some(info);
         self.link
             .on_frame(frame, info, name_of(&self.cfg), &self.cfg.sregs, now_ms);
         self.after(radio, now_ms);
@@ -288,6 +394,12 @@ impl Modem {
 
     pub fn host_output(&mut self, out: &mut [u8]) -> usize {
         self.out.pop(out)
+    }
+
+    /// S30: SX1262 chip output power in dBm (-9 to 22).
+    pub fn tx_power_dbm(&self) -> i8 {
+        let v = self.cfg.sregs.get(REG_TX_POWER).unwrap_or(2) as i16;
+        v.clamp(-9, 22) as i8
     }
 
     pub fn lights(&self, now_ms: u32) -> Lights {
@@ -464,9 +576,14 @@ impl Modem {
                     .put(RELEASE_NAME.as_bytes())
                     .put(b"\r\n")
                     .put(RELEASE_TAGLINE.as_bytes());
+                if self.note_len > 0 {
+                    t.put(b"\r\nLAST CRASH: ")
+                        .put(self.note.get(..self.note_len).unwrap_or(&[]));
+                }
                 self.info(t.bytes());
                 self.result(ResultCode::Ok);
             }
+            AtCmd::FrameBuffer => self.fb_request = true,
             AtCmd::Verbose(v) => {
                 self.verbose = v;
                 self.result(ResultCode::Ok);
@@ -485,7 +602,9 @@ impl Modem {
             }
             AtCmd::GetReg(n) => match self.cfg.sregs.get(n) {
                 Some(v) => {
-                    self.info(Txt::new().num(u32::from(v), 3).bytes());
+                    let mut t = Txt::new();
+                    t.sreg_val(n, v);
+                    self.info(t.bytes());
                     self.result(ResultCode::Ok);
                 }
                 None => self.result(ResultCode::Error),
@@ -504,12 +623,27 @@ impl Modem {
                         t.put(b" ");
                     }
                     let v = self.cfg.sregs.get(*r).unwrap_or(0);
-                    t.put(b"S")
-                        .num(u32::from(*r), 2)
-                        .put(b"=")
-                        .num(u32::from(v), 3);
+                    t.put(b"S").num(u32::from(*r), 2).put(b"=");
+                    t.sreg_val(*r, v);
                 }
                 self.info(t.bytes());
+                let dbm = self.tx_power_dbm();
+                let mut t = Txt::new();
+                t.put(b"TX POWER S30=").int(i32::from(dbm));
+                t.put(b" dBm chip, about ")
+                    .int(i32::from(dbm) + GC1109_GAIN_DB)
+                    .put(b" dBm out");
+                self.info(t.bytes());
+                if let Some((code, errs)) = self.radio_diag {
+                    let mut t = Txt::new();
+                    if code == 0 {
+                        t.put(b"RADIO OK");
+                    } else {
+                        t.put(b"RADIO FAIL ").int(i32::from(code));
+                        t.put(b" ERR 0x").hex16(errs);
+                    }
+                    self.info(t.bytes());
+                }
                 let mut t = Txt::new();
                 t.put(b"TIER ");
                 match self.link.tier().filter(|_| self.link.is_connected()) {
@@ -730,5 +864,119 @@ mod tests {
         ] {
             assert!(Config::new(name).is_none(), "{name:?} accepted");
         }
+    }
+
+    fn run(m: &mut Modem, line: &[u8], now: u32) -> String {
+        let mut r = NullRadio;
+        assert_eq!(m.host_input(line, &mut r, now), line.len());
+        output(m)
+    }
+
+    #[test]
+    fn at_fb_sets_request_without_ok() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        assert!(!m.take_fb_request());
+        // Echo only: no OK, no ERROR, no other text.
+        assert_eq!(run(&mut m, b"AT+FB\r", 0), "AT+FB\r");
+        assert!(m.take_fb_request());
+        assert!(!m.take_fb_request(), "the flag is taken once");
+        // Lowercase works too, and with echo off nothing at all is printed.
+        run(&mut m, b"ATE0\r", 10);
+        assert_eq!(run(&mut m, b"at+fb\r", 20), "");
+        assert!(m.take_fb_request());
+        // A normal command afterwards is unaffected.
+        assert_eq!(run(&mut m, b"AT\r", 30), "\r\nOK\r\n");
+        assert!(!m.take_fb_request());
+    }
+
+    #[test]
+    fn ati_shows_last_crash() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        // No note: three lines only.
+        assert!(!run(&mut m, b"ATI\r", 0).contains("LAST CRASH"));
+        m.set_last_panic(b"core/src/link/mod.rs:412");
+        let t = run(&mut m, b"ATI\r", 10);
+        assert!(
+            t.contains("\r\nLAST CRASH: core/src/link/mod.rs:412\r\n"),
+            "{t:?}"
+        );
+        assert!(t.ends_with("\r\nOK\r\n"));
+        // Non-printable bytes become '?', and an overlong note is cut.
+        m.set_last_panic(&[b'a', 0x00, b'b', 0x1b, 0xff, b'c']);
+        assert!(run(&mut m, b"ATI\r", 20).contains("LAST CRASH: a?b??c\r\n"));
+        let long = [b'x'; 200];
+        m.set_last_panic(&long);
+        let t = run(&mut m, b"ATI\r", 30);
+        let line = t
+            .split("\r\n")
+            .find(|l| l.starts_with("LAST CRASH: "))
+            .unwrap();
+        assert_eq!(line.len(), "LAST CRASH: ".len() + NOTE_MAX);
+        // An empty note clears it again.
+        m.set_last_panic(b"");
+        assert!(!run(&mut m, b"ATI\r", 40).contains("LAST CRASH"));
+    }
+
+    #[test]
+    fn s30_default_and_range() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        assert_eq!(m.tx_power_dbm(), 2);
+        let t = run(&mut m, b"AT&V\r", 0);
+        assert!(t.contains("S30=002"), "{t:?}");
+        assert!(
+            t.contains("TX POWER S30=2 dBm chip, about 14 dBm out"),
+            "{t:?}"
+        );
+        assert!(run(&mut m, b"ATS30=22\r", 10).ends_with("\r\nOK\r\n"));
+        assert_eq!(m.tx_power_dbm(), 22);
+        assert!(run(&mut m, b"ATS30=-9\r", 20).ends_with("\r\nOK\r\n"));
+        assert_eq!(m.tx_power_dbm(), -9);
+        let t = run(&mut m, b"AT&V\r", 30);
+        assert!(t.contains("S30=-009"), "{t:?}");
+        assert!(
+            t.contains("TX POWER S30=-9 dBm chip, about 3 dBm out"),
+            "{t:?}"
+        );
+        assert!(run(&mut m, b"ATS30?\r", 40).contains("-009"));
+        // ATZ puts it back to 2.
+        run(&mut m, b"ATZ\r", 50);
+        assert_eq!(m.tx_power_dbm(), 2);
+    }
+
+    #[test]
+    fn ats30_out_of_range_is_error() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        run(&mut m, b"ATS30=7\r", 0);
+        for cmd in ["ATS30=23\r", "ATS30=-10\r", "ATS30=65527\r"] {
+            let t = run(&mut m, cmd.as_bytes(), 10);
+            assert!(t.ends_with("\r\nERROR\r\n"), "{cmd}: {t:?}");
+            assert_eq!(m.tx_power_dbm(), 7, "{cmd} must not change S30");
+        }
+    }
+
+    #[test]
+    fn s30_set_ffff_reads_minus_one() {
+        // The register accepts the raw 0xFFFF (-1 dBm) by design; the text
+        // form of -1 is the normal way to get there.
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        assert!(m.cfg.sregs.set(REG_TX_POWER, 0xFFFF));
+        assert_eq!(m.tx_power_dbm(), -1);
+        assert!(run(&mut m, b"ATS30?\r", 0).contains("-001"));
+        run(&mut m, b"ATS30=5\r", 10);
+        run(&mut m, b"ATS30=-1\r", 20);
+        assert_eq!(m.tx_power_dbm(), -1);
+    }
+
+    #[test]
+    fn radio_diag_shows_in_atv() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        // Before any diagnosis (the simulator) the line is absent.
+        let t = run(&mut m, b"AT&V\r", 0);
+        assert!(!t.contains("RADIO"), "{t:?}");
+        m.set_radio_diag(0, 0);
+        assert!(run(&mut m, b"AT&V\r", 10).contains("\r\nRADIO OK\r\n"));
+        m.set_radio_diag(-2, 0x0160);
+        let t = run(&mut m, b"AT&V\r", 20);
+        assert!(t.contains("\r\nRADIO FAIL -2 ERR 0x0160\r\n"), "{t:?}");
     }
 }

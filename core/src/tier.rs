@@ -84,13 +84,22 @@ impl Tier {
         }
     }
 
+    /// Programmed preamble length in symbols: 12 at SF5 and SF6, else 8.
+    pub fn preamble_symbols(self) -> u16 {
+        if self.sf() <= 6 {
+            12
+        } else {
+            8
+        }
+    }
+
     /// Time on air in microseconds for a PHY payload of `payload_len` bytes.
     ///
     /// Formula used: SX1261/2 datasheet "LoRa time-on-air" form, BW 500 kHz,
     /// CR 4/5, explicit header, CRC on, no low-data-rate optimize.
     /// SF7..SF12: preamble = (8 + 4.25) symbols, payload numerator
-    /// 8*PL - 4*SF + 28 + 16. SF5/SF6: preamble = (12 + 6.25) symbols,
-    /// payload numerator 8*PL - 4*SF + 8 + 16 (no extra header constant).
+    /// 8*PL + 16 - 4*SF + 28. SF5/SF6: preamble = (12 + 6.25) symbols,
+    /// payload numerator 8*PL + 16 - 4*SF + 20.
     /// Integer math, saturating, never panics.
     pub fn airtime_us(self, payload_len: usize) -> u32 {
         let sf = self.sf() as i64;
@@ -98,9 +107,9 @@ impl Tier {
         // Symbol time in microseconds: 2^SF / 500 kHz = 2^SF * 2 us.
         let tsym_us = (1i64 << sf) * 2;
         // Preamble length in quarter symbols.
-        let pre_q: i64 = if small { 4 * 12 + 25 } else { 4 * 8 + 17 };
+        let pre_q: i64 = 4 * i64::from(self.preamble_symbols()) + if small { 25 } else { 17 };
         let pl = payload_len.min(1 << 20) as i64;
-        let k = if small { 8 } else { 28 };
+        let k = if small { 20 } else { 28 };
         let num = 8 * pl - 4 * sf + k + 16;
         let den = 4 * sf;
         let blocks = if num > 0 { (num + den - 1) / den } else { 0 };
@@ -212,7 +221,10 @@ mod tests {
         for t in Tier::LADDER {
             let r = semtech_us(u32::from(t.sf()), 255);
             let g = f64::from(t.airtime_us(255));
-            assert!((g - r).abs() <= r * 0.02, "{t:?}: got {g} us, reference {r} us");
+            assert!(
+                (g - r).abs() <= r * 0.02,
+                "{t:?}: got {g} us, reference {r} us"
+            );
         }
         // About 99.9 ms by hand: (12.25 + 8 + 74 * 5) symbols of 256 us.
         assert!((99_000.0..101_000.0).contains(&got));
@@ -239,5 +251,11 @@ mod tests {
         assert_eq!(best_tier(-160, 20), Tier::Sf12);
         assert_eq!(best_tier(i16::MIN, i16::MAX), Tier::Sf12);
         assert_eq!(best_tier(i16::MAX, 0), Tier::Sf5);
+    }
+
+    #[test]
+    fn airtime_sf5_one_byte_is_2320us() {
+        // 12 + 6.25 preamble symbols and 18 payload symbols of 64 us.
+        assert_eq!(Tier::Sf5.airtime_us(1), 2320);
     }
 }

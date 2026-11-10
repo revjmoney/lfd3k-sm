@@ -270,3 +270,10 @@ To be measured: real throughput and range per tier, per-tier power caps against 
 
 1. **Power and FCC:** power and every radio setting adjustable to the hardware limits. Defaults are FCC Part 15 safe (per-tier caps); going past them shows a warning that the user is responsible. **Ham mode** for licensed users (902 to 928 MHz is also the 33 cm ham band): enter a callsign, encryption is forced off, the callsign is sent as station ID (in beacons and at least every 10 minutes during a call), and power unlocks to the hardware maximum (an external amplifier is the user's business). No certification work in v1.
 2. **Copy protection:** none for now (no secure boot or flash encryption). Normal esptool backup and reflash keep working.
+
+## 18. Phase 2 decisions (Rev, 2026-11-10)
+- Second radio: wait for a second Heltec V4. The V3 on COM9 stays RNode (not flashed). Phase 2 is built and bench-tested on Rev's one V4 first; the first two-radio call happens when the second V4 arrives.
+- Rev's V4 (COM11): OK to replace Simian Radar with LFD3K-SM for phase 2. Rev flashes it himself after a full backup (`--no-stub --after no-reset`); the backup restores Radar any time.
+- COM11 terminal: Claude may open COM11 as a serial terminal only, once LFD3K-SM is on it, with DTR and RTS held still. Never flash, reset or probe it; flashing stays Rev's.
+- Bench check without a second radio: Rev's NESDR SMArt v5 with SDRangel's LoRa (ChirpChat) decoder can confirm the V4's frames on air.
+- V4 front end (facts from MeshCore variants/heltec_v4, MIT, as used by Simian Radar): SX1262 NSS 8, SCK 9, MOSI 10, MISO 11, RST 12, BUSY 13, DIO1 14, TCXO 1.8 V on DIO3, DIO2 as RF switch; GC1109 FEM power LDO GPIO7 HIGH, enable GPIO2 HIGH, PA mode GPIO46. SX1262 setting 10 gives about 22 dBm at the antenna (FEM gain), so power defaults must count the FEM.

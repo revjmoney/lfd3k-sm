@@ -2,3 +2,14 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+# 1 ms tick so the 10 ms modem poll is real.
+CONFIG_FREERTOS_HZ=1000
+# Console and logs on UART0 only; the native USB port carries nothing but modem bytes.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+# A hung modem task must reset the board (watchdog recovery).
+CONFIG_ESP_TASK_WDT_PANIC=y
+# 2 s, not the 5 s default: a hung modem is back in about 2 s. Radio init (worst
+# case about 1 s of BUSY waits) runs before the modem task subscribes.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=2

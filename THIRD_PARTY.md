@@ -28,3 +28,12 @@ core and ffi have no dependencies outside the workspace. The only third-party cr
 | Rust `core` and `compiler_builtins` (built with `-Zbuild-std=core`) | esp toolchain 1.97.0.0 | MIT or Apache-2.0 | ffi device build, linked into the firmware |
 | ESP-IDF (via PlatformIO `framework-espidf`) | 5.4.1 (platform espressif32 6.11.0) | Apache-2.0 (bundled components carry their own permissive licenses) | firmware |
 | FreeRTOS kernel (part of ESP-IDF) | as bundled | MIT | firmware |
+
+## PC tools (not shipped)
+
+These run on Rev's PC only and are never built into the firmware or the core. Installed by Rev, not vendored in the repo.
+
+| Tool | Version | License | Used in |
+|------|---------|---------|---------|
+| pyserial | 3.5 | BSD-3-Clause | `tools/lfd3k_term.py` (bench terminal), installed with pip |
+| MinGW gcc | as installed (MSYS2 mingw64) | GPL with the GCC runtime library exception | builds `tools/panel_check` only; nothing it produces is shipped |

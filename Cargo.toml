@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "sim", "ffi"]
+members = ["core", "sim", "ffi", "sx1262"]
 resolver = "2"
 
 [profile.release]

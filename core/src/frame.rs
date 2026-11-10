@@ -1,9 +1,12 @@
-//! Wire frame format. Header is 4 bytes:
-//! byte0 = type << 4 | flags, byte1 = call_id, byte2 = seq, byte3 = ack.
+//! Wire frame format. Header is 5 bytes: byte0 = AIR_ID, byte1 = type << 4 | flags,
+//! byte2 = call_id, byte3 = seq, byte4 = ack. A frame whose byte0 is not
+//! AIR_ID is somebody else's traffic and decodes as `Foreign`.
 
 use crate::tier::Tier;
 
-pub const HEADER_LEN: usize = 4;
+/// First byte of every frame: 0xD = LFD3K-SM, 1 = air protocol version 1.
+pub const AIR_ID: u8 = 0xD1;
+pub const HEADER_LEN: usize = 5;
 pub const MAX_FRAME: usize = 255;
 pub const MAX_PAYLOAD: usize = MAX_FRAME - HEADER_LEN;
 pub const NAME_MAX: usize = 16;
@@ -64,6 +67,8 @@ pub enum FrameError {
     BadType,
     TooLong,
     BadPayload,
+    /// First byte is not `AIR_ID`: not our traffic.
+    Foreign,
 }
 
 pub fn encode(header: &Header, payload: &[u8], out: &mut [u8]) -> Result<usize, FrameError> {
@@ -73,7 +78,8 @@ pub fn encode(header: &Header, payload: &[u8], out: &mut [u8]) -> Result<usize, 
     let total = HEADER_LEN + payload.len();
     let dst = out.get_mut(..total).ok_or(FrameError::TooShort)?;
     let (head, body) = dst.split_at_mut(HEADER_LEN);
-    if let [b0, b1, b2, b3] = head {
+    if let [id, b0, b1, b2, b3] = head {
+        *id = AIR_ID;
         *b0 = ((header.ftype as u8) << 4) | (header.flags & 0x0F);
         *b1 = header.call_id;
         *b2 = header.seq;
@@ -88,7 +94,9 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
         return Err(FrameError::TooLong);
     }
     let (b0, b1, b2, b3, payload) = match buf {
-        [b0, b1, b2, b3, rest @ ..] => (*b0, *b1, *b2, *b3, rest),
+        [] => return Err(FrameError::TooShort),
+        [id, ..] if *id != AIR_ID => return Err(FrameError::Foreign),
+        [_, b0, b1, b2, b3, rest @ ..] => (*b0, *b1, *b2, *b3, rest),
         _ => return Err(FrameError::TooShort),
     };
     let ftype = FrameType::from_u8(b0 >> 4).ok_or(FrameError::BadType)?;
@@ -206,7 +214,7 @@ mod tests {
 
     #[test]
     fn round_trip_every_type() {
-        assert_eq!(MAX_PAYLOAD, 251);
+        assert_eq!(MAX_PAYLOAD, 250);
         for (i, t) in ALL.iter().enumerate() {
             assert_eq!(*t as u8, i as u8 + 1);
             assert_eq!(FrameType::from_u8(*t as u8), Some(*t));
@@ -222,45 +230,70 @@ mod tests {
             let mut out = [0u8; MAX_FRAME];
             let n = encode(&h, &p[..plen], &mut out).unwrap();
             assert_eq!(n, HEADER_LEN + plen);
-            assert_eq!(out[0] >> 4, *t as u8);
+            assert_eq!(out[0], AIR_ID);
+            assert_eq!(out[1] >> 4, *t as u8);
             let f = decode(&out[..n]).unwrap();
             assert_eq!(f.header, h);
             assert_eq!(f.payload, &p[..plen]);
         }
         // Flags above 4 bits never leak into the type nibble.
-        let h = Header { ftype: FrameType::Data, flags: 0xFF, call_id: 1, seq: 2, ack: 3 };
+        let h = Header {
+            ftype: FrameType::Data,
+            flags: 0xFF,
+            call_id: 1,
+            seq: 2,
+            ack: 3,
+        };
         let mut out = [0u8; 8];
         let n = encode(&h, &[], &mut out).unwrap();
         let f = decode(&out[..n]).unwrap();
         assert_eq!(f.header.ftype, FrameType::Data);
         assert_eq!(f.header.flags, 0x0F);
         // Oversized payload and too small an output buffer are errors.
-        assert_eq!(encode(&h, &[0; MAX_PAYLOAD + 1], &mut [0; 300]), Err(FrameError::TooLong));
-        assert_eq!(encode(&h, &[0; 10], &mut [0; 13]), Err(FrameError::TooShort));
+        assert_eq!(
+            encode(&h, &[0; MAX_PAYLOAD + 1], &mut [0; 300]),
+            Err(FrameError::TooLong)
+        );
+        assert_eq!(
+            encode(&h, &[0; 10], &mut [0; 13]),
+            Err(FrameError::TooShort)
+        );
     }
 
     #[test]
     fn rejects_short_and_bad_type() {
         assert_eq!(decode(&[]), Err(FrameError::TooShort));
-        assert_eq!(decode(&[0x60]), Err(FrameError::TooShort));
-        assert_eq!(decode(&[0x60, 1, 2]), Err(FrameError::TooShort));
-        assert_eq!(decode(&[0x00, 1, 2, 3]), Err(FrameError::BadType));
-        assert_eq!(decode(&[0xF0, 1, 2, 3]), Err(FrameError::BadType));
-        assert_eq!(decode(&[0xC0, 1, 2, 3]), Err(FrameError::BadType));
+        assert_eq!(decode(&[0xD1, 0x60]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[0xD1, 0x60, 1, 2]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[0xD1, 0x00, 1, 2, 3]), Err(FrameError::BadType));
+        assert_eq!(decode(&[0xD1, 0xF0, 1, 2, 3]), Err(FrameError::BadType));
+        assert_eq!(decode(&[0xD1, 0xC0, 1, 2, 3]), Err(FrameError::BadType));
         assert_eq!(decode(&[0x60; MAX_FRAME + 1]), Err(FrameError::TooLong));
         assert_eq!(FrameType::from_u8(0), None);
         assert_eq!(FrameType::from_u8(12), None);
         assert_eq!(FrameType::from_u8(15), None);
         // Wrong payload shapes for the types that have one.
-        assert_eq!(decode(&[0x80, 1, 2, 3]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0x80, 1, 2, 3, 8]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0x90, 1, 2, 3, 0, 0]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0x40, 1, 2, 3, 9, 0, 0]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0x70, 1, 2, 3]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0x10, 1, 2, 3, 0]), Err(FrameError::BadPayload));
+        assert_eq!(decode(&[0xD1, 0x80, 1, 2, 3]), Err(FrameError::BadPayload));
+        assert_eq!(
+            decode(&[0xD1, 0x80, 1, 2, 3, 8]),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            decode(&[0xD1, 0x90, 1, 2, 3, 0, 0]),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            decode(&[0xD1, 0x40, 1, 2, 3, 9, 0, 0]),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(decode(&[0xD1, 0x70, 1, 2, 3]), Err(FrameError::BadPayload));
+        assert_eq!(
+            decode(&[0xD1, 0x10, 1, 2, 3, 0]),
+            Err(FrameError::BadPayload)
+        );
         // A bare header is a valid Data, Hangup or Keepalive frame.
-        assert!(decode(&[0x60, 1, 2, 3]).is_ok());
-        assert!(decode(&[0xA0, 1, 2, 3]).is_ok());
+        assert!(decode(&[0xD1, 0x60, 1, 2, 3]).is_ok());
+        assert!(decode(&[0xD1, 0xA0, 1, 2, 3]).is_ok());
     }
 
     #[test]
@@ -275,13 +308,34 @@ mod tests {
         assert_eq!(parse_call_req(&p[..n]), Ok((sixteen, "a b~!")));
 
         let seventeen = "ABCDEFGHIJKLMNOPQ";
-        assert_eq!(call_req_payload(seventeen, "AXIS", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("AXIS", seventeen, &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("", "AXIS", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("AX\tIS", "B", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("A", "B\x7F", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("A", "\u{e9}", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("A", "B", &mut [0u8; 3]), Err(FrameError::TooShort));
+        assert_eq!(
+            call_req_payload(seventeen, "AXIS", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("AXIS", seventeen, &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("", "AXIS", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("AX\tIS", "B", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("A", "B\x7F", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("A", "\u{e9}", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("A", "B", &mut [0u8; 3]),
+            Err(FrameError::TooShort)
+        );
 
         // Hand-built payloads: 17 chars, non-printable, bad lengths, bad UTF-8.
         let mut long = vec![17u8];
@@ -297,8 +351,23 @@ mod tests {
         assert!(parse_call_req(b"\x01\xFF\x01B").is_err());
         assert!(parse_call_req(b"").is_err());
         // The same payloads inside a CallReq frame are rejected by decode.
-        let mut f = vec![0x10, 1, 0, 0];
+        let mut f = vec![0xD1, 0x10, 1, 0, 0];
         f.extend_from_slice(&long);
         assert_eq!(decode(&f), Err(FrameError::BadPayload));
+    }
+
+    #[test]
+    fn foreign_air_id_rejected() {
+        // 0x94 and 0x00 are somebody else's traffic, not ours.
+        for id in [0x94u8, 0x00, 0xD0, 0xD2, 0xFF] {
+            let f = [id, 0x60, 1, 2, 3];
+            assert_eq!(decode(&f), Err(FrameError::Foreign), "id {id:#04x}");
+            // The id decides before the length is looked at.
+            assert_eq!(decode(&[id]), Err(FrameError::Foreign));
+        }
+        // Ours still decodes; an empty buffer is TooShort, not Foreign.
+        assert!(decode(&[AIR_ID, 0x60, 1, 2, 3]).is_ok());
+        assert_eq!(decode(&[]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[AIR_ID, 0x60]), Err(FrameError::TooShort));
     }
 }

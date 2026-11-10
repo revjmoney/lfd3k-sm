@@ -5,7 +5,9 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["staticlib"]
+# rlib lets the host tests (Task 7) link the crate against fake_hal.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 lfd3k-core = { path = "../core" }
+sx1262 = { path = "../sx1262" }
