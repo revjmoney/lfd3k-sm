@@ -229,7 +229,7 @@ Both get their own network message bases (separate from local bases, origin line
 ## 12. Multi-mode V4
 
 Modes: LFD3K-SM, RNode, Meshtastic, Simian Radar. MeshCore mode dropped.
-- A tiny mode picker is the factory app. PRG (GPIO0) is a strapping pin, so holding it at power-on would start the chip's download mode instead; the picker shows a logo for about a second after boot, and a PRG press during that second opens the mode list on the OLED. Without a press it boots the last mode.
+- A tiny mode picker is the factory app. PRG (GPIO0) is a strapping pin, so holding it at power-on would start the chip's download mode instead; the picker plays a **5-second animated AXIS BBS logo** after boot (Rev, 2026-11-09), and a PRG press during those 5 seconds opens the mode list on the OLED. Without a press it boots the last mode.
 - Proposed 16 MB layout (to be proven): picker and boot ~0.1 MB, LFD3K-SM A/B 2 x 1.5 MB, Simian Radar 1.5 MB, Simian Radar camera DB ~3 MB (shrunk from ~9 MB; the whole US is 1.99 MB today), RNode 1.5 MB, Meshtastic 2.5 MB, LFD3K-SM data 1 MB. About 12.6 MB.
 - Open images (Simian Radar GPLv3, RNode, Meshtastic) sit beside the closed one, never linked into it. Selling units with them on board means shipping a GPLv3 source offer for each, and checking the Meshtastic trademark policy before using that name on a product.
 - Risks to prove on a real board: the borrowed firmwares living with one shared partition table and NVS, and blocking their own updaters so they cannot overwrite other slots.
@@ -266,7 +266,7 @@ More Claude's calls after the builder check: one active call per radio in v1 (fr
 
 To be measured: real throughput and range per tier, per-tier power caps against the PSD limit, GFSK feasibility, ESP-NOW LR on the S3, whether the borrowed firmwares accept the shared flash layout.
 
-## 17. Rev's open questions
+## 17. Rev's answers (2026-11-09)
 
-1. **Selling and FCC.** Selling a radio under Part 15 needs an equipment authorization that covers this firmware's modes and power, and Heltec's grant (if any) won't cover custom firmware. Is v1 for you and hobby users (settable power and tiers), with a locked "certified build" and lab testing later before kits ship? Or is certification part of v1?
-2. **Copy protection.** Should the closed firmware be locked to the device (ESP32 secure boot and flash encryption) so it can't be copied off a sold unit? It changes the multi-mode design (every image has to be signed) and your backup and reflash routine.
+1. **Power and FCC:** power and every radio setting adjustable to the hardware limits. Defaults are FCC Part 15 safe (per-tier caps); going past them shows a warning that the user is responsible. **Ham mode** for licensed users (902 to 928 MHz is also the 33 cm ham band): enter a callsign, encryption is forced off, the callsign is sent as station ID (in beacons and at least every 10 minutes during a call), and power unlocks to the hardware maximum (an external amplifier is the user's business). No certification work in v1.
+2. **Copy protection:** none for now (no secure boot or flash encryption). Normal esptool backup and reflash keep working.
