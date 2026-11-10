@@ -3,8 +3,11 @@
 //! Host output is one byte stream (like a real modem's serial line): echo,
 //! result codes, verbose info lines (`\r\nDIALING <name>\r\n`, `\r\nRINGING\r\n`,
 //! `\r\nTRAINING SNR <x.x> dB\r\n`) and, in data mode, received call bytes.
-//! RETRAIN and NO CARRIER can appear in the middle of data, framed as
-//! `\r\n<text>\r\n` like every verbose result.
+//! Data mode is 8-bit transparent: nothing but call bytes reaches the host
+//! while online. A RETRAIN that happens in data mode is kept as a notice and
+//! printed after the `OK` of the escape (verbose only); AT&V shows the
+//! current tier and the last retrains. NO CARRIER ends a call as on a real
+//! modem, after all received in-order data has been delivered.
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs};
 use crate::frame::NAME_MAX;
@@ -24,6 +27,8 @@ const OUT_CAP: usize = 1024;
 const OUT_RESERVE: usize = 96;
 const LINE_CAP: usize = 64;
 const LIGHT_MS: u32 = 100;
+/// Retrains remembered for AT&V.
+const HISTORY: usize = 4;
 
 pub struct Config {
     pub name: [u8; 16],
@@ -49,6 +54,13 @@ impl Config {
         }
         c
     }
+}
+
+/// `<tier name> <bps>`.
+fn put_tier(t: &mut Txt, tier: Tier) {
+    t.put(tier.name().as_bytes())
+        .put(b" ")
+        .num(tier.air_bps(), 1);
 }
 
 fn name_of(cfg: &Config) -> &str {
@@ -172,6 +184,12 @@ pub struct Modem {
     esc: u8,
     esc_last: u32,
     last_host: u32,
+    /// Latest retrain seen in data mode, printed on escape.
+    retrain_note: Option<Tier>,
+    /// Last retrains, oldest first.
+    retrains: [Option<Tier>; HISTORY],
+    /// NO CARRIER waits until received data has drained.
+    closing: bool,
 }
 
 impl Modem {
@@ -193,6 +211,9 @@ impl Modem {
             esc: 0,
             esc_last: 0,
             last_host: 0,
+            retrain_note: None,
+            retrains: [None; HISTORY],
+            closing: false,
         }
     }
 
@@ -234,6 +255,9 @@ impl Modem {
                 self.esc = 0;
                 self.mode = Mode::OnlineCommand;
                 self.result(ResultCode::Ok);
+                if let Some(t) = self.retrain_note.take() {
+                    self.result(ResultCode::Retrain(t));
+                }
             } else {
                 self.flush_esc();
             }
@@ -435,6 +459,25 @@ impl Modem {
                         .num(u32::from(v), 3);
                 }
                 self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"TIER ");
+                match self.link.tier().filter(|_| self.link.is_connected()) {
+                    Some(c) => put_tier(&mut t, c),
+                    None => {
+                        t.put(b"NONE");
+                    }
+                }
+                t.put(b"\r\nRETRAINS");
+                let mut any = false;
+                for r in self.retrains.iter().flatten() {
+                    t.put(if any { b", " } else { b" " });
+                    put_tier(&mut t, *r);
+                    any = true;
+                }
+                if !any {
+                    t.put(b" NONE");
+                }
+                self.info(t.bytes());
                 self.result(ResultCode::Ok);
             }
             AtCmd::Reset => {
@@ -485,21 +528,33 @@ impl Modem {
                     }
                 }
                 Event::Connect(t) => {
+                    self.retrain_note = None;
                     self.mode = Mode::Data;
                     self.esc = 0;
                     self.last_host = now;
                     self.result(ResultCode::Connect(t));
                 }
-                Event::Retrain(t) => self.result(ResultCode::Retrain(t)),
+                Event::Retrain(t) => {
+                    self.retrains.rotate_left(1);
+                    if let Some(last) = self.retrains.last_mut() {
+                        *last = Some(t);
+                    }
+                    if self.mode == Mode::Data {
+                        self.retrain_note = Some(t);
+                    } else {
+                        self.result(ResultCode::Retrain(t));
+                    }
+                }
                 Event::NoCarrier => {
                     self.mode = Mode::Command;
-                    self.result(ResultCode::NoCarrier);
+                    self.retrain_note = None;
+                    self.closing = true;
                 }
                 Event::Busy => self.result(ResultCode::Busy),
                 Event::NoAnswer => self.result(ResultCode::NoAnswer),
             }
         }
-        if self.mode == Mode::Data {
+        if self.mode == Mode::Data || self.closing {
             let mut tmp = [0u8; 256];
             loop {
                 let room = self.out.free().saturating_sub(OUT_RESERVE).min(tmp.len());
@@ -508,6 +563,11 @@ impl Modem {
                 }
                 let n = self.link.read_data(tmp.get_mut(..room).unwrap_or(&mut []));
                 if n == 0 {
+                    // Everything received is out: now end the call.
+                    if self.closing {
+                        self.closing = false;
+                        self.result(ResultCode::NoCarrier);
+                    }
                     break;
                 }
                 self.out.push(tmp.get(..n).unwrap_or(&[]));

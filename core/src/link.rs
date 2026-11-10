@@ -28,8 +28,11 @@ pub const FLAG_MORE: u8 = 1;
 pub const FLAG_PING: u8 = 2;
 
 const PERIOD_MS: u32 = 3000; // CallReq resend and RING cadence
+/// Frames per turn. A full burst of 4 Data frames lasts 4 airtimes, longer
+/// than the 3 airtime RTO, so the first frame of a full burst can be resent
+/// once before its ack lands; staging prefers unsent frames, which keeps that
+/// to the tail of a transfer.
 const BURST_MAX: u8 = 4;
-const TURN_GAP_MS: u32 = 40;
 const TURN_YIELD_MS: u32 = 100;
 const UP_HOLD_MS: u32 = 10_000;
 const KA_LEN: usize = HEADER_LEN + 2;
@@ -109,6 +112,26 @@ pub fn rto_ms(t: Tier) -> u32 {
         .saturating_add(100)
 }
 
+/// Preamble time in microseconds (12.25 symbols; 18.25 at SF5 and SF6).
+fn preamble_us(t: Tier) -> u32 {
+    let tsym = (1u32 << t.sf()) * 2;
+    let quarters = if t.sf() <= 6 { 73 } else { 49 };
+    tsym * quarters / 4
+}
+
+/// Silence before taking the turn back: two preambles at this tier plus
+/// 20 ms, at least 40 ms. A real radio only reports busy once it has
+/// detected the peer's preamble.
+fn turn_gap_ms(t: Tier) -> u32 {
+    (preamble_us(t) * 2 / 1000 + 20).max(40)
+}
+
+fn is_tierset(f: &QFrame) -> bool {
+    f.buf
+        .first()
+        .is_some_and(|b| b >> 4 == FrameType::TierSet as u8)
+}
+
 fn reg(s: &SRegs, n: u8, d: u16) -> u32 {
     u32::from(s.get(n).unwrap_or(d))
 }
@@ -122,7 +145,10 @@ pub struct Link {
     role: Role,
     call_id: u8,
     tier: Tier,
+    /// Highest tier this call may use: own S21, lowered by what the peer allows.
     cap: Tier,
+    /// Own S21 cap for this call.
+    own_cap: Tier,
     /// Tier being trained (AwaitTierAck, Probe).
     train: Tier,
     start: u32,
@@ -182,6 +208,7 @@ impl Link {
             call_id: 0,
             tier: Tier::ROBUST,
             cap: Tier::Sf5,
+            own_cap: Tier::Sf5,
             train: Tier::ROBUST,
             start: 0,
             last_periodic: 0,
@@ -350,11 +377,38 @@ impl Link {
         }
     }
 
+    /// Keep only queued frames for which `keep` is true, in order.
+    fn q_retain(&mut self, keep: fn(&QFrame) -> bool) {
+        let mut out = [EMPTY_Q; QLEN];
+        let mut n = 0;
+        for i in 0..self.q_len {
+            if let Some(f) = self.q.get((self.q_head + i) % QLEN) {
+                if keep(f) {
+                    if let Some(d) = out.get_mut(n) {
+                        *d = *f;
+                        n += 1;
+                    }
+                }
+            }
+        }
+        self.q = out;
+        self.q_head = 0;
+        self.q_len = n;
+    }
+
+    /// Drop the pending retrain and any of its TierSets still queued.
+    fn clear_pending(&mut self) {
+        self.pending = None;
+        self.q_retain(|f| !is_tierset(f));
+    }
+
     fn ka_payload(&self) -> [u8; 2] {
         self.last_snr.to_le_bytes()
     }
 
     fn reset_call(&mut self, role: Role, now: u32) {
+        // Only last call's Hangup or CallReject may still go out.
+        self.q_retain(|f| f.urgent);
         self.role = role;
         self.tx.reset();
         self.rx.reset();
@@ -427,7 +481,8 @@ impl Link {
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
-        self.cap = cap_tier(sregs);
+        self.own_cap = cap_tier(sregs);
+        self.cap = self.own_cap;
         self.state = State::AwaitTierSet;
         self.send_train();
         true
@@ -461,6 +516,7 @@ impl Link {
     }
 
     fn fail(&mut self, e: Event, bye: bool) {
+        self.q_retain(|f| f.urgent);
         if bye {
             let t = self.listen_tier();
             self.enq(t, FrameType::Hangup, 0, &[], false, true);
@@ -487,6 +543,7 @@ impl Link {
 
     /// Retrain request inside a call: TierSet on the current tier.
     fn request(&mut self, t: Tier, now: u32) {
+        self.clear_pending();
         self.pending = Some(t);
         self.pend_last = now;
         self.pend_tries = 1;
@@ -537,7 +594,8 @@ impl Link {
                         _ => return,
                     };
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
-                    self.cap = cap_tier(sregs).min(peer_cap);
+                    self.own_cap = cap_tier(sregs);
+                    self.cap = self.own_cap.min(peer_cap);
                     let snr = info.snr_x4.min(peer_snr);
                     let margin = reg(sregs, 20, 20) as i16;
                     let t = best_tier(snr, margin).min(self.cap);
@@ -549,7 +607,9 @@ impl Link {
             },
             State::AwaitTierSet | State::Probe if self.role == Role::Answerer => match h.ftype {
                 FrameType::TierSet => {
-                    let Some(t) = tier_arg else { return };
+                    let Some(t) = tier_arg.map(|t| t.min(self.own_cap)) else {
+                        return;
+                    };
                     self.got_tierset = true;
                     // TierAck goes out on the tier we heard TierSet on.
                     self.enq(info.tier, FrameType::TierAck, 0, &[t.index()], false, false);
@@ -571,8 +631,12 @@ impl Link {
                 _ => {}
             },
             State::AwaitTierAck => {
-                if h.ftype == FrameType::TierAck && tier_arg == Some(self.train) {
-                    self.tier = self.train;
+                let acked = tier_arg.filter(|a| *a <= self.train);
+                if let (FrameType::TierAck, Some(a)) = (h.ftype, acked) {
+                    // A lower ack is the peer's cap.
+                    self.cap = self.cap.min(a);
+                    self.train = a;
+                    self.tier = a;
                     self.state = State::Probe;
                     self.start = now;
                     self.probe_ms = air_ms(self.tier, KA_LEN)
@@ -662,13 +726,18 @@ impl Link {
             if self.resync_prev != Tier::ROBUST {
                 self.emit(Event::Retrain(Tier::ROBUST));
             }
+            let prev = self.resync_prev;
             self.resync_prev = Tier::ROBUST;
             if self.role == Role::Caller {
                 let peer = match (h.ftype, f.payload) {
                     (FrameType::Keepalive, [a, b]) => i16::from_le_bytes([*a, *b]),
                     _ => info.snr_x4,
                 };
-                let t = best_tier(info.snr_x4.min(peer), reg(sregs, 20, 20) as i16).min(self.cap);
+                // Never jump straight back to the tier that just died.
+                let below = prev.slower().unwrap_or(Tier::ROBUST);
+                let t = best_tier(info.snr_x4.min(peer), reg(sregs, 20, 20) as i16)
+                    .min(self.cap)
+                    .min(below);
                 if t > Tier::ROBUST {
                     self.request(t, now);
                 }
@@ -682,7 +751,8 @@ impl Link {
         if h.flags & FLAG_MORE != 0 {
             self.turn = false;
             self.turn_start = now;
-            self.turn_ms = air_ms(self.tier, HEADER_LEN + CHUNK).saturating_add(TURN_GAP_MS);
+            self.turn_ms =
+                air_ms(self.tier, HEADER_LEN + CHUNK).saturating_add(turn_gap_ms(self.tier));
         } else {
             self.turn = true;
             self.burst = 0;
@@ -710,14 +780,21 @@ impl Link {
                 if self.pending.is_some() && self.role == Role::Caller {
                     return; // caller's own request wins
                 }
-                self.pending = None;
+                self.clear_pending();
+                // Above our cap: ack our cap instead, and move there.
+                let t = t.min(self.own_cap);
                 self.enq(info.tier, FrameType::TierAck, 0, &[t.index()], true, false);
                 self.switch(t, now);
             }
-            FrameType::TierAck if tier_arg.is_some() && tier_arg == self.pending => {
-                self.pending = None;
-                if let Some(t) = tier_arg {
-                    self.switch(t, now);
+            FrameType::TierAck => {
+                if let (Some(a), Some(p)) = (tier_arg, self.pending) {
+                    if a <= p {
+                        self.clear_pending();
+                        if a < p {
+                            self.cap = self.cap.min(a); // peer's cap
+                        }
+                        self.switch(a, now);
+                    }
                 }
             }
             _ => {}
@@ -829,9 +906,14 @@ impl Link {
             self.resync_prev = self.tier;
             self.tier = Tier::ROBUST;
             self.state = State::Resync;
-            self.start = now;
+            // Already on SF12: the S22 count runs from the last frame heard.
+            self.start = if self.resync_prev == Tier::ROBUST {
+                self.last_rx
+            } else {
+                now
+            };
             self.last_periodic = now.wrapping_sub(u32::MAX / 2);
-            self.pending = None;
+            self.clear_pending();
             self.turn = true;
             self.need_listen = true;
             return;
@@ -839,7 +921,7 @@ impl Link {
         if let Some(p) = self.pending {
             if since(now, self.pend_last) >= rto {
                 if self.pend_tries >= 3 {
-                    self.pending = None; // resync recovers if the peer moved
+                    self.clear_pending(); // resync recovers if the peer moved
                 } else {
                     self.pend_tries += 1;
                     self.pend_last = now;
@@ -925,7 +1007,7 @@ impl Link {
             } else {
                 0
             };
-            self.turn_ms = air_ms(tier, len).saturating_add(TURN_GAP_MS + y);
+            self.turn_ms = air_ms(tier, len).saturating_add(turn_gap_ms(tier) + y);
         }
     }
 

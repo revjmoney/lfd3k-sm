@@ -52,6 +52,8 @@ Notes:
 - ATD strips one leading T or P, as Hayes does. To dial a name that starts with T or P, use the full prefix: ATDT TOM or ATDP PAT (ATDTOM would dial OM).
 - Names compare case-insensitively.
 - Escape: no data for S12 (1/50 s), then three S2 characters each less than S12 apart, then nothing for S12. Anything else is data. S12=0 turns the escape off.
+- Data mode is 8-bit clean: a RETRAIN during data mode is held and printed after the OK of the escape (verbose mode). AT&V shows the current tier and the last 4 retrains. ATO prints CONNECT with the current tier. NO CARRIER prints after all received data has been delivered.
+- A tier above a modem's S21 cap is never used: asked for one, the modem acks its cap instead, and the asker stops asking above it.
 - ATH during a call prints NO CARRIER; with no call it prints OK. ATZ resets the S registers, echo and verbose, and hangs up silently.
 - ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
 
@@ -59,3 +61,4 @@ Notes:
 
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.
 - 2026-11-09: Call state machine and Modem: call setup, training, data, retrain, resync, escape, online command mode, ATI release name.
+- 2026-11-10: Retrain notices kept off the data stream, tier cap honored both ways, resync and queue fixes.

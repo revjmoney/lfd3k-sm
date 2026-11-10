@@ -1,4 +1,14 @@
 //! Radio abstraction. Implemented by the simulator and by firmware.
+//!
+//! Contract the core relies on:
+//! - `busy()` is true while transmitting, and while receiving a frame once
+//!   its preamble has been detected (as an SX1262 reports it).
+//! - After `send`, the radio does not receive until the core calls `listen`
+//!   again; the core calls `listen()` after each send (once the radio is no
+//!   longer busy) to return to receive, and never calls `send` or `listen`
+//!   while `busy()` is true.
+//! - A received frame is handed to the core after its airtime, with the
+//!   tier it was heard on in `RxInfo::tier`.
 
 use crate::tier::Tier;
 
