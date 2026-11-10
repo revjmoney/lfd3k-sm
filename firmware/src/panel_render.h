@@ -8,9 +8,9 @@
 
 #define PANEL_FB_BYTES 1024
 
-/* Draws the front panel for status s at time now_ms. Keeps a little animation
+/* Draws the front panel for status s (name: board name, NULL or empty shows LFD3K-SM) at time now_ms. Keeps a little animation
  * memory (last state) in statics; call it with non-decreasing now_ms. */
-void panel_render(const lfd3k_status_t *s, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES]);
+void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES]);
 
 /* Boot splash: LFD3K-SM, r.420, BL4Z3B4ND. */
 void panel_render_splash(uint8_t fb[PANEL_FB_BYTES]);

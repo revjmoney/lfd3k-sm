@@ -1,5 +1,6 @@
 #include "ssd1306.h"
 #include "board.h"
+#include <stdbool.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
@@ -10,6 +11,20 @@
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
+static bool s_on; /* 0xAF sent after the first full flush */
+
+void ssd1306_deinit(void)
+{
+    if (s_dev) {
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+    }
+    if (s_bus) {
+        i2c_del_master_bus(s_bus);
+        s_bus = NULL;
+    }
+    s_on = false;
+}
 
 static esp_err_t cmds(const uint8_t *c, size_t n)
 {
@@ -24,7 +39,19 @@ static esp_err_t cmds(const uint8_t *c, size_t n)
     return i2c_master_transmit(s_dev, buf, n + 1, I2C_TIMEOUT);
 }
 
+static esp_err_t init_inner(void);
+
 esp_err_t ssd1306_init(void)
+{
+    ssd1306_deinit();
+    esp_err_t e = init_inner();
+    if (e != ESP_OK) {
+        ssd1306_deinit();
+    }
+    return e;
+}
+
+static esp_err_t init_inner(void)
 {
     gpio_reset_pin(PIN_OLED_RST);
     gpio_set_level(PIN_OLED_RST, 1);
@@ -73,7 +100,6 @@ esp_err_t ssd1306_init(void)
         0xDB, 0x40, /* VCOMH */
         0xA4,       /* follow RAM */
         0xA6,       /* normal (not inverted) */
-        0xAF,       /* display on */
     };
     e = cmds(init, sizeof(init));
     if (e != ESP_OK) {
@@ -99,6 +125,14 @@ esp_err_t ssd1306_flush(const uint8_t fb[1024])
         if (e != ESP_OK) {
             return e;
         }
+    }
+    if (!s_on) { /* display on only once RAM holds a real frame */
+        static const uint8_t on[] = {0xAF};
+        e = cmds(on, sizeof(on));
+        if (e == ESP_OK) {
+            s_on = true;
+        }
+        return e;
     }
     return ESP_OK;
 }

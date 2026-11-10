@@ -90,7 +90,6 @@ static void modem_task(void *arg)
 {
     (void)arg;
     hal_radio_init(xTaskGetCurrentTaskHandle());
-    panel_start(); /* after Vext is on */
     usb_link_init();
     usb_link_set_notify(xTaskGetCurrentTaskHandle());
 
@@ -98,6 +97,9 @@ static void modem_task(void *arg)
     esp_efuse_mac_get_default(mac);
     char name[20];
     snprintf(name, sizeof(name), "AXISMODEM-%02X%02X", mac[4], mac[5]);
+
+    panel_set_name(name);
+    panel_start(); /* after Vext is on (hal_radio_init) */
 
     uint8_t note[64];
     size_t note_len = hal_radio_take_panic_note(note);

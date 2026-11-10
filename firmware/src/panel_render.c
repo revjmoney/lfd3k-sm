@@ -4,8 +4,8 @@
  *  y 14..27   state word or tier name, 2x text, centred
  *  y 30..36   rate line, 1x text, centred (online) / carrier pulse (idle, y 33..35)
  *  y 39..43   tier ladder, 8 cells 14 wide at x = 16*i (training, online)
- *  y 46..52   "LFD3K-SM" left, "<rssi> <snr>" right
- *  y 55..60   RSSI bar x 8..59 (label R), SNR bar x 76..127 (label S)
+ *  y 46..52   board name (up to 16 chars) at x 0; LFD3K-SM when none given
+ *  y 55..60   RSSI text x 0, RSSI bar x 44..61, SNR text x 66, SNR bar x 110..127
  */
 #include <stdio.h>
 #include <string.h>
@@ -115,7 +115,7 @@ static void bar(uint8_t *fb, int x, int y, int w, int h, int filled)
     fill(fb, x + 1, y + 1, clampi(filled, 0, w - 2), h - 2, 1);
 }
 
-void panel_render(const lfd3k_status_t *s, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES])
+void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES])
 {
     memset(fb, 0, PANEL_FB_BYTES);
 
@@ -208,26 +208,39 @@ void panel_render(const lfd3k_status_t *s, uint32_t now_ms, uint8_t fb[PANEL_FB_
         }
     }
 
-    /* bottom: name, readings, bars */
-    text(fb, 0, 46, "LFD3K-SM", 1, 1);
-    int heard = s->rssi != 0 || s->snr_x4 != 0;
-    char val[24];
-    if (heard) {
-        int q = s->snr_x4 * 25; /* hundredths of a dB */
-        int a = q < 0 ? -q : q;
-        snprintf(val, sizeof(val), "%d %c%d.%d", (int)s->rssi, q < 0 ? '-' : '+', a / 100,
-                 (a % 100) / 10);
-    } else {
-        snprintf(val, sizeof(val), "-- --");
+    /* bottom: board name, then RSSI and SNR readings each followed by a bar */
+    char nm[17];
+    size_t nl = 0;
+    if (name) {
+        for (; name[nl] && nl < 16; nl++) {
+            nm[nl] = name[nl];
+        }
     }
-    text(fb, W - text_w(val, 1), 46, val, 1, 1);
+    if (nl == 0) {
+        memcpy(nm, "LFD3K-SM", 8);
+        nl = 8;
+    }
+    nm[nl] = 0;
+    text(fb, 0, 46, nm, 1, 1);
 
-    int rs = heard ? clampi(((int)s->rssi + 130) * 50 / 100, 0, 50) : 0;
-    int sn = heard ? clampi(((int)s->snr_x4 + 80) * 50 / 120, 0, 50) : 0;
-    text(fb, 0, 55, "R", 1, 1);
-    bar(fb, 8, 55, 52, 6, rs);
-    text(fb, 68, 55, "S", 1, 1);
-    bar(fb, 76, 55, 52, 6, sn);
+    int heard = s->rssi != 0 || s->snr_x4 != 0;
+    char rv[16], sv[16];
+    int rs = 0, sn = 0;
+    if (heard) {
+        snprintf(rv, sizeof(rv), "%ddBm", (int)s->rssi);
+        int t10 = ((int)s->snr_x4 * 25 + ((int)s->snr_x4 < 0 ? -5 : 5)) / 10; /* tenths of a dB, rounded */
+        int a10 = t10 < 0 ? -t10 : t10;
+        snprintf(sv, sizeof(sv), "%c%d.%ddB", t10 < 0 ? '-' : '+', a10 / 10, a10 % 10);
+        rs = clampi(((int)s->rssi + 130) * 16 / 100, 0, 16);
+        sn = clampi(((int)s->snr_x4 + 80) * 16 / 120, 0, 16);
+    } else {
+        snprintf(rv, sizeof(rv), "--");
+        snprintf(sv, sizeof(sv), "--");
+    }
+    text(fb, 0, 55, rv, 1, 1);   /* up to 7 chars, ends by x 41 */
+    bar(fb, 44, 55, 18, 6, rs);  /* RSSI -130..-30 dBm */
+    text(fb, 66, 55, sv, 1, 1);  /* up to 7 chars, ends by x 107 */
+    bar(fb, 110, 55, 18, 6, sn); /* SNR -20..+10 dB */
 }
 
 void panel_render_splash(uint8_t fb[PANEL_FB_BYTES])

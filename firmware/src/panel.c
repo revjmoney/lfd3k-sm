@@ -17,6 +17,7 @@ static const char *TAG = "panel";
 #define SPLASH_MS   1000
 #define HOLD_MS     80   /* SD and RD stay lit this long so short bursts are visible */
 #define BOOT_WAIT   50   /* ms after Vext before touching the OLED */
+#define RETRY_MS    5000 /* OLED init retry period */
 #define SNAP_WAIT   5    /* ms the modem task will wait for the frame mutex */
 
 static portMUX_TYPE s_pub_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -25,6 +26,16 @@ static lfd3k_status_t s_pub = {.lights = 0, .state = 0, .tier = -1, .rssi = 0, .
 static SemaphoreHandle_t s_frame_lock;
 static uint8_t s_done[PANEL_FB_BYTES];      /* last fully drawn frame, guarded by s_frame_lock */
 static uint8_t s_last_snap[PANEL_FB_BYTES]; /* modem task only: last good snapshot */
+
+static char s_name[17] = "LFD3K-SM";
+
+void panel_set_name(const char *name)
+{
+    if (name && name[0]) {
+        strncpy(s_name, name, 16);
+        s_name[16] = 0;
+    }
+}
 
 void panel_publish(const lfd3k_status_t *s)
 {
@@ -64,8 +75,9 @@ static void panel_task(void *arg)
 
     bool oled_ok = ssd1306_init() == ESP_OK;
     if (!oled_ok) {
-        ESP_LOGW(TAG, "OLED init failed; panel keeps rendering for snapshots");
+        ESP_LOGW(TAG, "OLED init failed; retrying every %d s, snapshots keep working", RETRY_MS / 1000);
     }
+    uint32_t next_try_ms = (uint32_t)(esp_timer_get_time() / 1000) + RETRY_MS;
 
     panel_render_splash(fb);
     commit_frame(fb);
@@ -96,7 +108,16 @@ static void panel_task(void *arg)
         }
         gpio_set_level(PIN_LED, (st.lights & ((1u << 2) | (1u << 3))) ? 1 : 0);
 
-        panel_render(&st, now_ms, fb);
+        if (!oled_ok && (int32_t)(now_ms - next_try_ms) >= 0) {
+            next_try_ms = now_ms + RETRY_MS;
+            if (ssd1306_init() == ESP_OK) {
+                oled_ok = true;
+                memset(shown, 0xFF, sizeof(shown)); /* force a full flush */
+                ESP_LOGI(TAG, "OLED up");
+            }
+        }
+
+        panel_render(&st, s_name, now_ms, fb);
         commit_frame(fb);
 
         if (oled_ok && memcmp(fb, shown, sizeof(shown)) != 0) {
@@ -105,6 +126,12 @@ static void panel_task(void *arg)
                 fails = 0;
             } else if (++fails == 1) {
                 ESP_LOGW(TAG, "OLED flush failed");
+            }
+            if (fails >= 20) { /* about a second of errors: drop the bus and re-init later */
+                ssd1306_deinit();
+                oled_ok = false;
+                fails = 0;
+                next_try_ms = now_ms + RETRY_MS;
             }
         }
     }

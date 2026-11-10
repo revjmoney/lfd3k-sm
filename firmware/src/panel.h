@@ -8,8 +8,11 @@
  * hal_radio_init has switched Vext on. */
 void panel_start(void);
 
+/* Board name shown on the bottom row (max 16 chars). Call once at boot, before panel_start. */
+void panel_set_name(const char *name);
+
 /* Modem task only: hand the panel a copy of the latest status. The panel task
- * never calls lfd3k_*. Cheap (8 bytes under a spinlock). */
+ * never calls lfd3k_*. Cheap (a 10 byte struct copy under a spinlock). */
 void panel_publish(const lfd3k_status_t *s);
 
 /* Copy the last fully drawn 128x64 SSD1306 framebuffer (1024 bytes, page
