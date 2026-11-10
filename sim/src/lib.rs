@@ -40,8 +40,10 @@
 //! - A segment starts right after a verbose `\r\nCONNECT <...>\r\n` line
 //!   found in command mode text (also after `ATO`).
 //! - It ends at the escape: when this host typed three `+` while in the
-//!   segment and a later tick's output begins with `\r\nOK\r\n`, the segment
-//!   ends where that OK starts.
+//!   segment, a later tick's output that ends with `\r\nOK\r\n` (or with that
+//!   OK plus one `\r\nRETRAIN ...\r\n` line) closes the segment where the OK
+//!   starts. Bytes before the OK in the same output are still data. The
+//!   `CONNECT` line that `ATO` prints opens a new segment.
 //! - Or it ends when the modem drops the call (`is_connected()` false): at
 //!   the start of the last `\r\nNO CARRIER\r\n`, or at the end of the output
 //!   if there is none.
@@ -49,10 +51,12 @@
 //! The split needs verbose result codes (ATV1, the default) and the default
 //! escape character `+`. Data that itself contains `\r\nNO CARRIER\r\n` is
 //! still split correctly (the last one is used), and data containing
-//! `\r\nOK\r\n` is only misread if it arrives exactly at an escape tick.
+//! `\r\nOK\r\n` is only misread if a tick's data output ends with it while an
+//! escape is pending.
 
 pub mod rng;
 
+use lfd3k_core::frame::{decode, FrameType};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 pub use rng::Rng;
 
@@ -148,9 +152,10 @@ pub struct TraceEntry {
     /// 0 = a (CALLER), 1 = b (AXIS).
     pub from: usize,
     pub tier: Tier,
-    /// Frame type nibble (6 = Data, 7 = Ack, 8 = TierSet, ...).
-    pub ftype: u8,
+    /// Decoded frame type; `None` if the core sent bytes that do not decode.
+    pub ftype: Option<FrameType>,
     pub flags: u8,
+    pub call_id: u8,
     pub seq: u8,
     pub len: usize,
     /// A Data frame whose sequence number was already sent in this call.
@@ -265,6 +270,7 @@ struct Host {
 const CONNECT_PAT: &[u8] = b"\r\nCONNECT ";
 const NO_CARRIER_PAT: &[u8] = b"\r\nNO CARRIER\r\n";
 const OK_PAT: &[u8] = b"\r\nOK\r\n";
+const RETRAIN_PAT: &[u8] = b"\r\nRETRAIN ";
 /// `send_*_data` gives up after this long without progress.
 const STALL_MS: u32 = 120_000;
 
@@ -303,12 +309,13 @@ impl Host {
     fn update(&mut self, chunk_start: usize, connected: bool, was_tick: bool) {
         for _ in 0..4 {
             if let Some(start) = self.open() {
-                let ok_here = self
-                    .screen
-                    .get(chunk_start..)
-                    .is_some_and(|c| c.starts_with(OK_PAT));
-                if self.plus_pending && was_tick && ok_here && chunk_start >= start {
-                    self.close(chunk_start);
+                let esc_ok = if self.plus_pending && was_tick {
+                    self.escape_ok(chunk_start.max(start))
+                } else {
+                    None
+                };
+                if let Some(at) = esc_ok {
+                    self.close(at);
                 } else if !connected {
                     let at =
                         rfind(&self.screen, NO_CARRIER_PAT, start).unwrap_or(self.screen.len());
@@ -327,6 +334,19 @@ impl Host {
             self.segs.push((start, None));
             self.scan = start;
         }
+    }
+
+    /// The escape's OK in the output from `from`: the last `\r\nOK\r\n`,
+    /// followed by nothing or by one `\r\nRETRAIN ...\r\n` line up to the end
+    /// (what Modem::tick prints when the escape fires). Bytes before it in
+    /// the same output are still data.
+    fn escape_ok(&self, from: usize) -> Option<usize> {
+        let at = rfind(&self.screen, OK_PAT, from)?;
+        let rest = self.screen.get(at + OK_PAT.len()..)?;
+        let tail_ok = rest.is_empty()
+            || (rest.starts_with(RETRAIN_PAT)
+                && find(rest, b"\r\n", 2) == Some(rest.len().saturating_sub(2)));
+        tail_ok.then_some(at)
     }
 
     fn fed(&mut self, bytes: &[u8]) {
@@ -401,18 +421,21 @@ impl Harness {
     // Host side.
 
     /// Types `s` on CALLER's terminal as given (no implicit `\r`).
-    /// Same as `send_a_data`.
-    pub fn type_a(&mut self, s: &str) {
-        self.send_data(0, s.as_bytes());
+    /// Same as `send_a_data`; returns the bytes accepted (all of them).
+    pub fn type_a(&mut self, s: &str) -> usize {
+        self.send_data(0, s.as_bytes())
     }
 
-    pub fn type_b(&mut self, s: &str) {
-        self.send_data(1, s.as_bytes());
+    pub fn type_b(&mut self, s: &str) -> usize {
+        self.send_data(1, s.as_bytes())
     }
 
     /// Feeds all bytes to CALLER, advancing time 1 ms whenever `host_input`
-    /// takes less than offered. Gives up after 120 s without progress.
-    /// Returns the bytes accepted.
+    /// takes less than offered. Returns the bytes accepted (always all).
+    ///
+    /// # Panics
+    /// If the modem accepts nothing for 120 simulated seconds: a test
+    /// harness should fail loudly rather than hang or drop bytes silently.
     pub fn send_a_data(&mut self, data: &[u8]) -> usize {
         self.send_data(0, data)
     }
@@ -533,9 +556,12 @@ impl Harness {
                 break;
             }
             stall = if n == 0 { stall + 1 } else { 0 };
-            if stall >= STALL_MS {
-                break;
-            }
+            assert!(
+                stall < STALL_MS,
+                "sim stall: side {side} accepted nothing for {STALL_MS} ms at t={} ms, {used} of {} bytes taken",
+                self.now_ms,
+                data.len()
+            );
             self.step();
         }
         used
@@ -684,14 +710,20 @@ impl Harness {
         let now = self.now_ms;
         let now_us = u64::from(now) * 1000;
         let end_us = now_us + u64::from(tier.airtime_us(bytes.len()));
-        let b0 = bytes.first().copied().unwrap_or(0);
-        let (ftype, flags) = (b0 >> 4, b0 & 0x0F);
-        let call_id = bytes.get(1).copied().unwrap_or(0);
-        let seq = bytes.get(2).copied().unwrap_or(0);
+        let (ftype, flags, call_id, seq) = match decode(&bytes) {
+            Ok(f) => (
+                Some(f.header.ftype),
+                f.header.flags,
+                f.header.call_id,
+                f.header.seq,
+            ),
+            Err(_) => (None, 0, 0, 0),
+        };
+        let is_data = ftype == Some(FrameType::Data);
 
         let mut resend = false;
         if let Some(st) = self.seqs.get_mut(from) {
-            if ftype == 6 {
+            if is_data {
                 match *st {
                     Some((c, next)) if c == call_id => {
                         if seq.wrapping_sub(next) < 128 {
@@ -708,7 +740,7 @@ impl Harness {
         if let Some(n) = s.frames_sent.get_mut(from) {
             *n += 1;
         }
-        if ftype == 6 {
+        if is_data {
             if let Some(n) = s.data_frames.get_mut(from) {
                 *n += 1;
             }
@@ -719,7 +751,11 @@ impl Harness {
             }
         }
         if let Some(log) = s.tiers.get_mut(from) {
-            if matches!(ftype, 6 | 7 | 11) && log.last().map(|t| t.1) != Some(tier) {
+            let in_call = matches!(
+                ftype,
+                Some(FrameType::Data | FrameType::Ack | FrameType::Keepalive)
+            );
+            if in_call && log.last().map(|t| t.1) != Some(tier) {
                 log.push((now, tier));
             }
         }
@@ -733,6 +769,7 @@ impl Harness {
             tier,
             ftype,
             flags,
+            call_id,
             seq,
             len: bytes.len(),
             resend,

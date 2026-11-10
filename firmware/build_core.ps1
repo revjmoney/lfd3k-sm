@@ -12,6 +12,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
     $src = Join-Path $root 'target\xtensa-esp32s3-none-elf\release\liblfd3k_ffi.a'
     $dst = Join-Path $root 'firmware\lib\liblfd3k_ffi.a'
+    New-Item -ItemType Directory -Force (Split-Path -Parent $dst) | Out-Null
     Copy-Item $src $dst -Force
     Write-Host "copied $src -> $dst ($((Get-Item $dst).Length) bytes)"
 } finally {

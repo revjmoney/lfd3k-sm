@@ -111,23 +111,6 @@ fn render(screen: &[u8], segs: &[(usize, usize)]) -> String {
     out.lines().map(|l| format!("{}\n", l.trim_end())).collect()
 }
 
-fn frame_name(t: u8) -> &'static str {
-    match t {
-        1 => "CallReq",
-        2 => "CallAck",
-        3 => "CallReject",
-        4 => "Train",
-        5 => "TrainAck",
-        6 => "Data",
-        7 => "Ack",
-        8 => "TierSet",
-        9 => "TierAck",
-        10 => "Hangup",
-        11 => "Keepalive",
-        _ => "?",
-    }
-}
-
 fn trace_text(h: &Harness) -> String {
     let mut s = String::from("ms from tier type flags seq len resend outcome\n");
     for e in h.trace() {
@@ -136,7 +119,8 @@ fn trace_text(h: &Harness) -> String {
             e.t_ms,
             if e.from == 0 { "CALLER" } else { "AXIS" },
             e.tier.sf(),
-            frame_name(e.ftype),
+            e.ftype
+                .map_or_else(|| "?".to_string(), |t| format!("{t:?}")),
             e.flags,
             e.seq,
             e.len,
