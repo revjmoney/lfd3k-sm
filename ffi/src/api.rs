@@ -201,7 +201,13 @@ pub unsafe extern "C" fn lfd3k_host_in(buf: *const u8, len: usize, now_ms: u32) 
     with_device(|d| {
         // Feed one line at a time and sync S30 after each, so ATS30=n then
         // ATD in one batch sends the dial at the new power.
+        // In data mode the bytes are call data: hand them over in one piece
+        // so CRLF-heavy screens fill whole ARQ chunks. The +++ guard time
+        // means commands after an escape arrive in a later batch.
         sync_power(d);
+        if d.modem.in_data_mode() {
+            return d.modem.host_input(bytes, &mut d.radio, now_ms);
+        }
         let mut used = 0;
         while used < bytes.len() {
             let rest = bytes.get(used..).unwrap_or(&[]);

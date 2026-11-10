@@ -327,6 +327,11 @@ impl Modem {
         self.link.is_connected()
     }
 
+    /// True while host bytes are call data (online, not escaped by `+++`).
+    pub fn in_data_mode(&self) -> bool {
+        self.mode == Mode::Data
+    }
+
     /// Bytes from the host. Command modes always take every byte; data
     /// mode returns only the bytes the call could queue.
     pub fn host_input<R: Radio>(&mut self, bytes: &[u8], radio: &mut R, now_ms: u32) -> usize {
