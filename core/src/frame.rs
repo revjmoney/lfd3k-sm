@@ -355,4 +355,19 @@ mod tests {
         f.extend_from_slice(&long);
         assert_eq!(decode(&f), Err(FrameError::BadPayload));
     }
+
+    #[test]
+    fn foreign_air_id_rejected() {
+        // 0x94 and 0x00 are somebody else's traffic, not ours.
+        for id in [0x94u8, 0x00, 0xD0, 0xD2, 0xFF] {
+            let f = [id, 0x60, 1, 2, 3];
+            assert_eq!(decode(&f), Err(FrameError::Foreign), "id {id:#04x}");
+            // The id decides before the length is looked at.
+            assert_eq!(decode(&[id]), Err(FrameError::Foreign));
+        }
+        // Ours still decodes; an empty buffer is TooShort, not Foreign.
+        assert!(decode(&[AIR_ID, 0x60, 1, 2, 3]).is_ok());
+        assert_eq!(decode(&[]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[AIR_ID, 0x60]), Err(FrameError::TooShort));
+    }
 }

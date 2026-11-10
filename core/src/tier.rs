@@ -252,4 +252,10 @@ mod tests {
         assert_eq!(best_tier(i16::MIN, i16::MAX), Tier::Sf12);
         assert_eq!(best_tier(i16::MAX, 0), Tier::Sf5);
     }
+
+    #[test]
+    fn airtime_sf5_one_byte_is_2320us() {
+        // 12 + 6.25 preamble symbols and 18 payload symbols of 64 us.
+        assert_eq!(Tier::Sf5.airtime_us(1), 2320);
+    }
 }

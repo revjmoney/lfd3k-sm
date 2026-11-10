@@ -860,4 +860,118 @@ mod tests {
             assert!(Config::new(name).is_none(), "{name:?} accepted");
         }
     }
+
+    fn run(m: &mut Modem, line: &[u8], now: u32) -> String {
+        let mut r = NullRadio;
+        assert_eq!(m.host_input(line, &mut r, now), line.len());
+        output(m)
+    }
+
+    #[test]
+    fn at_fb_sets_request_without_ok() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        assert!(!m.take_fb_request());
+        // Echo only: no OK, no ERROR, no other text.
+        assert_eq!(run(&mut m, b"AT+FB\r", 0), "AT+FB\r");
+        assert!(m.take_fb_request());
+        assert!(!m.take_fb_request(), "the flag is taken once");
+        // Lowercase works too, and with echo off nothing at all is printed.
+        run(&mut m, b"ATE0\r", 10);
+        assert_eq!(run(&mut m, b"at+fb\r", 20), "");
+        assert!(m.take_fb_request());
+        // A normal command afterwards is unaffected.
+        assert_eq!(run(&mut m, b"AT\r", 30), "\r\nOK\r\n");
+        assert!(!m.take_fb_request());
+    }
+
+    #[test]
+    fn ati_shows_last_crash() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        // No note: three lines only.
+        assert!(!run(&mut m, b"ATI\r", 0).contains("LAST CRASH"));
+        m.set_last_panic(b"core/src/link/mod.rs:412");
+        let t = run(&mut m, b"ATI\r", 10);
+        assert!(
+            t.contains("\r\nLAST CRASH: core/src/link/mod.rs:412\r\n"),
+            "{t:?}"
+        );
+        assert!(t.ends_with("\r\nOK\r\n"));
+        // Non-printable bytes become '?', and an overlong note is cut.
+        m.set_last_panic(&[b'a', 0x00, b'b', 0x1b, 0xff, b'c']);
+        assert!(run(&mut m, b"ATI\r", 20).contains("LAST CRASH: a?b??c\r\n"));
+        let long = [b'x'; 200];
+        m.set_last_panic(&long);
+        let t = run(&mut m, b"ATI\r", 30);
+        let line = t
+            .split("\r\n")
+            .find(|l| l.starts_with("LAST CRASH: "))
+            .unwrap();
+        assert_eq!(line.len(), "LAST CRASH: ".len() + NOTE_MAX);
+        // An empty note clears it again.
+        m.set_last_panic(b"");
+        assert!(!run(&mut m, b"ATI\r", 40).contains("LAST CRASH"));
+    }
+
+    #[test]
+    fn s30_default_and_range() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        assert_eq!(m.tx_power_dbm(), 2);
+        let t = run(&mut m, b"AT&V\r", 0);
+        assert!(t.contains("S30=002"), "{t:?}");
+        assert!(
+            t.contains("TX POWER S30=2 dBm chip, about 14 dBm out"),
+            "{t:?}"
+        );
+        assert!(run(&mut m, b"ATS30=22\r", 10).ends_with("\r\nOK\r\n"));
+        assert_eq!(m.tx_power_dbm(), 22);
+        assert!(run(&mut m, b"ATS30=-9\r", 20).ends_with("\r\nOK\r\n"));
+        assert_eq!(m.tx_power_dbm(), -9);
+        let t = run(&mut m, b"AT&V\r", 30);
+        assert!(t.contains("S30=-009"), "{t:?}");
+        assert!(
+            t.contains("TX POWER S30=-9 dBm chip, about 3 dBm out"),
+            "{t:?}"
+        );
+        assert!(run(&mut m, b"ATS30?\r", 40).contains("-009"));
+        // ATZ puts it back to 2.
+        run(&mut m, b"ATZ\r", 50);
+        assert_eq!(m.tx_power_dbm(), 2);
+    }
+
+    #[test]
+    fn ats30_out_of_range_is_error() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        run(&mut m, b"ATS30=7\r", 0);
+        for cmd in ["ATS30=23\r", "ATS30=-10\r", "ATS30=65527\r"] {
+            let t = run(&mut m, cmd.as_bytes(), 10);
+            assert!(t.ends_with("\r\nERROR\r\n"), "{cmd}: {t:?}");
+            assert_eq!(m.tx_power_dbm(), 7, "{cmd} must not change S30");
+        }
+    }
+
+    #[test]
+    fn s30_set_ffff_reads_minus_one() {
+        // The register accepts the raw 0xFFFF (-1 dBm) by design; the text
+        // form of -1 is the normal way to get there.
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        assert!(m.cfg.sregs.set(REG_TX_POWER, 0xFFFF));
+        assert_eq!(m.tx_power_dbm(), -1);
+        assert!(run(&mut m, b"ATS30?\r", 0).contains("-001"));
+        run(&mut m, b"ATS30=5\r", 10);
+        run(&mut m, b"ATS30=-1\r", 20);
+        assert_eq!(m.tx_power_dbm(), -1);
+    }
+
+    #[test]
+    fn radio_diag_shows_in_atv() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        // Before any diagnosis (the simulator) the line is absent.
+        let t = run(&mut m, b"AT&V\r", 0);
+        assert!(!t.contains("RADIO"), "{t:?}");
+        m.set_radio_diag(0, 0);
+        assert!(run(&mut m, b"AT&V\r", 10).contains("\r\nRADIO OK\r\n"));
+        m.set_radio_diag(-2, 0x0160);
+        let t = run(&mut m, b"AT&V\r", 20);
+        assert!(t.contains("\r\nRADIO FAIL -2 ERR 0x0160\r\n"), "{t:?}");
+    }
 }

@@ -483,4 +483,46 @@ mod tests {
         }
         assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30]);
     }
+
+    #[test]
+    fn s30_default_and_range() {
+        let mut r = SRegs::new();
+        assert_eq!(r.get(REG_TX_POWER), Some(2));
+        // Both ends are accepted, negative values as two's complement.
+        assert!(r.set(REG_TX_POWER, 22));
+        assert_eq!(r.get(REG_TX_POWER), Some(22));
+        assert!(r.set(REG_TX_POWER, (-9i16) as u16));
+        assert_eq!(r.get(REG_TX_POWER).map(|v| v as i16), Some(-9));
+        assert!(r.set(REG_TX_POWER, 0));
+        // One step outside is refused and the old value stays.
+        assert!(!r.set(REG_TX_POWER, 23));
+        assert!(!r.set(REG_TX_POWER, (-10i16) as u16));
+        // 65527 is -9 as a raw u16 (valid); the text form is refused below.
+        assert!(r.set(REG_TX_POWER, 65_527));
+        assert!(r.set(REG_TX_POWER, 0));
+        assert_eq!(r.get(REG_TX_POWER), Some(0));
+        // Parsing: signed only for S30.
+        assert_eq!(
+            parse_line("ATS30=-5"),
+            Ok(AtCmd::SetReg(30, (-5i16) as u16))
+        );
+        assert_eq!(parse_line("ATS30=10"), Ok(AtCmd::SetReg(30, 10)));
+        assert_eq!(parse_line("ATS30?"), Ok(AtCmd::GetReg(30)));
+        assert_eq!(parse_line("ATS7=-1"), Err(AtError::BadArg));
+        assert_eq!(parse_line("ATS30=-"), Err(AtError::BadArg));
+        assert_eq!(parse_line("ATS30=99999"), Err(AtError::BadArg));
+        assert_eq!(parse_line("ATS30=65527"), Err(AtError::BadArg));
+        assert_eq!(parse_line("ATS30=65527"), Err(AtError::BadArg));
+    }
+
+    #[test]
+    fn s30_set_ffff_reads_minus_one() {
+        // 0xFFFF is -1 as a two's complement i16: accepted by design.
+        let mut r = SRegs::new();
+        assert!(r.set(REG_TX_POWER, 0xFFFF));
+        assert_eq!(r.get(REG_TX_POWER), Some(0xFFFF));
+        assert_eq!(r.get(REG_TX_POWER).map(|v| v as i16), Some(-1));
+        // The other registers have no negative range.
+        assert!(!r.set(7, 0xFFFF));
+    }
 }
