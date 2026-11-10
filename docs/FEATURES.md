@@ -24,6 +24,7 @@
 | AT+FB frame buffer dump request (the modem only raises a flag; the firmware writes the dump and OK), LAST CRASH line on ATI, RADIO line in AT&V | done | 2026-11-10 |
 | Firmware platform: modem task (core 1, priority 20) runs the Rust core; SX1262 on SPI2 with the GC1109 front end, native USB carries only the modem stream (console on UART0), station name AXISMODEM-XXXX from the MAC, AT+FB dump streamed without blocking, crash note kept across the restart | done | 2026-11-10 |
 | Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs. Phase 1 logged the core version once a second; phase 2 replaced that with the modem task (see Firmware platform above) | done | 2026-11-10 |
+| Phase 3 task 1, core settings: hotspot, client network, up to 8 forwards (name, host, port, telnet or raw), published forward, S registers, E and V in one `Settings` model with a 899 byte versioned blob (magic LFS1, CRC-16/CCITT-FALSE, refused whole on any bad field); AT+WAP, AT+WSTA, AT+WIFI?, AT+FWD, AT+PUB, AT&W, ATZ reload; ATDT resolves a forward name or host:port (replies NO CARRIER until the Wi-Fi dial lands) | done | 2026-11-10 |
 
 ## Settings
 
@@ -37,6 +38,11 @@
 | S21 tier cap, tier index (7 = SF5) | 7 | 0 to 7 |
 | S22 resync timeout seconds | 20 | 1 to 255 |
 | S30 TX power, dBm at the SX1262 chip (the V4 GC1109 adds about 12 dB, so the default is about 14 dBm out) | 2 | -9 to 22 |
+| Hotspot on or off (AT+WAP=1 / AT+WAP=0) | on | on, off |
+| Hotspot name and password (AT+WAP=ssid,pass) | modem name, generated | name 1 to 32 printable, password 8 to 63 printable, neither may contain a comma |
+| Client network (AT+WSTA=ssid,pass) | none | same limits; AT+WSTA=0 forgets it |
+| Forwards (AT+FWD) | none | 8 slots; name 1 to 16 printable without `:` or `,` (and not `0`), host 1 to 63 of `A-Za-z0-9.-`, port 1 to 65535, mode T or R (default T for port 23, else R) |
+| Published forward (AT+PUB) | none | one forward name |
 
 ## AT commands
 
@@ -45,7 +51,7 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | Command | Meaning |
 |---------|---------|
 | AT | Attention, replies OK |
-| ATD<name>, ATDT<name>, ATDP<name> | Dial a station by name (1 to 16 chars) |
+| ATD<name>, ATDT<name>, ATDP<name> | Dial a station by name (1 to 16 chars). A name that matches a forward, or the form `host:port`, is a Wi-Fi dial instead (see notes) |
 | ATA | Answer |
 | ATH, ATH0 | Hang up |
 | ATO | Return online |
@@ -53,7 +59,21 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | ATV0, ATV1 | Numeric or verbose result codes |
 | ATE0, ATE1 | Echo off or on |
 | ATSn=v, ATSn? | Set or read S register |
-| AT&V | Show configuration |
+| AT&V | Show configuration (now with WIFI, PUB and FWD lines) |
+| AT&W | Save the settings (the platform stores them; replies OK) |
+| AT+WAP? | Print `WAP <ON|OFF> <ssid> <password>` (the hotspot password is shown on purpose; tools redact lines starting `WAP `) |
+| AT+WAP=<ssid>,<pass> | Set the hotspot name and password (password 8 to 63 chars) |
+| AT+WAP=1, AT+WAP=0 | Hotspot on or off |
+| AT+WSTA? | Print `WSTA <ssid> ********` or `WSTA OFF` (the client password is never printed) |
+| AT+WSTA=<ssid>,<pass> | Set the client network (password 8 to 63 chars) |
+| AT+WSTA=0 | Forget the client network |
+| AT+WIFI? | Print the platform's live Wi-Fi status line, or `WIFI OFF` before it reports one |
+| AT+FWD? | List forwards as `FWD <name> <host>:<port>` |
+| AT+FWD=<name>,<host>,<port>[,T\|R] | Add or replace a forward (name compares case-insensitively). ERROR if all 8 slots are used |
+| AT+FWD=<name> | Delete a forward (ERROR if there is none; clears AT+PUB if it pointed there) |
+| AT+PUB? | Print `PUB <name>` or `PUB NONE` |
+| AT+PUB=<name> | Bridge answered radio calls to this forward (ERROR if it does not exist) |
+| AT+PUB=0 | Publish nothing |
 | AT+FB | Dump the frame buffer (answered by the firmware: no OK from the modem) |
 | ATZ | Reset |
 
@@ -66,7 +86,7 @@ Notes:
 - Escape: no data for S12 (1/50 s), then three S2 characters each less than S12 apart, then nothing for S12. Anything else is data. S12=0 turns the escape off.
 - Data mode is 8-bit clean: a RETRAIN during data mode is held and printed after the OK of the escape (verbose mode). AT&V shows the current tier and the last 4 retrains. ATO prints CONNECT with the current tier. NO CARRIER prints right after the received data that fits in the host buffer, never later.
 - A tier above a modem's S21 cap is never used: asked for one, the modem acks its cap instead, and the asker stops asking above it.
-- ATH during a call prints NO CARRIER; with no call it prints OK. ATZ resets the S registers, echo and verbose, and hangs up silently.
+- ATH during a call prints NO CARRIER; with no call it prints OK. ATZ restores the saved settings (S registers, echo, verbose, hotspot, client network, forwards, publish; power-on defaults when nothing was loaded or saved) and hangs up silently.
 - ATA with nothing ringing prints NO CARRIER; ATA in online command mode (a call is up) prints ERROR and the call stays up.
 - A partial command line typed before a call connects (during RING or while dialing) is dropped at CONNECT.
 - The station name is 1 to 16 printable ASCII characters (Config::new refuses anything else).
@@ -74,6 +94,11 @@ Notes:
 - ATI gets a fourth line `LAST CRASH: <note>` only when the previous boot ended in a panic (the note is `file:line`, up to 64 printable characters). With no crash it prints three lines, as before.
 - AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
 - S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.
+- Command lines are up to 128 bytes. `+` command arguments split on commas: an SSID, forward name or password may not contain a comma. SSID and password are taken as typed; the fields of AT+FWD are trimmed, so `AT+FWD=bbs, bbs.example.com, 23` works.
+- ATDT order: a forward name (any case) first, then `host:port`, else a radio dial. Use `ATDT`, not bare `ATD`, for host names that start with T or P. Until the Wi-Fi dial lands, a forward or host:port dial prints NO CARRIER at once and starts nothing.
+- AT&V adds `WIFI AP <ON|OFF> <ssid>  STA <ssid|OFF>`, `PUB <name|NONE>` and `FWD <count>` after the RADIO line.
+- AT&W sets a save-wanted flag the platform takes (`Modem::take_save_request`) and reads with `Modem::settings()`. `Modem::load_settings` applies a loaded copy at boot, including S0 auto-answer and S30. ATZ restores that copy.
+- The hotspot password may be shown on the OLED (`Modem::show_ap_pass`) until a device joins (`note_ap_client_joined`) or AT&W saved with a client network set; the flag is part of the saved blob.
 
 ## Front panel (OLED)
 
@@ -88,6 +113,7 @@ Notes:
 
 ## Change log
 
+- 2026-11-10: Phase 3 task 1, core settings model (core/src/settings.rs), Wi-Fi, forward and publish AT commands, AT&W, ATZ reload, WIFI, PUB and FWD lines in AT&V. No new tests yet (task 6); the existing 72 pass.
 - 2026-11-10: FFI device glue (lfd3k.h C ABI), AT+FB, LAST CRASH on ATI, RADIO line in AT&V, resetting device panic handler.
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.
 - 2026-11-09: Call state machine and Modem: call setup, training, data, retrain, resync, escape, online command mode, ATI release name.

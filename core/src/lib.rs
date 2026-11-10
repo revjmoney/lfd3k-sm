@@ -7,6 +7,7 @@ pub mod frame;
 pub mod link;
 pub mod modem;
 pub mod radio;
+pub mod settings;
 pub mod tier;
 
 pub use arq::{ArqRx, ArqTx};
@@ -14,6 +15,7 @@ pub use at::{format_result, parse_line, AtCmd, AtError, ResultCode, SRegs};
 pub use link::{Event, Link};
 pub use modem::{Config, Lights, Modem};
 pub use radio::{Radio, RxInfo};
+pub use settings::{Forward, Settings, WireMode, BLOB_LEN, MAX_FWD};
 pub use tier::{best_tier, Tier};
 
 pub const VERSION: &str = "0.1.0";

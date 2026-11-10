@@ -14,6 +14,7 @@ use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWE
 use crate::frame::{valid_name, NAME_MAX};
 use crate::link::{Event, Link, State};
 use crate::radio::{Radio, RxInfo};
+use crate::settings::{parse_hostport, Forward, Settings, MAX_FWD};
 use crate::tier::Tier;
 
 /// ATI line 1.
@@ -29,7 +30,10 @@ const GC1109_GAIN_DB: i32 = 12;
 const OUT_CAP: usize = 1024;
 /// Output space kept free of call data so result codes always fit.
 const OUT_RESERVE: usize = 96;
-const LINE_CAP: usize = 64;
+/// Longest command line: `AT+WSTA=` + 32 + `,` + 63 is 104 bytes.
+const LINE_CAP: usize = 128;
+/// Longest Wi-Fi status line kept for `AT+WIFI?`.
+pub const WIFI_STATUS_MAX: usize = 96;
 /// Longest crash note kept for ATI.
 pub const NOTE_MAX: usize = 64;
 const LIGHT_MS: u32 = 100;
@@ -240,11 +244,39 @@ pub struct Modem {
     radio_diag: Option<(i8, u16)>,
     /// Metadata of the last frame handed to `radio_rx`.
     last_rx: Option<RxInfo>,
+    /// Hotspot, client network, forwards and publish setting. Its `sregs`,
+    /// `echo` and `verbose` are not live: those stay in `cfg.sregs`,
+    /// `echo` and `verbose`, and are merged in by `settings()`.
+    set: Settings,
+    /// The profile `ATZ` restores: what was loaded or last saved.
+    saved: Settings,
+    /// `AT&W` was entered; the platform saves `settings()`.
+    save_req: bool,
+    /// Last line from `set_wifi_status`.
+    wifi: [u8; WIFI_STATUS_MAX],
+    wifi_len: usize,
+}
+
+fn onoff(on: bool) -> &'static [u8] {
+    if on {
+        b"ON"
+    } else {
+        b"OFF"
+    }
 }
 
 impl Modem {
     pub fn new(cfg: Config) -> Self {
+        // Until the platform calls `load_settings` there is no hotspot
+        // password and the hotspot is off.
+        let mut set = Settings::defaults(name_of(&cfg), "");
+        set.ap_on = false;
         Modem {
+            saved: set.clone(),
+            set,
+            save_req: false,
+            wifi: [0; WIFI_STATUS_MAX],
+            wifi_len: 0,
             cfg,
             link: Link::new(),
             mode: Mode::Command,
@@ -271,6 +303,54 @@ impl Modem {
             radio_diag: None,
             last_rx: None,
         }
+    }
+
+    /// The platform's live Wi-Fi status line for `AT+WIFI?`
+    /// (`WIFI AP <ssid> <n> CLIENTS STA <ssid|OFF> <ip|NO IP>`). Up to
+    /// `WIFI_STATUS_MAX` bytes are kept; non-printable bytes become `?`.
+    pub fn set_wifi_status(&mut self, line: &str) {
+        self.wifi_len = 0;
+        for (d, c) in self.wifi.iter_mut().zip(line.bytes()) {
+            *d = if (0x20..0x7F).contains(&c) { c } else { b'?' };
+            self.wifi_len += 1;
+        }
+    }
+
+    /// True once after `AT&W` was entered (clears the flag). The platform
+    /// then stores `settings()`.
+    pub fn take_save_request(&mut self) -> bool {
+        core::mem::take(&mut self.save_req)
+    }
+
+    /// The current settings, live S registers, E and V included.
+    pub fn settings(&self) -> Settings {
+        let mut s = self.set.clone();
+        s.sregs = self.cfg.sregs;
+        s.echo = self.echo;
+        s.verbose = self.verbose;
+        s
+    }
+
+    /// Boot: make `s` (from `Settings::from_blob`) the current settings and
+    /// the profile `ATZ` restores. Registers, echo and verbose apply now.
+    pub fn load_settings(&mut self, s: Settings) {
+        self.cfg.sregs = s.sregs;
+        self.echo = s.echo;
+        self.verbose = s.verbose;
+        self.saved.clone_from(&s);
+        self.set = s;
+    }
+
+    /// True while the generated hotspot password may be shown on the OLED:
+    /// until a device joins the hotspot (`note_ap_client_joined`) or `AT&W`
+    /// saved with a client network set. Kept in the saved blob.
+    pub fn show_ap_pass(&self) -> bool {
+        self.set.show_ap_pass
+    }
+
+    /// The platform saw a device join the hotspot: stop showing the password.
+    pub fn note_ap_client_joined(&mut self) {
+        self.set.show_ap_pass = false;
     }
 
     /// Remember the previous boot's crash note for ATI. Only printable
@@ -531,7 +611,19 @@ impl Modem {
             AtCmd::Attention => self.result(ResultCode::Ok),
             AtCmd::Dial(name) => {
                 self.fresh_call();
-                if self.mode != Mode::Command || !self.link.dial(name_of(&self.cfg), name, now) {
+                if self.mode == Mode::Command
+                    && (self.set.forward(name).is_some() || parse_hostport(name).is_some())
+                {
+                    // Wi-Fi dial: not started yet, so it fails at once.
+                    let code = if self.link.is_idle() {
+                        ResultCode::NoCarrier
+                    } else {
+                        ResultCode::Error
+                    };
+                    self.result(code);
+                } else if self.mode != Mode::Command
+                    || !self.link.dial(name_of(&self.cfg), name, now)
+                {
                     self.result(ResultCode::Error);
                 } else if self.verbose {
                     self.info(Txt::new().put(b"DIALING ").put(name.as_bytes()).bytes());
@@ -645,6 +737,25 @@ impl Modem {
                     self.info(t.bytes());
                 }
                 let mut t = Txt::new();
+                t.put(b"WIFI AP ").put(onoff(self.set.ap_on));
+                t.put(b" ").put(self.set.ap_ssid().as_bytes());
+                t.put(b"  STA ");
+                match self.set.sta_ssid() {
+                    "" => t.put(b"OFF"),
+                    ssid => t.put(ssid.as_bytes()),
+                };
+                self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"PUB ");
+                match self.set.published() {
+                    Some(f) => t.put(f.name().as_bytes()),
+                    None => t.put(b"NONE"),
+                };
+                self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"FWD ").num(self.set.fwd_count() as u32, 1);
+                self.info(t.bytes());
+                let mut t = Txt::new();
                 t.put(b"TIER ");
                 match self.link.tier().filter(|_| self.link.is_connected()) {
                     Some(c) => put_tier(&mut t, c),
@@ -669,12 +780,125 @@ impl Modem {
                 self.fresh_call();
                 self.link.hangup(now);
                 self.mode = Mode::Command;
-                self.cfg.sregs = SRegs::new();
-                self.echo = true;
-                self.verbose = true;
+                // Back to the saved profile (power-on defaults if none was
+                // loaded). A password that was hidden stays hidden.
+                self.cfg.sregs = self.saved.sregs;
+                self.echo = self.saved.echo;
+                self.verbose = self.saved.verbose;
+                let shown = self.set.show_ap_pass && self.saved.show_ap_pass;
+                self.set.clone_from(&self.saved);
+                self.set.show_ap_pass = shown;
                 self.result(ResultCode::Ok);
             }
+            AtCmd::Save => {
+                if !self.set.sta_ssid().is_empty() {
+                    self.set.show_ap_pass = false;
+                }
+                self.saved.clone_from(&self.set);
+                self.saved.sregs = self.cfg.sregs;
+                self.saved.echo = self.echo;
+                self.saved.verbose = self.verbose;
+                self.save_req = true;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WapQuery => {
+                let mut t = Txt::new();
+                t.put(b"WAP ").put(onoff(self.set.ap_on));
+                t.put(b" ").put(self.set.ap_ssid().as_bytes());
+                t.put(b" ").put(self.set.ap_pass().as_bytes());
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WapPower(on) => {
+                self.set.ap_on = on;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WapSet { ssid, pass } => {
+                let ok = self.set.set_ap(ssid, pass);
+                self.ok_or_error(ok);
+            }
+            AtCmd::WstaQuery => {
+                let mut t = Txt::new();
+                match self.set.sta_ssid() {
+                    "" => t.put(b"WSTA OFF"),
+                    ssid => t.put(b"WSTA ").put(ssid.as_bytes()).put(b" ********"),
+                };
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WstaForget => {
+                self.set.clear_sta();
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WstaSet { ssid, pass } => {
+                let ok = self.set.set_sta(ssid, pass);
+                self.ok_or_error(ok);
+            }
+            AtCmd::WifiQuery => {
+                if self.wifi_len == 0 {
+                    self.info(b"WIFI OFF");
+                } else {
+                    let mut t = Txt::new();
+                    t.put(self.wifi.get(..self.wifi_len).unwrap_or(&[]));
+                    self.info(t.bytes());
+                }
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::FwdList => {
+                for i in 0..MAX_FWD {
+                    let mut t = Txt::new();
+                    if let Some(Some(f)) = self.set.fwd.get(i) {
+                        t.put(b"FWD ").put(f.name().as_bytes()).put(b" ");
+                        t.put(f.host().as_bytes()).put(b":");
+                        t.num(u32::from(f.port()), 1);
+                    }
+                    if t.n > 0 {
+                        self.info(t.bytes());
+                    }
+                }
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::FwdDelete(name) => {
+                let ok = self.set.remove_forward(name);
+                self.ok_or_error(ok);
+            }
+            AtCmd::FwdSet {
+                name,
+                host,
+                port,
+                mode,
+            } => {
+                let ok =
+                    Forward::new(name, host, port, mode).is_some_and(|f| self.set.set_forward(f));
+                self.ok_or_error(ok);
+            }
+            AtCmd::PubQuery => {
+                let mut t = Txt::new();
+                t.put(b"PUB ");
+                match self.set.published() {
+                    Some(f) => t.put(f.name().as_bytes()),
+                    None => t.put(b"NONE"),
+                };
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::PubNone => {
+                self.set.publish = None;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::Pub(name) => {
+                let ok = self.set.set_publish(name);
+                self.ok_or_error(ok);
+            }
         }
+    }
+
+    fn ok_or_error(&mut self, ok: bool) {
+        self.result(if ok {
+            ResultCode::Ok
+        } else {
+            ResultCode::Error
+        });
     }
 
     fn result(&mut self, code: ResultCode) {
