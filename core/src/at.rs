@@ -66,6 +66,10 @@ pub enum AtCmd<'a> {
     PubNone,
     /// `AT+PUB=<name>`
     Pub(&'a str),
+    /// `AT+SIMNET?`
+    SimNetQuery,
+    /// `AT+SIMNET=<a.b.c.d>` (Some) or `AT+SIMNET=0` (None).
+    SimNet(Option<[u8; 4]>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,7 +148,8 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB` (`arg` is after the `+`).
+/// `+FB`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET` (`arg` is
+/// after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
 /// one, nor may a password). SSID and password are taken as typed (inner
@@ -160,7 +165,7 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
     };
     let name = arg.get(..i).ok_or(AtError::Unknown)?.trim_end();
     let rest = arg.get(i..).ok_or(AtError::Unknown)?;
-    let known = ["WAP", "WSTA", "WIFI", "FWD", "PUB"];
+    let known = ["WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET"];
     if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
         return Err(AtError::Unknown);
     }
@@ -180,6 +185,8 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         }
     } else if name.eq_ignore_ascii_case("FWD") {
         parse_fwd(form)
+    } else if name.eq_ignore_ascii_case("SIMNET") {
+        parse_simnet(form)
     } else {
         parse_pub(form)
     }
@@ -257,6 +264,35 @@ fn parse_pub(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
         Form::Set(n) if valid_fwd_name(n.trim()) => Ok(AtCmd::Pub(n.trim())),
         Form::Set(_) => Err(AtError::BadArg),
     }
+}
+
+/// `AT+SIMNET?`, `AT+SIMNET=0` or `AT+SIMNET=<a.b.c.d>` (not 0.0.0.0).
+fn parse_simnet(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    match form {
+        Form::Query => Ok(AtCmd::SimNetQuery),
+        Form::Set(v) if v.trim() == "0" => Ok(AtCmd::SimNet(None)),
+        Form::Set(v) => parse_ipv4(v.trim())
+            .filter(|ip| *ip != [0; 4])
+            .map(|ip| AtCmd::SimNet(Some(ip)))
+            .ok_or(AtError::BadArg),
+    }
+}
+
+/// Dotted quad, each part 1 to 3 digits, 0 to 255.
+pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut ip = [0u8; 4];
+    let mut it = s.split('.');
+    for d in ip.iter_mut() {
+        let part = it.next()?;
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *d = part.parse().ok()?;
+    }
+    if it.next().is_some() {
+        return None;
+    }
+    Some(ip)
 }
 
 fn parse_dial(arg: &str) -> Result<AtCmd<'_>, AtError> {

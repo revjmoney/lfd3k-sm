@@ -44,6 +44,8 @@ pub struct FakeHal {
     pub rx_mode: bool,
     /// (SF, frame) of every SetTx, oldest first. Tests drain it.
     pub tx_frames: Vec<(u8, Vec<u8>)>,
+    /// Every datagram passed to `lfd3k_hal_udp_send`, oldest first.
+    pub udp_out: Vec<Vec<u8>>,
     buffer: Vec<u8>,
 }
 
@@ -68,6 +70,7 @@ impl FakeHal {
             sf: 0,
             rx_mode: false,
             tx_frames: Vec::new(),
+            udp_out: Vec::new(),
             buffer: Vec::new(),
         }
     }
@@ -186,6 +189,10 @@ pub(crate) fn now_us() -> u64 {
     let t = s.now_us;
     s.now_us = t.saturating_add(s.step_us);
     t
+}
+
+pub(crate) fn udp_send(d: &[u8]) {
+    lock().udp_out.push(d.to_vec());
 }
 
 /// Used by tests that call the panic note path by hand.

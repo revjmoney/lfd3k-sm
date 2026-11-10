@@ -1106,3 +1106,55 @@ impl Harness {
         });
     }
 }
+
+/// A `DatagramPort` over a non-blocking std `UdpSocket`, for the simulated
+/// radio (`SimNetRadio`) on the PC: datagrams go to `peer`, and `recv`
+/// returns only those from the peer's IP address (any source port).
+pub struct UdpPort {
+    sock: std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    start: std::time::Instant,
+}
+
+impl UdpPort {
+    /// Binds `bind` (for example `0.0.0.0:4210`), non-blocking.
+    pub fn bind(bind: &str, peer: std::net::SocketAddr) -> std::io::Result<UdpPort> {
+        let sock = std::net::UdpSocket::bind(bind)?;
+        sock.set_nonblocking(true)?;
+        Ok(UdpPort {
+            sock,
+            peer,
+            start: std::time::Instant::now(),
+        })
+    }
+
+    /// The next datagram from the peer into `buf`, if one is waiting.
+    /// Datagrams from other addresses are read and dropped.
+    pub fn recv(&self, buf: &mut [u8]) -> Option<usize> {
+        loop {
+            match self.sock.recv_from(buf) {
+                Ok((n, from)) if from.ip() == self.peer.ip() => return Some(n),
+                Ok(_) => continue,
+                // WouldBlock, or a Windows ICMP "port unreachable" reset:
+                // nothing more this poll.
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Milliseconds since the port was made (the clock `now_us` uses).
+    pub fn now_ms(&self) -> u32 {
+        self.start.elapsed().as_millis() as u32
+    }
+}
+
+impl lfd3k_core::DatagramPort for UdpPort {
+    fn send(&mut self, d: &[u8]) {
+        // UDP: a lost datagram is a lost frame, as on the air.
+        let _ = self.sock.send_to(d, self.peer);
+    }
+
+    fn now_us(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
+    }
+}

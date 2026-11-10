@@ -1,6 +1,8 @@
 //! The C ABI the firmware's modem task calls.
 //!
-//! One static holder owns the `Modem` and the `Sx1262<HalBus>`. Every entry
+//! One static holder owns the `Modem` and the radios: the `Sx1262<HalBus>`
+//! and the simulated `SimNetRadio<HalUdp>` (AT+SIMNET), of which one is
+//! active. Every entry
 //! point except `lfd3k_init` and `lfd3k_core_version` returns early (with
 //! zero, false or -1) until `lfd3k_init` has run.
 //!
@@ -13,10 +15,10 @@ use core::ffi::{c_char, c_int};
 
 use lfd3k_core::modem::WIFI_STATUS_MAX;
 use lfd3k_core::settings::{valid_pass, BLOB_LEN, HOST_MAX, PASS_MAX, SSID_MAX};
-use lfd3k_core::{Config, Modem, Settings};
+use lfd3k_core::{Config, Modem, Radio, RxInfo, Settings, SimNetRadio, Tier};
 use sx1262::{Error, Sx1262};
 
-use crate::hal::HalBus;
+use crate::hal::{HalBus, HalUdp};
 use crate::panic::NOTE_LEN;
 
 /// `lfd3k_init` result for a name that is not 1 to 16 printable ASCII
@@ -65,29 +67,107 @@ impl Trace {
         self.count = (self.count + 1).min(TRACE_N);
     }
 
-    /// Take one sample if 50 ms have passed since the last one.
-    fn sample(&mut self, radio: &mut Sx1262<HalBus>, now_ms: u32) {
+    /// Take one sample if 50 ms have passed since the last one. In SimNet
+    /// the sample comes from the simulated channel (the RSSI of a frame
+    /// being received, else -110 dBm), so the idle scope still moves.
+    fn sample(&mut self, radio: &mut Radios, now_ms: u32) {
         if let Some(last) = self.last_ms {
             if now_ms.wrapping_sub(last) < TRACE_MS {
                 return;
             }
         }
-        if radio.transmitting() {
+        let tx = if radio.on_sim() {
+            radio.sim.transmitting()
+        } else {
+            radio.lora.transmitting()
+        };
+        let rssi = if tx {
+            None
+        } else if radio.on_sim() {
+            Some(radio.sim.rx_rssi())
+        } else {
+            radio.lora.rssi_inst()
+        };
+        if tx {
             self.last_ms = Some(now_ms);
             self.push(0, 1);
-        } else if let Some(r) = radio.rssi_inst() {
+        } else if let Some(r) = rssi {
             self.last_ms = Some(now_ms);
             self.push(r.clamp(-128, 0) as i8, 0);
         }
     }
 }
 
+/// The radio selector: the SX1262 always exists (so switching back needs no
+/// new init); `peer` says whether the simulated radio is the active one.
+struct Radios {
+    lora: Sx1262<HalBus>,
+    sim: SimNetRadio<HalUdp>,
+    /// `Some(ip)` while AT+SIMNET has the simulated radio on.
+    peer: Option<[u8; 4]>,
+}
+
+impl Radios {
+    const fn new() -> Self {
+        Radios {
+            lora: Sx1262::new(HalBus),
+            sim: SimNetRadio::new(HalUdp),
+            peer: None,
+        }
+    }
+
+    fn on_sim(&self) -> bool {
+        self.peer.is_some()
+    }
+
+    fn service(&mut self, buf: &mut [u8; 255]) -> Option<(usize, RxInfo)> {
+        if self.on_sim() {
+            self.sim.service(buf)
+        } else {
+            self.lora.service(buf)
+        }
+    }
+
+    /// Usable radio for the status (the simulated one always is).
+    fn ok(&self) -> bool {
+        self.on_sim() || !self.lora.failed()
+    }
+}
+
+impl Radio for Radios {
+    fn send(&mut self, tier: Tier, frame: &[u8]) {
+        if self.on_sim() {
+            self.sim.send(tier, frame);
+        } else {
+            self.lora.send(tier, frame);
+        }
+    }
+
+    fn listen(&mut self, tier: Tier) {
+        if self.on_sim() {
+            self.sim.listen(tier);
+        } else {
+            self.lora.listen(tier);
+        }
+    }
+
+    fn busy(&self) -> bool {
+        if self.on_sim() {
+            self.sim.busy()
+        } else {
+            self.lora.busy()
+        }
+    }
+}
+
 struct Device {
     modem: Modem,
-    radio: Sx1262<HalBus>,
+    radio: Radios,
     /// Last S30 value given to the radio.
     power: i8,
     trace: Trace,
+    /// A radio switch the firmware has not taken yet (`lfd3k_take_simnet`).
+    simnet_note: Option<Option<[u8; 4]>>,
 }
 
 /// The static slot. `dev` always holds a valid (blank) device; `live` says
@@ -110,9 +190,10 @@ static HOLDER: Holder = Holder(UnsafeCell::new(Slot {
     live: false,
     dev: Device {
         modem: Modem::blank(),
-        radio: Sx1262::new(HalBus),
+        radio: Radios::new(),
         power: 0,
         trace: Trace::new(),
+        simnet_note: None,
     },
 }));
 
@@ -122,8 +203,26 @@ fn sync_power(d: &mut Device) {
     if p != d.power {
         d.power = p;
         // A failure marks the driver failed; AT&V and status show it.
-        let _ = d.radio.set_power(p);
+        // In SimNet the SX1262 is in standby and takes the power for later.
+        let _ = d.radio.lora.set_power(p);
     }
+}
+
+/// Apply an AT+SIMNET switch the core accepted (it only accepts one with no
+/// call): on, the SX1262 goes to standby and the simulated radio takes over;
+/// off, back to the SX1262. Either way the link listens again on the next
+/// pump, and the firmware is told through `lfd3k_take_simnet`.
+fn apply_simnet(d: &mut Device) {
+    let Some(req) = d.modem.take_simnet_request() else {
+        return;
+    };
+    if req.is_some() && !d.radio.on_sim() {
+        d.radio.lora.standby();
+    }
+    d.radio.sim.stop();
+    d.radio.peer = req;
+    d.modem.radio_changed();
+    d.simnet_note = Some(req);
 }
 
 /// Run `f` on the device, or return `None` before init.
@@ -222,9 +321,13 @@ pub unsafe extern "C" fn lfd3k_init(
     // time is ever a temporary on this stack, never a whole `Modem`.
     let dev = &mut slot.dev;
     dev.modem.reset(cfg);
-    dev.radio = Sx1262::new(HalBus);
+    // Every boot is on the real radio (AT+SIMNET is never saved).
+    dev.radio.lora = Sx1262::new(HalBus);
+    dev.radio.sim.stop();
+    dev.radio.peer = None;
     dev.power = 0;
     dev.trace = Trace::new();
+    dev.simnet_note = None;
     slot.live = true;
     if !last_panic.is_null() && len > 0 {
         // SAFETY: the caller guarantees `last_panic` is valid for `len`
@@ -234,13 +337,13 @@ pub unsafe extern "C" fn lfd3k_init(
     }
     let power = dev.modem.tx_power_dbm();
     dev.power = power;
-    match dev.radio.init(power) {
+    match dev.radio.lora.init(power) {
         Ok(()) => {
             dev.modem.set_radio_diag(0, 0);
             0
         }
         Err(e) => {
-            let errs = dev.radio.device_errors().unwrap_or(0);
+            let errs = dev.radio.lora.device_errors().unwrap_or(0);
             let c = error_code(e);
             dev.modem.set_radio_diag(c, errs);
             c_int::from(c)
@@ -249,10 +352,12 @@ pub unsafe extern "C" fn lfd3k_init(
 }
 
 /// Service the radio (drain received frames into the modem), apply a changed
-/// S30, then tick the modem. Call on every DIO1 edge and every 10 ms.
+/// S30, then tick the modem. Call on every DIO1 edge and every 10 ms (in
+/// SimNet also after `lfd3k_udp_in`).
 #[no_mangle]
 pub extern "C" fn lfd3k_poll(now_ms: u32) {
     with_device(|d| {
+        apply_simnet(d);
         sync_power(d);
         let mut buf = [0u8; 255];
         for _ in 0..RX_PER_POLL {
@@ -330,6 +435,8 @@ pub unsafe extern "C" fn lfd3k_host_in(buf: *const u8, len: usize, now_ms: u32) 
             let n = d.modem.host_input(seg, &mut d.radio, now_ms);
             used += n;
             sync_power(d);
+            // AT+SIMNET then ATD in one batch dials on the new radio.
+            apply_simnet(d);
             if n < seg.len() {
                 break;
             }
@@ -361,6 +468,57 @@ pub extern "C" fn lfd3k_take_fb_request() -> bool {
     with_device(|d| d.modem.take_fb_request()).unwrap_or(false)
 }
 
+/// Taken once after AT+SIMNET switched radios: returns -1 when nothing
+/// changed, 0 when the SX1262 is back (close the UDP socket), 1 when the
+/// simulated radio is on (`ip` gets the peer, open the UDP socket to it on
+/// port 4210). A null `ip` leaves an "on" switch pending and returns -1.
+///
+/// # Safety
+/// `ip` must be null or valid for writes of 4 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_take_simnet(ip: *mut u8) -> c_int {
+    with_device(|d| match d.simnet_note {
+        None => -1,
+        Some(None) => {
+            d.simnet_note = None;
+            0
+        }
+        Some(Some(_)) if ip.is_null() => -1,
+        Some(Some(a)) => {
+            d.simnet_note = None;
+            // SAFETY: `ip` is non-null and valid for 4 bytes (contract).
+            unsafe { core::ptr::copy_nonoverlapping(a.as_ptr(), ip, 4) };
+            1
+        }
+    })
+    .unwrap_or(-1)
+}
+
+/// A datagram from the SimNet peer (UDP port 4210, header and frame). The
+/// simulated radio holds it for the frame's airtime and `lfd3k_poll` then
+/// delivers it; malformed ones, and any while the SX1262 is active, are
+/// dropped. Returns `len` (always all of it), 0 for null or before init.
+/// `now_ms` is unused: the radio reads the HAL clock.
+///
+/// # Safety
+/// `d` must be null or valid for reads of `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_udp_in(d: *const u8, len: usize, now_ms: u32) -> usize {
+    let _ = now_ms;
+    if d.is_null() || len == 0 {
+        return 0;
+    }
+    // SAFETY: the caller guarantees `d` is valid for `len` bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(d, len) };
+    with_device(|dev| {
+        if dev.radio.on_sim() {
+            dev.radio.sim.on_datagram(bytes);
+        }
+        len
+    })
+    .unwrap_or(0)
+}
+
 /// Status for the lights and the OLED. Mirrored in `lfd3k.h`.
 #[allow(non_camel_case_types)]
 #[repr(C)]
@@ -381,6 +539,9 @@ pub struct lfd3k_status_t {
     pub radio_ok: u8,
     /// Wi-Fi call: 0 none, 1 dialing, 2 online, 3 bridging a radio call.
     pub wire: u8,
+    /// 1 while AT+SIMNET has the simulated radio on (the OLED shows SI in
+    /// place of HS).
+    pub simnet: u8,
 }
 
 /// Fills `out`. Before init it is all zeros with `tier` -1.
@@ -406,8 +567,9 @@ pub unsafe extern "C" fn lfd3k_status(now_ms: u32, out: *mut lfd3k_status_t) {
             tier: d.modem.tier().map_or(-1, |t| t.index() as i8),
             rssi,
             snr_x4,
-            radio_ok: u8::from(!d.radio.failed()),
+            radio_ok: u8::from(d.radio.ok()),
             wire: d.modem.wire_state(),
+            simnet: u8::from(d.radio.on_sim()),
         }
     })
     .unwrap_or(lfd3k_status_t {

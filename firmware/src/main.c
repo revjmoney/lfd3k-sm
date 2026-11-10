@@ -13,6 +13,7 @@
 #include "panel.h"
 #include "settings_store.h"
 #include "tcp_link.h"
+#include "udp_link.h"
 #include "usb_link.h"
 #include "wifi_link.h"
 #include "wire_pump.h"
@@ -38,6 +39,35 @@ static bool s_save_failed;       /* last write failed; retry 5 s after s_save_fa
 static uint32_t s_save_failed_ms;
 static bool s_nvs_ok;
 static char s_boot_pass[13];     /* drawn in app_main before the Wi-Fi driver exists */
+
+/* SimNet socket switch the UDP task has not accepted yet (queue full). */
+static int s_udp_want = -1; /* -1 none, 0 close, 1 open */
+static uint8_t s_udp_ip[4];
+
+/* AT+SIMNET: open or close the UDP socket as the core switched radios. */
+static void simnet_step(void)
+{
+    uint8_t ip[4];
+    int sw = lfd3k_take_simnet(ip);
+    if (sw >= 0) {
+        s_udp_want = sw;
+        memcpy(s_udp_ip, ip, sizeof(ip));
+    }
+    if (s_udp_want == 1 && udp_link_open(s_udp_ip)) {
+        s_udp_want = -1;
+    } else if (s_udp_want == 0 && udp_link_close()) {
+        s_udp_want = -1;
+    }
+}
+
+/* Datagrams from the SimNet peer into the core (a bounded batch per loop). */
+static void simnet_in(uint32_t now_ms)
+{
+    static udp_dgram_t d; /* modem task only */
+    for (int i = 0; i < 8 && udp_link_recv(&d); i++) {
+        lfd3k_udp_in(d.data, d.len, now_ms);
+    }
+}
 
 static uint8_t s_fb[FB_BYTES];
 static bool s_fb_wanted;   /* AT+FB seen, waiting for earlier output to drain */
@@ -154,6 +184,7 @@ static void modem_task(void *arg)
     load_or_default_settings();
     memset(s_boot_pass, 0, sizeof(s_boot_pass));
     tcp_link_init(xTaskGetCurrentTaskHandle());
+    udp_link_init(xTaskGetCurrentTaskHandle());
     {
         lfd3k_wifi_cfg_t wc;
         (void)lfd3k_take_wifi_changed(); /* the load just reported; the config below is current */
@@ -184,7 +215,10 @@ static void modem_task(void *arg)
             pend_len -= taken;
         }
 
+        simnet_step();
+        simnet_in(now_ms);
         lfd3k_poll(now_ms);
+        simnet_step();
         wire_pump(now_ms);
 
         if (lfd3k_take_wifi_changed()) {

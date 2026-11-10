@@ -92,6 +92,16 @@ fn put_tier(t: &mut Txt, tier: Tier) {
         .num(tier.air_bps(), 1);
 }
 
+/// `a.b.c.d`.
+fn put_ip(t: &mut Txt, ip: [u8; 4]) {
+    for (i, b) in ip.iter().enumerate() {
+        if i > 0 {
+            t.put(b".");
+        }
+        t.num(u32::from(*b), 1);
+    }
+}
+
 fn name_of(cfg: &Config) -> &str {
     cfg.name
         .get(..cfg.name_len as usize)
@@ -280,6 +290,10 @@ pub struct Modem {
     wire: Wire,
     /// Modem task stack headroom reported by the firmware, bytes.
     stack_free: Option<u32>,
+    /// `AT+SIMNET`: the simulated radio's peer while it is on. Never saved.
+    simnet: Option<[u8; 4]>,
+    /// A switch the platform has not taken yet (see `take_simnet_request`).
+    simnet_req: Option<Option<[u8; 4]>>,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -339,6 +353,8 @@ impl Modem {
             wifi_len: 0,
             wire: Wire::new(),
             stack_free: None,
+            simnet: None,
+            simnet_req: None,
         }
     }
 
@@ -375,6 +391,8 @@ impl Modem {
         self.wifi_len = 0;
         self.wire.reset_all();
         self.stack_free = None;
+        self.simnet = None;
+        self.simnet_req = None;
     }
 
     /// The platform's live Wi-Fi status line for `AT+WIFI?`
@@ -469,6 +487,24 @@ impl Modem {
     /// True once after `AT+FB` was entered (clears the flag).
     pub fn take_fb_request(&mut self) -> bool {
         core::mem::take(&mut self.fb_request)
+    }
+
+    /// Taken once after `AT+SIMNET` switched radios: `Some(Some(ip))` use the
+    /// simulated radio with that peer, `Some(None)` back to the SX1262. Only
+    /// accepted while no call exists. The platform swaps the radio and then
+    /// calls `radio_changed`.
+    pub fn take_simnet_request(&mut self) -> Option<Option<[u8; 4]>> {
+        self.simnet_req.take()
+    }
+
+    /// The simulated radio's peer while `AT+SIMNET` has it on.
+    pub fn simnet(&self) -> Option<[u8; 4]> {
+        self.simnet
+    }
+
+    /// The radio was swapped: listen again on the next pump.
+    pub fn radio_changed(&mut self) {
+        self.link.radio_changed();
     }
 
     /// Metadata of the last received frame, if any.
@@ -1006,7 +1042,12 @@ impl Modem {
                     .int(i32::from(dbm) + GC1109_GAIN_DB)
                     .put(b" dBm out");
                 self.info(t.bytes());
-                if let Some((code, errs)) = self.radio_diag {
+                if let Some(ip) = self.simnet {
+                    let mut t = Txt::new();
+                    t.put(b"RADIO SIMNET ");
+                    put_ip(&mut t, ip);
+                    self.info(t.bytes());
+                } else if let Some((code, errs)) = self.radio_diag {
                     let mut t = Txt::new();
                     if code == 0 {
                         t.put(b"RADIO OK");
@@ -1187,6 +1228,30 @@ impl Modem {
             AtCmd::Pub(name) => {
                 let ok = self.set.set_publish(name);
                 self.ok_or_error(ok);
+            }
+            AtCmd::SimNetQuery => {
+                let mut t = Txt::new();
+                t.put(b"SIMNET ");
+                match self.simnet {
+                    Some(ip) => put_ip(&mut t, ip),
+                    None => {
+                        t.put(b"OFF");
+                    }
+                }
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::SimNet(ip) => {
+                // Only with no call at all: the radio is swapped under the link.
+                let idle = self.mode == Mode::Command
+                    && self.link.is_idle()
+                    && !self.wire_active()
+                    && !self.wire.close;
+                if idle {
+                    self.simnet = ip;
+                    self.simnet_req = Some(ip);
+                }
+                self.ok_or_error(idle);
             }
         }
     }

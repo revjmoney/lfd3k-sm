@@ -227,6 +227,23 @@ impl<B: Bus> Sx1262<B> {
         Some(-(i16::from(raw) / 2))
     }
 
+    /// Stop whatever the chip is doing (a transmission is cut off) and put
+    /// it in standby with the front end in receive position. Nothing is
+    /// sent or heard until the next `send` or `listen`. A BUSY timeout
+    /// fails the driver, as for any command.
+    pub fn standby(&mut self) {
+        self.bus.fem(false);
+        if self.failed || !self.ready {
+            self.state = State::Idle;
+            return;
+        }
+        if self.write(&cmd::set_standby(cmd::STDBY_XOSC)).is_err() {
+            self.abort();
+            return;
+        }
+        self.state = State::Idle;
+    }
+
     /// Set chip output power in dBm, clamped to -9..=22. Applied now when
     /// the chip is idle, otherwise at the next `send`. Before `init` the
     /// value is only stored, and `init(power_dbm)` replaces it: init's

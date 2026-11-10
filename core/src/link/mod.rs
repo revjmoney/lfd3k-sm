@@ -312,6 +312,13 @@ impl Link {
         matches!(self.state, State::Connected | State::Resync)
     }
 
+    /// The radio under the link was swapped (or put to standby and back):
+    /// the next pump calls `listen` again whatever it last asked for.
+    pub fn radio_changed(&mut self) {
+        self.need_listen = true;
+        self.listening = None;
+    }
+
     pub fn is_idle(&self) -> bool {
         self.state == State::Idle
     }

@@ -2,6 +2,7 @@
 //! as the `sx1262::Bus` the driver runs on. On the host the same calls land
 //! in `fake_hal`.
 
+use lfd3k_core::DatagramPort;
 use sx1262::Bus;
 
 #[cfg(target_os = "none")]
@@ -13,6 +14,13 @@ mod sys {
         fn lfd3k_hal_fem_tx(on: bool);
         fn lfd3k_hal_now_us() -> u64;
         fn lfd3k_hal_panic(note: *const u8, len: usize);
+        fn lfd3k_hal_udp_send(d: *const u8, len: usize);
+    }
+
+    pub fn udp_send(d: &[u8]) {
+        // SAFETY: `d` is valid for `d.len()` bytes; the HAL copies it into a
+        // queue and never keeps the pointer.
+        unsafe { lfd3k_hal_udp_send(d.as_ptr(), d.len()) }
     }
 
     pub fn spi_xfer(tx: &[u8], rx: &mut [u8]) {
@@ -70,6 +78,19 @@ impl Bus for HalBus {
 
     fn fem(&mut self, tx: bool) {
         sys::fem_tx(tx);
+    }
+
+    fn now_us(&self) -> u64 {
+        sys::now_us()
+    }
+}
+
+/// Zero sized `DatagramPort` over the C HAL's UDP queue (AT+SIMNET).
+pub struct HalUdp;
+
+impl DatagramPort for HalUdp {
+    fn send(&mut self, d: &[u8]) {
+        sys::udp_send(d);
     }
 
     fn now_us(&self) -> u64 {

@@ -439,13 +439,14 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
                 continue;
             }
             int x = lx[i], y = ly[i];
+            const char *lab = (i == 4 && s->simnet) ? "SI" : LIGHT[i]; /* SimNet test mode */
             if (lights & (1u << i)) {
                 fill(fb, x, y, 15, 11, 1);
-                text(fb, x + 2, y + 2, LIGHT[i], 1, 0);
+                text(fb, x + 2, y + 2, lab, 1, 0);
             } else {
                 fill(fb, x, y, 15, 11, 0); /* a mover hides what it passes over */
                 frame(fb, x, y, 15, 11);
-                text(fb, x + 2, y + 2, LIGHT[i], 1, 1);
+                text(fb, x + 2, y + 2, lab, 1, 1);
             }
         }
     }

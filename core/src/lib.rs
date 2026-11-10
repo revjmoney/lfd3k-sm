@@ -8,6 +8,7 @@ pub mod link;
 pub mod modem;
 pub mod radio;
 pub mod settings;
+pub mod simnet;
 pub mod telnet;
 pub mod tier;
 pub mod wire;
@@ -18,6 +19,7 @@ pub use link::{Event, Link};
 pub use modem::{Config, Lights, Modem};
 pub use radio::{Radio, RxInfo};
 pub use settings::{Forward, Settings, WireMode, BLOB_LEN, MAX_FWD};
+pub use simnet::{DatagramPort, SimNetRadio};
 pub use tier::{best_tier, Tier};
 pub use wire::WireReq;
 

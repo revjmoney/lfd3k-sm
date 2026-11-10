@@ -26,6 +26,10 @@ void     lfd3k_hal_fem_tx(bool on);
 uint64_t lfd3k_hal_now_us(void);
 /* Store note (up to 64 bytes, "file:line") in RTC RAM, then esp_restart. */
 void     lfd3k_hal_panic(const uint8_t *note, size_t len);
+/* AT+SIMNET: queue one datagram (8 byte header plus frame, at most
+ * LFD3K_SIMNET_DGRAM_MAX bytes) for the UDP task to send to peer:4210.
+ * Never blocks; a full queue drops it. Called only while SimNet is on. */
+void     lfd3k_hal_udp_send(const uint8_t *d, size_t len);
 
 /* ---- Provided by Rust. ---- */
 
@@ -67,6 +71,7 @@ typedef struct {
     int16_t snr_x4;
     uint8_t radio_ok;
     uint8_t wire;      /* 0 none, 1 dialing, 2 online, 3 bridging a radio call */
+    uint8_t simnet;    /* 1 while AT+SIMNET has the simulated radio on (OLED: SI for HS) */
 } lfd3k_status_t;
 void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
 
@@ -75,6 +80,20 @@ void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
  * transmitting). Copies at most cap samples (the newest), returns the count.
  * Either pointer may be NULL. Returns 0 before init. */
 size_t   lfd3k_rf_trace(int8_t *dbm, uint8_t *tx, size_t cap);
+
+/* ---- SimNet: the simulated radio over UDP (AT+SIMNET, test mode). ---- */
+
+#define LFD3K_SIMNET_PORT      4210
+#define LFD3K_SIMNET_HDR_LEN   8
+#define LFD3K_SIMNET_DGRAM_MAX (LFD3K_SIMNET_HDR_LEN + 255)
+
+/* Taken once after AT+SIMNET switched radios: -1 no change, 0 back on the
+ * SX1262 (close the UDP socket), 1 simulated radio on (ip gets the peer;
+ * open the socket). Every boot starts on the SX1262. */
+int      lfd3k_take_simnet(uint8_t ip[4]);
+/* A datagram from the peer (header and frame). Returns len (always all of
+ * it), 0 before init. Call lfd3k_poll after a batch. now_ms is unused. */
+size_t   lfd3k_udp_in(const uint8_t *d, size_t len, uint32_t now_ms);
 
 /* ---- Settings (NVS blob) and Wi-Fi. ---- */
 
