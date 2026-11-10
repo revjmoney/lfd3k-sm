@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_attr.h"
+#include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -19,6 +20,10 @@ typedef struct {
 } panic_slot_t;
 
 static RTC_NOINIT_ATTR panic_slot_t s_panic;
+
+#define SPI_MAX 258
+static DMA_ATTR WORD_ALIGNED_ATTR uint8_t s_txb[260];
+static DMA_ATTR WORD_ALIGNED_ATTR uint8_t s_rxb[260];
 
 static spi_device_handle_t s_spi;
 static TaskHandle_t s_notify_task;
@@ -38,8 +43,8 @@ static void IRAM_ATTR dio1_isr(void *arg)
 static void out_pin(int pin, int level)
 {
     gpio_reset_pin(pin);
+    gpio_set_level(pin, level); /* level first so the pin never glitches LOW */
     gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-    gpio_set_level(pin, level);
 }
 
 void hal_radio_init(TaskHandle_t modem_task)
@@ -78,14 +83,20 @@ void hal_radio_init(TaskHandle_t modem_task)
         .intr_type = GPIO_INTR_POSEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&dio1));
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    esp_err_t isr = gpio_install_isr_service(0);
+    if (isr != ESP_OK && isr != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(isr);
+    }
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_LORA_DIO1, dio1_isr, NULL));
 }
 
 size_t hal_radio_take_panic_note(uint8_t *out)
 {
     size_t n = 0;
-    if (s_panic.magic == PANIC_MAGIC && s_panic.len > 0 && s_panic.len <= sizeof(s_panic.note)) {
+    esp_reset_reason_t why = esp_reset_reason();
+    bool warm = why == ESP_RST_SW || why == ESP_RST_PANIC || why == ESP_RST_TASK_WDT ||
+                why == ESP_RST_INT_WDT;
+    if (warm && s_panic.magic == PANIC_MAGIC && s_panic.len > 0 && s_panic.len <= sizeof(s_panic.note)) {
         n = s_panic.len;
         memcpy(out, s_panic.note, n);
     }
@@ -95,15 +106,29 @@ size_t hal_radio_take_panic_note(uint8_t *out)
 
 void lfd3k_hal_spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len)
 {
-    if (len == 0 || tx == NULL) {
+    if (len == 0 || tx == NULL || len > SPI_MAX) {
+        if (rx != NULL && len > 0) {
+            memset(rx, 0, len);
+        }
         return;
     }
+    memcpy(s_txb, tx, len);
     spi_transaction_t t = {
         .length = len * 8,
-        .tx_buffer = tx,
-        .rx_buffer = rx, /* NULL is fine: the driver then skips the read */
+        .tx_buffer = s_txb,
+        .rx_buffer = rx ? s_rxb : NULL,
     };
-    (void)spi_device_polling_transmit(s_spi, &t);
+    esp_err_t e = spi_device_polling_transmit(s_spi, &t);
+    if (e != ESP_OK) {
+        ESP_LOGE("hal", "spi xfer err %d", (int)e);
+        if (rx != NULL) {
+            memset(rx, 0, len);
+        }
+        return;
+    }
+    if (rx != NULL) {
+        memcpy(rx, s_rxb, len);
+    }
 }
 
 bool lfd3k_hal_busy(void)
@@ -136,7 +161,9 @@ void lfd3k_hal_panic(const uint8_t *note, size_t len)
     if (len > sizeof(s_panic.note)) {
         len = sizeof(s_panic.note);
     }
-    memcpy(s_panic.note, note, len);
+    if (len) {
+        memcpy(s_panic.note, note, len);
+    }
     s_panic.len = (uint16_t)len;
     s_panic.magic = PANIC_MAGIC;
     esp_restart();
