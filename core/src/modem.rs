@@ -7,7 +7,8 @@
 //! while online. A RETRAIN that happens in data mode is kept as a notice and
 //! printed after the `OK` of the escape (verbose only); AT&V shows the
 //! current tier and the last retrains. NO CARRIER ends a call as on a real
-//! modem, after all received in-order data has been delivered.
+//! modem, right after the received in-order data that fits in the host
+//! buffer (the call never leaves NO CARRIER pending).
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs};
 use crate::frame::NAME_MAX;
@@ -376,6 +377,7 @@ impl Modem {
         match cmd {
             AtCmd::Attention => self.result(ResultCode::Ok),
             AtCmd::Dial(name) => {
+                self.fresh_call();
                 if self.mode != Mode::Command || !self.link.dial(name_of(&self.cfg), name, now) {
                     self.result(ResultCode::Error);
                 } else if self.verbose {
@@ -383,6 +385,7 @@ impl Modem {
                 }
             }
             AtCmd::Answer => {
+                self.fresh_call();
                 if !self.link.answer(&self.cfg.sregs, now) {
                     self.result(ResultCode::NoCarrier);
                 }
@@ -481,6 +484,7 @@ impl Modem {
                 self.result(ResultCode::Ok);
             }
             AtCmd::Reset => {
+                self.fresh_call();
                 self.link.hangup(now);
                 self.mode = Mode::Command;
                 self.cfg.sregs = SRegs::new();
@@ -528,7 +532,7 @@ impl Modem {
                     }
                 }
                 Event::Connect(t) => {
-                    self.retrain_note = None;
+                    self.fresh_call();
                     self.mode = Mode::Data;
                     self.esc = 0;
                     self.last_host = now;
@@ -546,33 +550,49 @@ impl Modem {
                     }
                 }
                 Event::NoCarrier => {
+                    // Deliver what fits, then NO CARRIER at once (the
+                    // reserve keeps room for it), so it never outlives the call.
+                    self.closing = true;
+                    self.drain();
                     self.mode = Mode::Command;
                     self.retrain_note = None;
-                    self.closing = true;
                 }
                 Event::Busy => self.result(ResultCode::Busy),
                 Event::NoAnswer => self.result(ResultCode::NoAnswer),
             }
         }
-        if self.mode == Mode::Data || self.closing {
-            let mut tmp = [0u8; 256];
-            loop {
-                let room = self.out.free().saturating_sub(OUT_RESERVE).min(tmp.len());
-                if room == 0 {
-                    break;
-                }
-                let n = self.link.read_data(tmp.get_mut(..room).unwrap_or(&mut []));
-                if n == 0 {
-                    // Everything received is out: now end the call.
-                    if self.closing {
-                        self.closing = false;
-                        self.result(ResultCode::NoCarrier);
-                    }
-                    break;
-                }
-                self.out.push(tmp.get(..n).unwrap_or(&[]));
-            }
+        if self.mode == Mode::Data {
+            self.drain();
         }
         self.link.pump(radio, now);
+    }
+
+    /// Move received call data to the host, keeping OUT_RESERVE free. When
+    /// `closing`, print NO CARRIER after the data (or as soon as the ring is
+    /// full) and clear `closing` before returning.
+    fn drain(&mut self) {
+        let mut tmp = [0u8; 256];
+        loop {
+            let room = self.out.free().saturating_sub(OUT_RESERVE).min(tmp.len());
+            let n = if room == 0 {
+                0
+            } else {
+                self.link.read_data(tmp.get_mut(..room).unwrap_or(&mut []))
+            };
+            if n == 0 {
+                break;
+            }
+            self.out.push(tmp.get(..n).unwrap_or(&[]));
+        }
+        if self.closing {
+            self.closing = false;
+            self.result(ResultCode::NoCarrier);
+        }
+    }
+
+    /// A new call or a reset: nothing from the old call may follow.
+    fn fresh_call(&mut self) {
+        self.closing = false;
+        self.retrain_note = None;
     }
 }
