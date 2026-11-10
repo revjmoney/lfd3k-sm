@@ -12,6 +12,7 @@ static struct {
     uint32_t closing_gen;  /* CLOSE sent for this gen, waiting for its ack */
     bool closing;
     bool want_close;       /* core asked to close; draining wire_out first */
+    uint32_t close_since;  /* when want_close was set (ms) */
     bool connected;        /* CONNECTED reported to the core */
     bool sock_dead;        /* FAILED or CLOSED reported: nothing more to send */
     bool pend_open;
@@ -40,6 +41,30 @@ static bool pull_out(void)
     }
 }
 
+static void set_want_close(uint32_t now_ms)
+{
+    if (!w.want_close) {
+        w.want_close = true;
+        w.close_since = now_ms;
+    }
+    if (w.end_ev) {
+        w.sock_dead = true; /* a failed or closed report was pending */
+    }
+    w.end_ev = 0;
+}
+
+/* Reads and throws away whatever the core still wants to send. True when it has no more. */
+static bool discard_out(void)
+{
+    uint8_t chunk[CHUNK];
+    for (int i = 0; i < 64; i++) {
+        if (lfd3k_wire_out(chunk, sizeof(chunk)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void wire_pump(uint32_t now_ms)
 {
     /* 1. Close before request: a close always refers to the socket that exists. */
@@ -47,8 +72,7 @@ void wire_pump(uint32_t now_ms)
         if (w.pend_open) {
             w.pend_open = false;        /* cancels a connect that never started */
         } else if (w.cur_gen != 0) {
-            w.want_close = true;
-            w.end_ev = 0;
+            set_want_close(now_ms);
         }
     }
 
@@ -63,13 +87,16 @@ void wire_pump(uint32_t now_ms)
         }
     }
     if (w.pend_open && w.cur_gen != 0 && !w.want_close) {
-        w.want_close = true; /* the core did not close the old socket: do it for it */
-        w.end_ev = 0;
+        set_want_close(now_ms); /* the core did not close the old socket: do it for it */
     }
 
     /* 3. Drain wire_out, then close the socket (and abort a pending connect). */
     if (w.want_close) {
-        if (pull_out() && tcp_link_close(w.cur_gen)) {
+        /* A dead socket, or a live one that did not take the data within 2 s,
+         * gets its output thrown away so the close can never wedge. */
+        bool give_up = w.sock_dead || (uint32_t)(now_ms - w.close_since) >= 2000;
+        bool drained = give_up ? discard_out() : pull_out();
+        if (drained && tcp_link_close(w.cur_gen)) {
             w.closing = true;
             w.closing_gen = w.cur_gen;
             w.cur_gen = 0;
@@ -90,7 +117,13 @@ void wire_pump(uint32_t now_ms)
             }
             continue;
         }
-        if (w.cur_gen == 0 || ev.gen != w.cur_gen || w.want_close) {
+        if (w.cur_gen == 0 || ev.gen != w.cur_gen) {
+            continue;
+        }
+        if (w.want_close) {
+            if (ev.type == TCP_EV_FAILED || ev.type == TCP_EV_CLOSED) {
+                w.sock_dead = true; /* nothing to wait for: close without draining */
+            }
             continue;
         }
         if (ev.type == TCP_EV_CONNECTED) {

@@ -33,7 +33,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)data;
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_AP_STACONNECTED) {
+            portENTER_CRITICAL(&s_mux);
             s_ap_joined = true;
+            portEXIT_CRITICAL(&s_mux);
         } else if (id == WIFI_EVENT_STA_DISCONNECTED && s_sta_wanted) {
             uint32_t b = s_backoff_s;
             s_retry_at_us = esp_timer_get_time() + (int64_t)b * 1000000;
@@ -81,12 +83,15 @@ static void apply(const lfd3k_wifi_cfg_t *c)
     }
     if (e == ESP_OK && sta) {
         memset(&wc, 0, sizeof(wc));
-        strlcpy((char *)wc.sta.ssid, c->sta_ssid, sizeof(wc.sta.ssid));
+        memcpy(wc.sta.ssid, c->sta_ssid, strnlen(c->sta_ssid, sizeof(wc.sta.ssid))); /* a 32 byte SSID has no NUL */
         strlcpy((char *)wc.sta.password, c->sta_pass, sizeof(wc.sta.password));
         wc.sta.threshold.authmode = c->sta_pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
         e = esp_wifi_set_config(WIFI_IF_STA, &wc);
     }
     memset(&wc, 0, sizeof(wc));
+    /* The status line needs only names and flags; never keep passwords. */
+    memset(s_cfg.ap_pass, 0, sizeof(s_cfg.ap_pass));
+    memset(s_cfg.sta_pass, 0, sizeof(s_cfg.sta_pass));
     if (e == ESP_OK) {
         e = esp_wifi_start();
     }
@@ -182,7 +187,9 @@ void wifi_link_get_status(char *out, size_t cap)
 
 bool wifi_link_take_ap_joined(void)
 {
+    portENTER_CRITICAL(&s_mux);
     bool j = s_ap_joined;
     s_ap_joined = false;
+    portEXIT_CRITICAL(&s_mux);
     return j;
 }

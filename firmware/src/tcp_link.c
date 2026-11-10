@@ -80,9 +80,12 @@ static void tx_discard(void)
 static void wait_close(uint32_t gen)
 {
     tcp_cmd_t c;
-    do {
-        xQueueReceive(s_cmdq, &c, portMAX_DELAY);
-    } while (c.type != CMD_CLOSE);
+    for (;;) {
+        tx_discard(); /* nobody may ever wait on space in a buffer nobody reads */
+        if (xQueueReceive(s_cmdq, &c, pdMS_TO_TICKS(50)) == pdTRUE && c.type == CMD_CLOSE) {
+            break;
+        }
+    }
     tx_discard();
     post(TCP_EV_CLOSE_ACK, gen);
 }
@@ -102,7 +105,11 @@ static void flush_tx(int fd)
             FD_ZERO(&w);
             FD_SET(fd, &w);
             struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
-            if (select(fd + 1, NULL, &w, NULL, &tv) > 0) {
+            int sr = select(fd + 1, NULL, &w, NULL, &tv);
+            if (sr < 0) {
+                return;
+            }
+            if (sr > 0) {
                 ssize_t s = send(fd, b + off, n - off, 0);
                 if (s < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
                     return;
@@ -156,7 +163,12 @@ static int connect_to(const char *host, uint16_t port, bool *aborted)
                 FD_ZERO(&w);
                 FD_SET(s, &w);
                 struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };
-                if (select(s + 1, NULL, &w, NULL, &tv) > 0) {
+                int sr = select(s + 1, NULL, &w, NULL, &tv);
+                if (sr < 0) {
+                    vTaskDelay(pdMS_TO_TICKS(10)); /* never spin; the deadline ends it */
+                    continue;
+                }
+                if (sr > 0) {
                     int err = 0;
                     socklen_t el = sizeof(err);
                     ok = getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0;
@@ -193,7 +205,7 @@ static bool stream(int fd)
             return true;
         }
         if (txo == txn) {
-            txn = xStreamBufferReceive(s_tx, txb, sizeof(txb), 0);
+            txn = xStreamBufferReceive(s_tx, txb, sizeof(s_txb), 0);
             txo = 0;
         }
         size_t space = xStreamBufferSpacesAvailable(s_rx);

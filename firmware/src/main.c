@@ -34,7 +34,10 @@ static const char *TAG = "lfd3k";
 static uint8_t s_blob[LFD3K_BLOB_LEN];
 static size_t s_blob_len;
 static bool s_save_held;
-static uint32_t s_save_retry_ms;
+static bool s_save_failed;       /* last write failed; retry 5 s after s_save_failed_ms */
+static uint32_t s_save_failed_ms;
+static bool s_nvs_ok;
+static char s_boot_pass[13];     /* drawn in app_main before the Wi-Fi driver exists */
 
 static uint8_t s_fb[FB_BYTES];
 static bool s_fb_wanted;   /* AT+FB seen, waiting for earlier output to drain */
@@ -100,14 +103,12 @@ static bool drain_host_out(void)
 static void load_or_default_settings(void)
 {
     size_t len = 0;
-    if (settings_store_load(s_blob, sizeof(s_blob), &len) && lfd3k_load_settings(s_blob, len) == 0) {
+    if (s_nvs_ok && settings_store_load(s_blob, sizeof(s_blob), &len) &&
+        lfd3k_load_settings(s_blob, len) == 0) {
         ESP_LOGI(TAG, "settings loaded (%u bytes)", (unsigned)len);
         return;
     }
-    char pass[13];
-    settings_store_gen_ap_pass(pass);
-    lfd3k_default_settings(pass); /* only valid after a rejected load; asks for a save */
-    memset(pass, 0, sizeof(pass));
+    lfd3k_default_settings(s_boot_pass); /* only valid after a rejected load; asks for a save */
     ESP_LOGI(TAG, "first boot: factory settings");
 }
 
@@ -115,15 +116,17 @@ static void load_or_default_settings(void)
 static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
 {
     if (lfd3k_take_save(s_blob, sizeof(s_blob), &s_blob_len)) {
-        s_save_held = true; /* a newer blob replaces a held one */
-        s_save_retry_ms = 0;
+        s_save_held = s_nvs_ok; /* a newer blob replaces a held one; no NVS, no saves */
+        s_save_failed = false;
     }
-    if (s_save_held && st->state == 0 && st->wire == 0 &&
-        (int32_t)(now_ms - s_save_retry_ms) >= 0) {
+    bool wait = s_save_failed && (uint32_t)(now_ms - s_save_failed_ms) < 5000;
+    if (s_save_held && st->state == 0 && st->wire == 0 && !wait) {
         if (settings_store_save(s_blob, s_blob_len)) {
             s_save_held = false;
+            s_save_failed = false;
         } else {
-            s_save_retry_ms = now_ms + 5000;
+            s_save_failed = true;
+            s_save_failed_ms = now_ms;
         }
     }
 }
@@ -149,6 +152,7 @@ static void modem_task(void *arg)
     ESP_LOGI(TAG, "%s core init rc=%d, last crash note %u bytes", name, rc, (unsigned)note_len);
 
     load_or_default_settings();
+    memset(s_boot_pass, 0, sizeof(s_boot_pass));
     tcp_link_init(xTaskGetCurrentTaskHandle());
     {
         lfd3k_wifi_cfg_t wc;
@@ -200,8 +204,14 @@ static void modem_task(void *arg)
 
         if ((uint32_t)(now_ms - last_second) >= 1000) {
             last_second = now_ms;
-            char line[96];
-            wifi_link_get_status(line, sizeof(line));
+            char line[128]; /* the core keeps 96 */
+            if (s_nvs_ok) {
+                wifi_link_get_status(line, sizeof(line));
+            } else {
+                char ws[96];
+                wifi_link_get_status(ws, sizeof(ws));
+                snprintf(line, sizeof(line), "NVS FAIL %s", ws);
+            }
             lfd3k_set_wifi_status(line);
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
         }
@@ -227,7 +237,8 @@ static void modem_task(void *arg)
 
 void app_main(void)
 {
-    settings_store_init();
+    s_nvs_ok = settings_store_init();
+    settings_store_gen_ap_pass(s_boot_pass); /* before the Wi-Fi driver exists */
     wifi_link_init(); /* driver only; the radio starts when the modem task applies the config */
     xTaskCreatePinnedToCore(modem_task, "modem", MODEM_STACK, NULL, 20, NULL, 1);
 }

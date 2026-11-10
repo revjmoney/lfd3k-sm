@@ -9,14 +9,20 @@ static const char *TAG = "settings";
 #define NS  "lfd3k"
 #define KEY "settings"
 
-void settings_store_init(void)
+bool settings_store_init(void)
 {
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        e = nvs_flash_init();
+        e = nvs_flash_erase();
+        if (e == ESP_OK) {
+            e = nvs_flash_init();
+        }
     }
-    ESP_ERROR_CHECK(e);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %s; running on defaults, no saves", esp_err_to_name(e));
+        return false;
+    }
+    return true;
 }
 
 bool settings_store_load(uint8_t *buf, size_t cap, size_t *len)
@@ -66,10 +72,7 @@ void settings_store_gen_ap_pass(char out[13])
         uint32_t r = esp_random();
         for (int i = 0; i < 4 && n < 12; i++) {
             uint8_t b = (uint8_t)(r >> (8 * i));
-            if (b >= 224) { /* 7 * 32: reject the uneven tail */
-                continue;
-            }
-            out[n++] = alpha[b % 32];
+            out[n++] = alpha[b & 31]; /* 32 divides 256: the low 5 bits are uniform */
         }
     }
     out[12] = '\0';

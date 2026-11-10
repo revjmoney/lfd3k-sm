@@ -5,8 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* nvs_flash_init, erasing and re-initialising on NO_FREE_PAGES/NEW_VERSION. */
-void settings_store_init(void);
+/* nvs_flash_init, erasing and re-initialising on NO_FREE_PAGES/NEW_VERSION.
+ * False on any other error: the caller then runs on defaults and never saves. */
+bool settings_store_init(void);
 /* Reads the blob into buf (cap bytes). False when missing or on error. */
 bool settings_store_load(uint8_t *buf, size_t cap, size_t *len);
 /* Writes and commits the blob. False on error. */
