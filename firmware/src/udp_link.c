@@ -74,9 +74,11 @@ static void udp_task(void *arg)
                     close(fd);
                     fd = -1;
                 }
+                drain_tx(); /* nothing from the old peer goes out later */
                 ESP_LOGI(TAG, "simnet off");
             }
-            drain_tx(); /* nothing from before the switch goes out */
+            /* On open, frames queued since the switch (AT+SIMNET then ATDT in
+             * one batch) are kept and go out below. */
         }
         if (fd < 0) {
             drain_tx();

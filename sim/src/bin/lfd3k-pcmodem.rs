@@ -274,6 +274,23 @@ fn wire_service(w: &mut Wire, m: &mut Modem, now: u32, got: &mut Vec<u8>, log: &
 struct Log {
     script: bool,
     line: Vec<u8>,
+    /// Start of a UTF-8 sequence cut at the end of the last host chunk.
+    utf8_tail: Vec<u8>,
+}
+
+/// CP437 upper half (0x80 to 0xFF).
+const CP437_HI: &str = "\
+ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»\
+░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀\
+αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u{a0}";
+
+/// One byte as CP437 (ASCII below 0x80).
+fn cp437(c: u8) -> char {
+    if c < 0x80 {
+        char::from(c)
+    } else {
+        CP437_HI.chars().nth(usize::from(c - 0x80)).unwrap_or('?')
+    }
 }
 
 impl Log {
@@ -292,8 +309,9 @@ impl Log {
     /// Host output: raw on the terminal, one stamped line per line in a script.
     fn host(&mut self, now: u32, b: &[u8]) {
         if !self.script {
+            let text = self.decode(b);
             let mut o = std::io::stdout();
-            let _ = o.write_all(b);
+            let _ = o.write_all(text.as_bytes());
             let _ = o.flush();
             return;
         }
@@ -303,6 +321,39 @@ impl Log {
                 c => self.line.push(c),
             }
         }
+    }
+
+    /// Terminal text: UTF-8 as sent, any other byte read as CP437 (BBS
+    /// screens), since the Windows console refuses invalid UTF-8. A UTF-8
+    /// sequence cut at the end of `b` waits for the next call.
+    fn decode(&mut self, b: &[u8]) -> String {
+        let mut all = std::mem::take(&mut self.utf8_tail);
+        all.extend_from_slice(b);
+        let mut out = String::new();
+        let mut rest: &[u8] = &all;
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(s) => {
+                    out.push_str(s);
+                    break;
+                }
+                Err(e) => {
+                    let (good, bad) = rest.split_at(e.valid_up_to());
+                    out.push_str(std::str::from_utf8(good).unwrap_or(""));
+                    match e.error_len() {
+                        None => {
+                            self.utf8_tail = bad.to_vec();
+                            break;
+                        }
+                        Some(n) => {
+                            out.extend(bad[..n].iter().map(|&c| cp437(c)));
+                            rest = &bad[n..];
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn flush(&mut self, now: u32) {
@@ -474,6 +525,7 @@ fn main() -> ExitCode {
     let mut log = Log {
         script: runner.is_some(),
         line: Vec::new(),
+        utf8_tail: Vec::new(),
     };
     let lines = if runner.is_none() {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();

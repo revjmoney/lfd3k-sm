@@ -63,6 +63,7 @@ datagrams never reach the PC. Nothing here changes firewall settings for you.
 The PC window works a line at a time: each line is sent when you press
 Enter. A line that is only `+++` is sent without Enter, so it works as the
 escape. The modem echoes your commands, so you may see a command twice.
+Ctrl+C closes the PC modem.
 
 ## Retrain test
 

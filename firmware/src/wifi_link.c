@@ -102,6 +102,9 @@ static void apply(const lfd3k_wifi_cfg_t *c)
         return;
     }
     s_started = true;
+    /* Client-only mode defaults to modem sleep, which can hold inbound packets
+     * for a beacon interval: too slow for SimNet frames and telnet echo. */
+    esp_wifi_set_ps(WIFI_PS_NONE);
     if (sta) {
         s_sta_wanted = true;
         esp_wifi_connect();
