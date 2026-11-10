@@ -277,3 +277,10 @@ To be measured: real throughput and range per tier, per-tier power caps against 
 - COM11 terminal: Claude may open COM11 as a serial terminal only, once LFD3K-SM is on it, with DTR and RTS held still. Never flash, reset or probe it; flashing stays Rev's.
 - Bench check without a second radio: Rev's NESDR SMArt v5 with SDRangel's LoRa (ChirpChat) decoder can confirm the V4's frames on air.
 - V4 front end (facts from MeshCore variants/heltec_v4, MIT, as used by Simian Radar): SX1262 NSS 8, SCK 9, MOSI 10, MISO 11, RST 12, BUSY 13, DIO1 14, TCXO 1.8 V on DIO3, DIO2 as RF switch; GC1109 FEM power LDO GPIO7 HIGH, enable GPIO2 HIGH, PA mode GPIO46. SX1262 setting 10 gives about 22 dBm at the antenna (FEM gain), so power defaults must count the FEM.
+
+## 19. Mode picker decisions (Rev, 2026-11-10)
+- Research: `F:\lfd3k-sm\docs\research\2026-11-10-multimode-research.md` (RNode 1.86 "Heltec V4PA" build exists and runs from any slot; Meshtastic heltec-v4 v2.7.26; Simian Radar uses labels "littlefs" and "camdb"; our own bootloader can boot all of them; picker runs every boot through a bootloader override plus an RTC token).
+- One full wipe of the V4 is OK when the picker is ready (Claude asks again right before). Everything gets reinstalled: LFD3K-SM (Rev retypes AT+WSTA), Simian Radar plus camdb, RNode (re-provision), Meshtastic (fresh).
+- Meshtastic mode: a **patched build** from source (no OTA loader writing into other slots, no nvs_flash_erase on factory reset), kept as its own GPL repo separate from the closed modem; source must be kept with any binary Rev ships.
+- Downloads OK from the official GitHub releases (RNode_Firmware and meshtastic/firmware); Claude shows file names and sizes first. Cloning the Meshtastic source repo is asked separately.
+- Meshtastic trademark: do not put the name on a sold product without asking trademark@meshtastic.org; the M-PWRD logo is allowed.
