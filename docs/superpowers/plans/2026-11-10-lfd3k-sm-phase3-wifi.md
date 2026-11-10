@@ -12,12 +12,21 @@
 
 ## Global Constraints
 
-- Everything in the phase 2 plan's Global Constraints still holds (closed source, no GPL/LGPL, `no_std` no heap `forbid(unsafe)` never-panic core, only `ffi` has unsafe, no AI attribution, no em dashes or double hyphens in user-facing text, FEATURES.md updated in the task that adds a feature). Phase 2 plan: `docs/superpowers/plans/2026-11-10-lfd3k-sm-phase2-radio.md`.
+- Closed source, private repo, never pushed. No GPL or LGPL code. GPL code (AXIS BBS is GPL, Rev's own) may be read for facts such as which telnet options it negotiates, then written fresh; never copied. Record any new crate in `THIRD_PARTY.md`.
+- `lfd3k-core` and `sx1262` are `no_std`, no heap, `#![forbid(unsafe_code)]`, never panic on any input (no `unwrap`, `expect`, or out-of-range indexing in non-test code; use `get`). Only `lfd3k-ffi` may use `unsafe`. All buffers are fixed-size arrays.
+- Single-task contract: only the firmware's modem task calls any `lfd3k_*` Rust function; other tasks (USB, Wi-Fi, TCP, panel) only move bytes through stream buffers or queues. The modem task never blocks (no blocking socket, NVS or Wi-Fi calls on it except the short NVS save below).
+- User-facing text never uses em dashes or double hyphens. Commits carry no AI attribution. Keep `docs/FEATURES.md` updated in the task that adds a feature or setting.
+- Run cargo from PowerShell (Git Bash's link.exe shadows MSVC); prepend `$env:USERPROFILE\.cargo\bin` if needed. Device build: `powershell -ExecutionPolicy Bypass -File firmware\build_core.ps1`, then `pio run -d firmware -e heltec_v4` (`$env:USERPROFILE\.platformio\penv\Scripts` on PATH). The firmware CMake stops with "Stale Rust core" if a `.rs` is newer than the `.a`.
+- Board facts (unchanged from phase 2): V4 pins in `firmware/src/board.h`; console and logs on UART0 only (no USB bridge on this board), so `AT` over USB is the only window into the device.
+- Existing interfaces to build on: `core/src/modem.rs` (`Modem`, `Config`, `host_input`, `tick`, `host_output`, `call_state`, `set_radio_diag`, `take_fb_request`), `core/src/at.rs` (`AtCmd`, `parse_line`, `SRegs`), `ffi/src/api.rs` (C ABI, `fake_hal` for host tests), `firmware/include/lfd3k.h`, `firmware/src/main.c` (modem task loop), `sim/src/lib.rs` (two-modem harness).
 - **Hardware rules:** no subagent opens a serial port, runs esptool, `pio -t upload` or `pio device monitor`. Only the controller flashes Rev's V4 and only when Rev says so in chat, after matching VID 303A PID 1001 and MAC 88:56:A6:96:16:FC. COM15 (lathe) and COM9 (V3) are never touched.
 - **Credentials:** Claude never types Rev's home Wi-Fi password. Rev enters `AT+WSTA` himself. The modem never prints a stored client password (shown as `********`); the hotspot password it generated itself is shown, because Rev needs it to join.
 - Rev's rule: Tasks 1 to 5 write no new tests; existing tests keep passing; all new tests come in Task 6.
 - **Connect strings:** a wire call prints `CONNECT WIFI TCP` (honest name, no fake speed). A radio call bridged to a forward prints nothing extra on the caller's side beyond the normal radio `CONNECT`.
 - **First boot (design 8.5):** hotspot name = the modem name (`AXISMODEM-XXXX`), hotspot password = 12 random characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no look-alikes), generated once with the hardware RNG and saved. Hotspot is on by default, WPA2, channel 6, max 4 clients. Client mode off until `AT+WSTA` is set.
+- **Telnet:** AXIS boards speak telnet on port 23: on connect the server sends `IAC WILL ECHO, IAC WILL SGA, IAC DO SGA, IAC WILL BINARY, IAC DO BINARY, IAC DO NAWS` and filters IAC from what it receives (facts read from `F:\axis-bbs\src\net\telnet.cpp`). Each forward and `host:port` dial has a mode: telnet (`T`) or raw (`R`); default `T` for port 23, `R` otherwise. In telnet mode the core is a telnet client on the wire side: it answers `WILL ECHO/SGA/BINARY` with `DO`, `DO SGA/BINARY` with `WILL`, `DO NAWS` with `WILL NAWS` plus `SB NAWS 0 80 0 25 SE`, refuses everything else (`DONT`/`WONT`), strips all negotiation and subnegotiation from incoming bytes, turns `IAC IAC` into one 0xFF, and doubles 0xFF going out; when BINARY was not agreed, an outgoing CR is sent as CR NUL. The caller (USB terminal or the radio caller) only ever sees clean bytes.
+- **Hotspot:** no routing or NAPT between the hotspot side and the client side; hotspot devices reach only the modem itself (later phases add the bridge).
+- **Secrets on screen and in files:** the generated hotspot password is shown on the OLED only until the first device joins the hotspot or until `AT&W` has saved it once with a client network set, and in `AT+WAP?`. Nothing that contains it or Rev's client password (screenshots, logs, bench transcripts) is committed or sent to chat; bench tools redact `WAP` lines when logging.
 - **Access policy (design 6):** an answered radio call is bridged only to the one forward named by `AT+PUB`; with none published, answered calls behave as today (data to USB). Never bridge a radio caller to an arbitrary `host:port`.
 
 ## Review Focus
@@ -41,8 +50,9 @@ pub const FWD_NAME: usize = 16;   // same rule as station names
 pub const HOST_MAX: usize = 63;
 pub const SSID_MAX: usize = 32;
 pub const PASS_MAX: usize = 63;   // WPA2: 8..=63
-pub struct Forward { name, host, port: u16 }        // fixed arrays + lengths
-pub struct Settings { ap_on: bool, ap_ssid, ap_pass, sta_ssid, sta_pass, fwd: [Option<Forward>; MAX_FWD], publish: Option<u8 /*fwd index*/> }
+pub enum WireMode { Telnet, Raw }
+pub struct Forward { name, host, port: u16, mode: WireMode }        // fixed arrays + lengths
+pub struct Settings { ap_on: bool, ap_ssid, ap_pass, sta_ssid, sta_pass, fwd: [Option<Forward>; MAX_FWD], publish: Option<u8 /*fwd index*/>, sregs: SRegs, echo: bool, verbose: bool }
 impl Settings {
     pub fn defaults(name: &str, ap_pass: &str) -> Settings;
     pub fn to_blob(&self, out: &mut [u8; BLOB_LEN]) -> usize;   // magic "LFS1", version 1, fields, CRC-16/CCITT
@@ -55,8 +65,10 @@ New AT commands (all in command mode, plain `OK`/`ERROR`):
 - `AT+WAP=<ssid>,<pass>` set hotspot (pass 8..63 chars); `AT+WAP=0` / `AT+WAP=1` hotspot off/on; `AT+WAP?` prints `WAP ON <ssid> <pass>`.
 - `AT+WSTA=<ssid>,<pass>` set client network; `AT+WSTA=0` forget it; `AT+WSTA?` prints `WSTA <ssid> ********` or `WSTA OFF`.
 - `AT+WIFI?` prints the platform's live status line (`WIFI AP <ssid> <n> CLIENTS STA <ssid|OFF> <ip|NO IP>`), which the platform supplies through `Modem::set_wifi_status(&str)`.
-- `AT+FWD=<name>,<host>,<port>` add or replace; `AT+FWD=<name>` delete; `AT+FWD?` lists `FWD <name> <host>:<port>` lines.
+- `AT+FWD=<name>,<host>,<port>[,T|R]` add or replace (mode default per Global Constraints); `AT+FWD=<name>` delete; `AT+FWD?` lists `FWD <name> <host>:<port>` lines.
 - `AT+PUB=<name>` publish a forward for answered radio calls; `AT+PUB=0` none; `AT+PUB?`.
+- The v1 blob holds the S registers (all of them, including S0 auto-answer and S30 power) and E/V, so a modem with `AT+PUB` and `ATS0=1` saved still answers after a power cycle.
+- Until Task 2 lands, `ATDT` to a forward or `host:port` replies `NO CARRIER` at once (no radio dial is started).
 - `AT&W` saves (sets a "save wanted" flag the platform takes with `Modem::take_save_request() -> bool` and reads with `Modem::settings()`); `ATZ` keeps today's register reset and also reloads saved settings (platform calls `Modem::load_settings(Settings)` at boot; ATZ restores that copy).
 - `ATDT <target>`: if `<target>` matches a forward name, dial it over Wi-Fi; if it has the form `<host>:<port>` (host 1..63 of `A-Za-z0-9.-`, port 1..65535), dial that; otherwise dial by radio as today.
 - `AT&V` adds `WIFI` and `PUB` lines.
@@ -68,7 +80,9 @@ New AT commands (all in command mode, plain `OK`/`ERROR`):
 
 ### Task 2: The wire call path in the core
 
-**Files:** Create `core/src/wire.rs`. Modify `core/src/modem.rs`, `sim/src/lib.rs` (fake wire endpoint for later tests).
+**Files:** Create `core/src/wire.rs`, `core/src/telnet.rs` (the telnet client filter from Global Constraints, a small byte state machine, both directions). Modify `core/src/modem.rs`, `sim/src/lib.rs` (fake wire endpoint for later tests).
+
+**Size:** after this task report `core::mem::size_of::<Modem>()` (print it from a host test or a `const` assert). Phase 2 Modem was about 5.2 KB and is built on the modem task stack inside `lfd3k_init`; Task 3 must build it in place in the static (no stack copy) if it grew past 8 KB.
 
 **Interfaces (Produces):**
 ```rust
@@ -110,28 +124,32 @@ size_t lfd3k_wire_out(uint8_t *buf, size_t len);
 bool   lfd3k_take_wire_close(void);
 ```
 `lfd3k_status_t` gains `uint8_t wire` (0 none, 1 dialing, 2 online, 3 bridging) appended at the end (struct grows; keep `#[repr(C)]` order and mirror it).
+- Build the Modem in place in the static holder (write fields into the `MaybeUninit` slot or construct with a `const fn`-friendly init) so its size no longer lands on the modem task stack.
+- `lfd3k_set_stack_free(uint32_t bytes)`: the firmware reports the modem task's stack high-water mark; `AT&V` prints `STACK FREE <n>`.
 - [ ] Steps: implement with the same single-task contract, extend fake_hal for host tests, build_core.ps1, cargo test, clippy. Commit `feat(ffi): settings and wire C ABI`.
 
 ### Task 4: Firmware Wi-Fi, NVS and the TCP socket
 
 **Files:** Create `firmware/src/wifi_link.c/.h`, `firmware/src/settings_store.c/.h`. Modify `main.c`, `CMakeLists.txt`, `sdkconfig.defaults`, `partitions.csv` only if NVS is too small (it is 0x6000 today; the blob is 1 KB, fine).
 
-- [ ] **Step 1:** `settings_store`: NVS namespace `lfd3k`, key `settings` blob. Boot: load; if missing or rejected, generate the 12-char hotspot password with `esp_random()` (rejection sampling over the 32-symbol alphabet), call `lfd3k_default_settings`, save. `lfd3k_take_save` results are written from the modem task to NVS (nvs_set_blob + commit, under 50 ms; acceptable on the modem task).
-- [ ] **Step 2:** `wifi_link`: esp_netif + esp_wifi in AP+STA (AP only when no client network). AP WPA2-PSK, channel 6, max 4. STA connects with retry backoff (1, 2, 4 ... 30 s). Status line refreshed into the core every second via `lfd3k_set_wifi_status`. `lfd3k_take_wifi_changed` re-applies config without reboot.
+- [ ] **Step 0 (boot order):** NVS init, then `lfd3k_init`, then load settings (or default and save), then hand the Wi-Fi config to the Wi-Fi task, then start Wi-Fi. Radio init stays where it is.
+- [ ] **Step 1:** `settings_store`: NVS namespace `lfd3k`, key `settings` blob. Boot: load; if missing or rejected, generate the 12-char hotspot password with `esp_random()` (rejection sampling over the 32-symbol alphabet), call `lfd3k_default_settings`, save. `lfd3k_take_save` results are written from the modem task to NVS (nvs_set_blob + commit) only when no call is active; a save asked during a call is held and written right after the call ends.
+- [ ] **Step 2:** `wifi_link` runs on its own Wi-Fi task: esp_netif + esp_wifi in AP+STA (AP only when no client network), `esp_wifi_set_storage(WIFI_STORAGE_RAM)` so the driver never keeps its own NVS copy of the client password (then `AT+WSTA=0` really forgets it). AP WPA2-PSK, channel 6, max 4. STA connects with retry backoff (1, 2, 4 ... 30 s). The modem task copies the config into a queue message when `lfd3k_take_wifi_changed` is true; the Wi-Fi task does the stop, set config and start. The Wi-Fi task posts a status line back; the modem task passes it to `lfd3k_set_wifi_status` once a second.
+- [ ] **Step 2b:** modem task stack: keep 16 KB if Task 3 builds the Modem in place, else 24 KB; report `uxTaskGetStackHighWaterMark` through `lfd3k_set_stack_free` once a second.
 - [ ] **Step 3:** One TCP client on its own task (priority 6, core 0): on a wire request, `getaddrinfo` then non-blocking connect with a 15 s limit, then a loop moving bytes between the socket and two 2 KB stream buffers; events (connected, failed, closed) go to the modem task through a small queue. The modem task alone calls `lfd3k_wire_*`. Close requests close the socket. TCP_NODELAY on.
 - [ ] **Step 4:** Modem loop additions: drain events, push socket RX into `lfd3k_wire_in` keeping leftovers, pull `lfd3k_wire_out` into the socket TX buffer only as space allows, poll `lfd3k_take_wire_request`/`lfd3k_take_wire_close`/`lfd3k_take_save`/`lfd3k_take_wifi_changed`. Never block.
 - [ ] **Step 5:** `pio run` succeeds, record RAM and flash (Wi-Fi adds a few hundred KB; must stay under the 1.5 MB slot). Commit `feat(firmware): Wi-Fi hotspot and client, NVS settings, TCP wire`.
 
 ### Task 5: OLED and docs
 
-- [ ] OLED idle screen bottom area alternates every 3 s between the name row and a Wi-Fi row: first boot / no client: `AP <ssid>` and `PW <pass>`; with a client IP: `IP <a.b.c.d>`. Online wire call: middle shows `WIFI TCP` and `ONLINE`; bridging: `BRIDGE` plus the forward name. Keep `panel_render` pure (add the Wi-Fi strings to its inputs). Re-run `tools/panel_check.ps1` (new mockups).
+- [ ] OLED idle screen bottom area alternates every 3 s between the name row and a Wi-Fi row: `AP <ssid>`, plus `PW <pass>` only under the Secrets rule in Global Constraints (the core exposes a `show_ap_pass` flag); with a client IP: `IP <a.b.c.d>`. `tools/lfd3k_term.py` redacts `WAP` and `PW` lines and refuses `--shot` while the password is on screen unless `--allow-secret` is given, and never into the repo. Online wire call: middle shows `WIFI TCP` and `ONLINE`; bridging: `BRIDGE` plus the forward name. Keep `panel_render` pure (add the Wi-Fi strings to its inputs). Re-run `tools/panel_check.ps1` (new mockups).
 - [ ] `docs/phase3-bench.md` for Rev: join steps (`AT+WSTA` typed by Rev), `AT+FWD=AXIS,<board ip>,23`, `ATDT AXIS`, `AT+PUB=AXIS`, the hotspot join for a phone or laptop, and how to read `AT+WIFI?`.
 - [ ] Commit `feat(firmware): Wi-Fi on the front panel, bench sheet`.
 
 ### Task 6: Tests
 
-- [ ] Core/sim tests: the Review Focus five, plus `fwd_add_replace_delete_list`, `atdt_host_port_parses`, `atdt_bad_host_is_radio_or_error`, `wap_password_length_checked`, `wsta_never_prints_password`, `atw_sets_save_and_settings_roundtrip`, `atz_restores_saved_settings`, `wire_dial_connect_echo` (USB dial to FakeWire, CONNECT WIFI TCP, echo round trip), `wire_escape_ato_resumes`, `radio_call_bridged_to_published_forward` (sim: modem A dials B by radio, B has `AT+PUB=AXIS` to a FakeWire server that sends a banner; A's host receives the banner, A's typing reaches the server), `bridge_radio_drop_closes_wire`, `radio_call_during_wire_call_is_busy`, `pub_unknown_forward_error`, settings proptest.
+- [ ] Core/sim tests: the Review Focus five, plus `telnet_answers_axis_negotiation` (feed the exact AXIS opening bytes, expect the replies and NAWS 80x25, clean output), `telnet_iac_iac_and_ff_escape`, `telnet_subneg_stripped`, `raw_mode_passes_ff`, `settings_blob_keeps_sregs_and_ev`, `fwd_add_replace_delete_list`, `atdt_host_port_parses`, `atdt_bad_host_is_radio_or_error`, `wap_password_length_checked`, `wsta_never_prints_password`, `atw_sets_save_and_settings_roundtrip`, `atz_restores_saved_settings`, `wire_dial_connect_echo` (USB dial to FakeWire, CONNECT WIFI TCP, echo round trip), `wire_escape_ato_resumes`, `radio_call_bridged_to_published_forward` (sim: modem A dials B by radio, B has `AT+PUB=AXIS` to a FakeWire server that sends a banner; A's host receives the banner, A's typing reaches the server), `bridge_radio_drop_closes_wire`, `radio_call_during_wire_call_is_busy`, `pub_unknown_forward_error`, settings proptest.
 - [ ] FFI host tests: `wire_bytes_cross_in_order`, `settings_load_save_roundtrip_c_abi`, `status_wire_field`.
 - [ ] Panel check still passes with Wi-Fi rows (bounds, long ssid and IP).
 - [ ] Full suite, clippy, fmt, demo, build_core.ps1, pio run. Commit `test: phase 3 settings, wire and bridge tests`.
-- [ ] **Bench (controller, needs Rev):** Rev flashes or says to flash; Rev types `AT+WSTA` himself; then `AT+WIFI?`, `AT+FWD=AXIS,<CYD ip>,23`, `ATDT AXIS` reaches the AXIS login screen over Wi-Fi from the USB terminal; screenshot the OLED; `+++`, `ATH`. Hotspot: confirm the AP is visible with the shown name.
+- [ ] **Bench (controller, needs Rev):** Rev flashes or says to flash; Rev types `AT+WSTA` himself; then `AT+WIFI?`, `AT+FWD=AXIS,<CYD ip>,23`, `ATDT AXIS` reaches the AXIS login screen over Wi-Fi from the USB terminal and stops there (no login is typed through the logged terminal); screenshot the OLED (no password on screen); `+++`, `ATH`. Hotspot: confirm the AP is visible with the shown name. The radio caller to AXIS path is proven in the simulator only until a second LoRa radio exists.
