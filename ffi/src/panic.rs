@@ -24,9 +24,7 @@ pub fn format_note(file: &str, line: u32, out: &mut [u8; NOTE_LEN]) -> usize {
     let name = file.as_bytes();
     // Room for the name: the buffer minus ':' and the digits.
     let room = NOTE_LEN.saturating_sub(1 + num.len());
-    let name = name
-        .get(name.len().saturating_sub(room)..)
-        .unwrap_or(&[]);
+    let name = name.get(name.len().saturating_sub(room)..).unwrap_or(&[]);
     let mut n = 0;
     for &b in name.iter().chain(b":".iter()).chain(num.iter()) {
         if let Some(d) = out.get_mut(n) {

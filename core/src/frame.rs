@@ -237,15 +237,27 @@ mod tests {
             assert_eq!(f.payload, &p[..plen]);
         }
         // Flags above 4 bits never leak into the type nibble.
-        let h = Header { ftype: FrameType::Data, flags: 0xFF, call_id: 1, seq: 2, ack: 3 };
+        let h = Header {
+            ftype: FrameType::Data,
+            flags: 0xFF,
+            call_id: 1,
+            seq: 2,
+            ack: 3,
+        };
         let mut out = [0u8; 8];
         let n = encode(&h, &[], &mut out).unwrap();
         let f = decode(&out[..n]).unwrap();
         assert_eq!(f.header.ftype, FrameType::Data);
         assert_eq!(f.header.flags, 0x0F);
         // Oversized payload and too small an output buffer are errors.
-        assert_eq!(encode(&h, &[0; MAX_PAYLOAD + 1], &mut [0; 300]), Err(FrameError::TooLong));
-        assert_eq!(encode(&h, &[0; 10], &mut [0; 13]), Err(FrameError::TooShort));
+        assert_eq!(
+            encode(&h, &[0; MAX_PAYLOAD + 1], &mut [0; 300]),
+            Err(FrameError::TooLong)
+        );
+        assert_eq!(
+            encode(&h, &[0; 10], &mut [0; 13]),
+            Err(FrameError::TooShort)
+        );
     }
 
     #[test]
@@ -262,11 +274,23 @@ mod tests {
         assert_eq!(FrameType::from_u8(15), None);
         // Wrong payload shapes for the types that have one.
         assert_eq!(decode(&[0xD1, 0x80, 1, 2, 3]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0xD1, 0x80, 1, 2, 3, 8]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0xD1, 0x90, 1, 2, 3, 0, 0]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0xD1, 0x40, 1, 2, 3, 9, 0, 0]), Err(FrameError::BadPayload));
+        assert_eq!(
+            decode(&[0xD1, 0x80, 1, 2, 3, 8]),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            decode(&[0xD1, 0x90, 1, 2, 3, 0, 0]),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            decode(&[0xD1, 0x40, 1, 2, 3, 9, 0, 0]),
+            Err(FrameError::BadPayload)
+        );
         assert_eq!(decode(&[0xD1, 0x70, 1, 2, 3]), Err(FrameError::BadPayload));
-        assert_eq!(decode(&[0xD1, 0x10, 1, 2, 3, 0]), Err(FrameError::BadPayload));
+        assert_eq!(
+            decode(&[0xD1, 0x10, 1, 2, 3, 0]),
+            Err(FrameError::BadPayload)
+        );
         // A bare header is a valid Data, Hangup or Keepalive frame.
         assert!(decode(&[0xD1, 0x60, 1, 2, 3]).is_ok());
         assert!(decode(&[0xD1, 0xA0, 1, 2, 3]).is_ok());
@@ -284,13 +308,34 @@ mod tests {
         assert_eq!(parse_call_req(&p[..n]), Ok((sixteen, "a b~!")));
 
         let seventeen = "ABCDEFGHIJKLMNOPQ";
-        assert_eq!(call_req_payload(seventeen, "AXIS", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("AXIS", seventeen, &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("", "AXIS", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("AX\tIS", "B", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("A", "B\x7F", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("A", "\u{e9}", &mut p), Err(FrameError::BadPayload));
-        assert_eq!(call_req_payload("A", "B", &mut [0u8; 3]), Err(FrameError::TooShort));
+        assert_eq!(
+            call_req_payload(seventeen, "AXIS", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("AXIS", seventeen, &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("", "AXIS", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("AX\tIS", "B", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("A", "B\x7F", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("A", "\u{e9}", &mut p),
+            Err(FrameError::BadPayload)
+        );
+        assert_eq!(
+            call_req_payload("A", "B", &mut [0u8; 3]),
+            Err(FrameError::TooShort)
+        );
 
         // Hand-built payloads: 17 chars, non-printable, bad lengths, bad UTF-8.
         let mut long = vec![17u8];

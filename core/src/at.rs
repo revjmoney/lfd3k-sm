@@ -197,7 +197,11 @@ impl Buf<'_> {
 /// (verbose = false) is `<digit>\r`. RETRAIN is suppressed in numeric mode
 /// and returns 0.
 pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize {
-    let mut b = Buf { out, pos: 0, over: false };
+    let mut b = Buf {
+        out,
+        pos: 0,
+        over: false,
+    };
     if verbose {
         b.put(b"\r\n");
         match code {
@@ -292,7 +296,9 @@ impl SRegs {
 
     /// Set a register; false if it does not exist or `v` is out of bounds.
     pub fn set(&mut self, n: u8, v: u16) -> bool {
-        let Some(i) = Self::index(n) else { return false };
+        let Some(i) = Self::index(n) else {
+            return false;
+        };
         let Some(r) = REGS.get(i) else { return false };
         let sv = v as i16;
         if sv < r.1 || sv > r.2 {
@@ -395,11 +401,26 @@ mod tests {
             (ResultCode::NoCarrier, "\r\nNO CARRIER\r\n"),
             (ResultCode::Busy, "\r\nBUSY\r\n"),
             (ResultCode::NoAnswer, "\r\nNO ANSWER\r\n"),
-            (ResultCode::Connect(Tier::Sf7), "\r\nCONNECT LORA SF7 BW500 21875/ARQ\r\n"),
-            (ResultCode::Connect(Tier::Sf5), "\r\nCONNECT LORA SF5 BW500 62500/ARQ\r\n"),
-            (ResultCode::Connect(Tier::Sf12), "\r\nCONNECT LORA SF12 BW500 1172/ARQ\r\n"),
-            (ResultCode::Retrain(Tier::Sf11), "\r\nRETRAIN LORA SF11 BW500 2148\r\n"),
-            (ResultCode::Retrain(Tier::Sf6), "\r\nRETRAIN LORA SF6 BW500 37500\r\n"),
+            (
+                ResultCode::Connect(Tier::Sf7),
+                "\r\nCONNECT LORA SF7 BW500 21875/ARQ\r\n",
+            ),
+            (
+                ResultCode::Connect(Tier::Sf5),
+                "\r\nCONNECT LORA SF5 BW500 62500/ARQ\r\n",
+            ),
+            (
+                ResultCode::Connect(Tier::Sf12),
+                "\r\nCONNECT LORA SF12 BW500 1172/ARQ\r\n",
+            ),
+            (
+                ResultCode::Retrain(Tier::Sf11),
+                "\r\nRETRAIN LORA SF11 BW500 2148\r\n",
+            ),
+            (
+                ResultCode::Retrain(Tier::Sf6),
+                "\r\nRETRAIN LORA SF6 BW500 37500\r\n",
+            ),
         ];
         for (code, want) in verbose {
             assert_eq!(fmt(*code, true), want.as_bytes(), "{code:?}");
@@ -419,7 +440,10 @@ mod tests {
         }
         // Never a truncated line: too small a buffer gives 0.
         let mut small = [0u8; 10];
-        assert_eq!(format_result(&ResultCode::Connect(Tier::Sf7), true, &mut small), 0);
+        assert_eq!(
+            format_result(&ResultCode::Connect(Tier::Sf7), true, &mut small),
+            0
+        );
         assert_eq!(format_result(&ResultCode::Ok, false, &mut [0u8; 1]), 0);
         assert_eq!(format_result(&ResultCode::Ok, true, &mut []), 0);
     }

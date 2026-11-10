@@ -158,7 +158,13 @@ pub unsafe extern "C" fn lfd3k_init(
     };
     // SAFETY: single-task contract (see `Holder`); no other reference to
     // the cell contents is live.
-    unsafe { *HOLDER.0.get() = Some(Device { modem, radio, power }) };
+    unsafe {
+        *HOLDER.0.get() = Some(Device {
+            modem,
+            radio,
+            power,
+        })
+    };
     code
 }
 
@@ -199,7 +205,10 @@ pub unsafe extern "C" fn lfd3k_host_in(buf: *const u8, len: usize, now_ms: u32) 
         let mut used = 0;
         while used < bytes.len() {
             let rest = bytes.get(used..).unwrap_or(&[]);
-            let end = rest.iter().position(|&c| c == b'\r').map_or(rest.len(), |i| i + 1);
+            let end = rest
+                .iter()
+                .position(|&c| c == b'\r')
+                .map_or(rest.len(), |i| i + 1);
             let seg = rest.get(..end).unwrap_or(&[]);
             let n = d.modem.host_input(seg, &mut d.radio, now_ms);
             used += n;
@@ -271,10 +280,7 @@ pub unsafe extern "C" fn lfd3k_status(now_ms: u32, out: *mut lfd3k_status_t) {
             .iter()
             .enumerate()
             .fold(0u8, |a, (i, &on)| a | (u8::from(on) << i));
-        let (rssi, snr_x4) = d
-            .modem
-            .last_rx()
-            .map_or((0, 0), |i| (i.rssi_dbm, i.snr_x4));
+        let (rssi, snr_x4) = d.modem.last_rx().map_or((0, 0), |i| (i.rssi_dbm, i.snr_x4));
         lfd3k_status_t {
             lights,
             state: d.modem.call_state(),

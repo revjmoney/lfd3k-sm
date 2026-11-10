@@ -221,7 +221,10 @@ mod tests {
         for t in Tier::LADDER {
             let r = semtech_us(u32::from(t.sf()), 255);
             let g = f64::from(t.airtime_us(255));
-            assert!((g - r).abs() <= r * 0.02, "{t:?}: got {g} us, reference {r} us");
+            assert!(
+                (g - r).abs() <= r * 0.02,
+                "{t:?}: got {g} us, reference {r} us"
+            );
         }
         // About 99.9 ms by hand: (12.25 + 8 + 74 * 5) symbols of 256 us.
         assert!((99_000.0..101_000.0).contains(&got));
