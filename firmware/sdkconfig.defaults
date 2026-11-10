@@ -10,3 +10,6 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 # A hung modem task must reset the board (watchdog recovery).
 CONFIG_ESP_TASK_WDT_PANIC=y
+# 2 s, not the 5 s default: a hung modem is back in about 2 s. Radio init (worst
+# case about 1 s of BUSY waits) runs before the modem task subscribes.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=2
