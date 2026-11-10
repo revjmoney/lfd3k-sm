@@ -522,3 +522,38 @@ fn connected_status_reports_tier_and_last_rx() {
     assert_ne!(st.lights & 0b0000_0011, 0, "OH and CD");
     assert_eq!(st.lights & 0b0100_0000, 0, "DC is never lit");
 }
+
+#[test]
+fn data_mode_batch_fills_a_full_arq_chunk() {
+    let _g = serial();
+    let mut rig = Rig::new();
+    rig.connect();
+    // Let any frames from the connect settle, then drop what the chip saw.
+    rig.run_ms(500);
+    fake_hal::with(|h| h.tx_frames.clear());
+
+    // About 400 bytes of "x\r" pairs in ONE host_in call (pins 160aaf8: in
+    // data mode the bytes go in as one piece, so the first data frame is a
+    // full chunk instead of one tiny frame per line).
+    let data: Vec<u8> = b"x\r".iter().copied().cycle().take(400).collect();
+    assert_eq!(rig.ffi_in(&data), 400);
+
+    // Poll (without handing frames to the peer) until a data frame is sent.
+    let mut first = None;
+    for _ in 0..2_000 {
+        rig.now += 1;
+        lfd3k_poll(rig.now);
+        let tx = fake_hal::with(|h| std::mem::take(&mut h.tx_frames));
+        for (_, f) in tx {
+            let fr = decode(&f).expect("a valid frame");
+            if fr.header.ftype == FrameType::Data {
+                first = Some(fr.payload.len());
+                break;
+            }
+        }
+        if first.is_some() {
+            break;
+        }
+    }
+    assert_eq!(first, Some(CHUNK), "first data frame is a full ARQ chunk");
+}

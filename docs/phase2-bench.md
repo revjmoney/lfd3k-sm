@@ -15,6 +15,7 @@ Open PowerShell for every command. Replace `COMn` with the V4 port you find in s
 5. Write down its COM number. It can change after a reset or a new plug, so look again if a command says the port is gone.
 6. COM15 is the lathe and COM9 is the V3. Never use those.
 7. The MAC: esptool prints it in step 1 as a line like `MAC: aa:bb:cc:dd:ee:ff`. Write it down. The bench terminal uses it to make sure it is talking to this V4 and nothing else.
+8. If any other board with `VID_303A` and `PID_1001` is plugged in, unplug it now. Before the erase in step 2, check that the `MAC:` line esptool prints matches the V4's known MAC. If it does not, stop.
 
 ## 1. Back up the V4
 
@@ -32,7 +33,7 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
    python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --no-stub --after no-reset read_flash 0 0x1000000 F:\lfd3k-sm\backups\v4-simian-radar-YYYY-MM-DD.bin
    ```
 
-3. Wait. It takes a few minutes. Do not unplug.
+3. Wait. It takes about 8 minutes on this V4 (the `--no-stub` read is slow). Do not unplug.
 4. Check the size. It must be exactly 16,777,216 bytes:
 
    ```
@@ -49,19 +50,34 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 
    ```
    $b = [IO.File]::OpenRead("F:\lfd3k-sm\backups\v4-simian-radar-YYYY-MM-DD.bin"); $buf = New-Object byte[] 65536; [void]$b.Read($buf,0,65536); $b.Close(); [IO.File]::WriteAllBytes("F:\lfd3k-sm\backups\head-64k.bin", $buf)
-   fc /b F:\lfd3k-sm\backups\head-64k.bin F:\lfd3k-sm\backups\check-first64k.bin
+   fc.exe /b F:\lfd3k-sm\backups\head-64k.bin F:\lfd3k-sm\backups\check-first64k.bin
    ```
 
-7. `fc` must say "no differences encountered". If it does not, read the backup again.
+   Use `fc.exe`, not `fc`: in PowerShell plain `fc` is a different command (Format-Custom). Or compare hashes instead:
+
+   ```
+   Get-FileHash F:\lfd3k-sm\backups\head-64k.bin, F:\lfd3k-sm\backups\check-first64k.bin
+   ```
+
+7. Expected: `fc.exe` says "FC: no differences encountered", or the two hashes are identical. If not, read the backup again.
 8. Keep the backup safe. It is in `backups\`, which git ignores.
 
 ## 2. Flash the LFD3K-SM
 
-1. Build first (this does not touch the V4):
+1. Build first (this does not touch the V4). Rebuild the Rust core, then the firmware:
 
    ```
+   powershell -ExecutionPolicy Bypass -File F:\lfd3k-sm\firmware\build_core.ps1
    pio run -d F:\lfd3k-sm\firmware -e heltec_v4
    ```
+
+   Then check that the firmware is newer than the Rust library:
+
+   ```
+   Get-Item F:\lfd3k-sm\firmware\lib\liblfd3k_ffi.a, F:\lfd3k-sm\firmware\.pio\build\heltec_v4\firmware.bin | Select-Object Name, LastWriteTime
+   ```
+
+   `firmware.bin` must have the later time. If it does not, run `pio run -d F:\lfd3k-sm\firmware -e heltec_v4 -t clean`, then the `pio run` again. (The build also stops with "Stale Rust core" if a Rust source is newer than the library: run `build_core.ps1` and build again.)
 
 2. Erase the chip. This clears the old otadata and the Radar settings, so the chip cannot boot the wrong slot:
 
@@ -69,7 +85,7 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
    python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --after no-reset erase_flash
    ```
 
-3. It stays in download mode for the next step. If the port vanished anyway, unplug the V4, plug it back in and check the COM number again in Device Manager.
+3. It stays in download mode for the next step. If the port vanished anyway, unplug the V4, hold the PRG button while you plug it back in (that forces download mode), then check the COM number again in Device Manager.
 4. Flash, the easy way:
 
    ```
@@ -120,6 +136,8 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
    ATDT TEST
    ```
 
+   Expected: the terminal prints `DIALING`, then `NO ANSWER` about 30 seconds later (nobody answers). See step 5 for how to type it.
+
 9. Watch the ChirpChat window. A frame should appear.
 10. The CallReq frame starts with byte `D1`. The next byte starts with `1` (type 1 in the high nibble), so the first two bytes look like `D1 1x`.
 11. If you see `D1 1x`, the air frame is right. If you see nothing, check the frequency, the antenna, and that the demod settings match step 6.
@@ -135,11 +153,33 @@ The bench terminal only opens the port once it has checked the USB identity. It 
    python F:\lfd3k-sm\tools\lfd3k_term.py --port COMn --expect-mac AA:BB:CC:DD:EE:FF --send "ATI" --log F:\lfd3k-sm\backups\session.log
    ```
 
+   Expected for `ATI`: three banner lines (the modem name, the version with its release name, the release tagline).
+
+   For `AT&V`, send `--send "AT&V"`. Expected: the settings list, including `S30` and the line `RADIO OK` (and `TX POWER S30=2 dBm chip, about 14 dBm out`).
+
+   For the dial, the terminal must stay open about 35 seconds:
+
+   ```
+   python F:\lfd3k-sm\tools\lfd3k_term.py --port COMn --expect-mac AA:BB:CC:DD:EE:FF --send "ATDT TEST" --wait-ms 35000
+   ```
+
+   Expected: `DIALING`, then `NO ANSWER` after about 30 seconds.
+
+   To type by hand, use miniterm (same pyserial, it holds DTR and RTS off):
+
+   ```
+   python -m serial.tools.miniterm COMn 115200 --dtr 0 --rts 0 --eol CR
+   ```
+
+   Confirm the COM port first in Device Manager (VID_303A PID_1001). Never COM15 or COM9: miniterm has no guard.
+
 3. Take a picture of the OLED:
 
    ```
    python F:\lfd3k-sm\tools\lfd3k_term.py --port COMn --expect-mac AA:BB:CC:DD:EE:FF --shot F:\lfd3k-sm\backups\oled.png
    ```
+
+   Expected: a 128 by 64 picture of the front panel (the same layout as the files in `docs\phase2-bench\mockups`). It can be taken during a dial too.
 
 4. To turn a saved `FB:` line into a picture later:
 

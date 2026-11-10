@@ -234,8 +234,8 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
         rs = clampi(((int)s->rssi + 130) * 16 / 100, 0, 16);
         sn = clampi(((int)s->snr_x4 + 80) * 16 / 120, 0, 16);
     } else {
-        snprintf(rv, sizeof(rv), "--");
-        snprintf(sv, sizeof(sv), "--");
+        snprintf(rv, sizeof(rv), "-");
+        snprintf(sv, sizeof(sv), "-");
     }
     text(fb, 0, 55, rv, 1, 1);   /* up to 7 chars, ends by x 41 */
     bar(fb, 44, 55, 18, 6, rs);  /* RSSI -130..-30 dBm */
