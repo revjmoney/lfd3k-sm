@@ -7,13 +7,13 @@
 //!   guard of `airtime_us(len) + TX_MARGIN_US` (then forced to standby).
 //! - `Rx(Listening)`: continuous receive, nothing heard. Not busy.
 //! - `Rx(Preamble)`: PreambleDetected seen. Busy until HeaderValid or the
-//!   false-preamble guard of `(preamble + 12)` symbols, which re-arms RX.
+//!   false-preamble guard of `(preamble + 16)` symbols, which re-arms RX.
 //! - `Rx(Header)`: HeaderValid seen. Busy until RxDone, CrcErr, HeaderErr,
 //!   the Timeout IRQ, or the max-packet guard `airtime_us(255) + 2 ms`.
 //!
 //! Every busy state has a time exit, so `busy()` can never stick true.
-//! Any BUSY-pin wait over 10 ms sets `failed()` and ends in Idle with the
-//! front end in receive position.
+//! Any BUSY-pin wait over the limit (10 ms at runtime, 50 ms during `init`)
+//! sets `failed()` and ends in Idle with the front end in receive position.
 
 use lfd3k_core::{Radio, RxInfo, Tier, CHANNEL_HZ};
 
@@ -37,24 +37,28 @@ pub trait Bus {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
-    /// BUSY stayed high for more than 10 ms.
+    /// BUSY stayed high past the limit (10 ms at runtime, 50 ms in `init`).
     BusyTimeout,
-    /// GetStatus did not report a sane chip mode.
+    /// GetStatus after init did not report STDBY_RC or STDBY_XOSC.
     NoChip,
     /// A frame did not fit, or a register read back wrong after init.
     Config,
 }
 
-/// Longest BUSY wait before the chip is declared failed.
+/// Longest BUSY wait at runtime before the chip is declared failed.
 pub const BUSY_LIMIT_US: u64 = 10_000;
-/// Backstop on BUSY polls in case `now_us` never advances.
+/// Longest BUSY wait during `init` (reset boot, TCXO start plus Calibrate,
+/// CalibrateImage all land on the command after them).
+pub const INIT_BUSY_LIMIT_US: u64 = 50_000;
+/// Backstop on BUSY polls in case `now_us` never advances. Still far above
+/// 50 ms of real polling on the ESP32-S3 (each poll takes well over 10 ns).
 const BUSY_POLL_CAP: u32 = 5_000_000;
 /// Extra time allowed past the computed airtime before a TX is abandoned.
 pub const TX_MARGIN_US: u64 = 10_000;
 /// Extra time allowed past the longest packet after HeaderValid.
 pub const RX_MARGIN_US: u64 = 2_000;
 /// Symbols allowed after PreambleDetected beyond the preamble itself.
-pub const PREAMBLE_GUARD_EXTRA_SYMBOLS: u64 = 12;
+pub const PREAMBLE_GUARD_EXTRA_SYMBOLS: u64 = 16;
 /// Power limits of the SX1262 high power PA, in dBm.
 pub const POWER_MIN_DBM: i8 = -9;
 pub const POWER_MAX_DBM: i8 = 22;
@@ -81,6 +85,7 @@ pub struct Sx1262<B: Bus> {
     state: State,
     failed: bool,
     ready: bool,
+    busy_limit_us: u64,
     power: i8,
     power_dirty: bool,
     cur_tier: Option<Tier>,
@@ -103,6 +108,7 @@ impl<B: Bus> Sx1262<B> {
             state: State::Idle,
             failed: false,
             ready: false,
+            busy_limit_us: BUSY_LIMIT_US,
             power: 2,
             power_dirty: false,
             cur_tier: None,
@@ -136,7 +142,9 @@ impl<B: Bus> Sx1262<B> {
         self.cur_len = None;
         self.power = clamp_power(power_dbm);
         self.power_dirty = false;
+        self.busy_limit_us = INIT_BUSY_LIMIT_US;
         let r = self.init_inner();
+        self.busy_limit_us = BUSY_LIMIT_US;
         if r.is_err() {
             self.failed = true;
             self.bus.fem(false);
@@ -176,7 +184,7 @@ impl<B: Bus> Sx1262<B> {
 
         let status = self.get_status()?;
         let mode = cmd::chip_mode(status);
-        if !(cmd::MODE_STDBY_RC..=cmd::MODE_TX).contains(&mode) {
+        if !(cmd::MODE_STDBY_RC..=cmd::MODE_STDBY_XOSC).contains(&mode) {
             return Err(Error::NoChip);
         }
         if self.read_register(cmd::REG_SYNC_WORD_MSB)? != sync_msb
@@ -188,7 +196,9 @@ impl<B: Bus> Sx1262<B> {
     }
 
     /// Set chip output power in dBm, clamped to -9..=22. Applied now when
-    /// the chip is idle, otherwise at the next `send`.
+    /// the chip is idle, otherwise at the next `send`. Before `init` the
+    /// value is only stored, and `init(power_dbm)` replaces it: init's
+    /// argument wins.
     pub fn set_power(&mut self, power_dbm: i8) -> Result<(), Error> {
         self.power = clamp_power(power_dbm);
         self.power_dirty = true;
@@ -478,14 +488,14 @@ impl<B: Bus> Sx1262<B> {
         Ok(value)
     }
 
-    /// Wait for BUSY low, at most `BUSY_LIMIT_US`.
+    /// Wait for BUSY low, at most `busy_limit_us` (runtime or init limit).
     fn wait_busy(&mut self) -> Result<(), Error> {
         let start = self.bus.now_us();
         let mut polls: u32 = 0;
         while self.bus.busy() {
             polls = polls.saturating_add(1);
             let waited = self.bus.now_us().saturating_sub(start);
-            if waited > BUSY_LIMIT_US || polls > BUSY_POLL_CAP {
+            if waited > self.busy_limit_us || polls > BUSY_POLL_CAP {
                 self.failed = true;
                 return Err(Error::BusyTimeout);
             }

@@ -95,6 +95,7 @@ pub const fn chip_mode(status: u8) -> u8 {
     (status >> 4) & 0x07
 }
 pub const MODE_STDBY_RC: u8 = 0x2;
+pub const MODE_STDBY_XOSC: u8 = 0x3;
 pub const MODE_TX: u8 = 0x6;
 
 /// SX1262 frequency word: `hz * 2^25 / 32 MHz`, integer math.
