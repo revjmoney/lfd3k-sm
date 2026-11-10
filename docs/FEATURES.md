@@ -115,6 +115,8 @@ Notes:
 - Middle: the state word (IDLE, DIALING, RING, TRAINING, ONLINE, CMD) or, in a call, the tier (`SF7 BW500`) with `ONLINE 21875 BPS` (or `CMD ...` in online command mode) and an eight cell tier ladder. `RADIO FAIL` replaces it when the radio is not usable.
 - Bottom: `LFD3K-SM`, the last heard RSSI (dBm) and SNR (dB), and an RSSI bar (-130 to -30 dBm) and SNR bar (-20 to +10 dB).
 - Animations: OH blinks while dialing (2.5 Hz), a sweep runs across the eight tiers while training and the chosen tier flashes when training ends, idle shows a breathing carrier bar (2 s), RING flashes inverted.
+- Idle animations: the IDLE word disintegrates and reintegrates with flying 0 and 1 bits; a breathing scope draws the live radio channel (one RSSI sample every 50 ms from the SX1262, 64 samples, transmit samples marked); the idle meters are live; the lights shuffle on an 8 s loop, with the home order restored on every fourth loop.
+- Live channel trace: `lfd3k_poll` samples GetRssiInst (one 3 byte SPI transaction) every 50 ms while listening and marks samples taken during a transmit; the modem task hands the 64 sample ring to the panel with each status copy.
 - Boot splash for 1 s: `LFD3K-SM`, `r.420`, `BL4Z3B4ND`.
 - `panel_snapshot` returns the last drawn frame (1024 bytes, SSD1306 page order, bit 0 = top row) for AT+FB. The drawing code is the pure function `panel_render` (no ESP-IDF calls) so the PC tool can render the same screens.
 - Own hand-made 5x7 ASCII font (font5x7.h), no library fonts.

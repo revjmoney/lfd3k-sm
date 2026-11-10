@@ -200,6 +200,12 @@ static void modem_task(void *arg)
         lfd3k_status_t st;
         lfd3k_status(now_ms, &st);
         panel_publish(&st);
+        {
+            rf_trace_t tr;
+            size_t n = lfd3k_rf_trace(tr.dbm, tr.tx, RF_TRACE_N);
+            tr.count = (uint8_t)n;
+            panel_publish_trace(&tr);
+        }
         save_step(now_ms, &st);
 
         if ((uint32_t)(now_ms - last_second) >= 1000) {

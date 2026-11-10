@@ -21,6 +21,7 @@ static const char *TAG = "panel";
 #define SNAP_WAIT   5    /* ms the modem task will wait for the frame mutex */
 
 static portMUX_TYPE s_pub_lock = portMUX_INITIALIZER_UNLOCKED;
+static rf_trace_t s_pub_trace; /* zero count: plain breathing line */
 static lfd3k_status_t s_pub = {.lights = 0, .state = 0, .tier = -1, .rssi = 0, .snr_x4 = 0, .radio_ok = 1};
 
 static SemaphoreHandle_t s_frame_lock;
@@ -41,6 +42,13 @@ void panel_publish(const lfd3k_status_t *s)
 {
     taskENTER_CRITICAL(&s_pub_lock);
     s_pub = *s;
+    taskEXIT_CRITICAL(&s_pub_lock);
+}
+
+void panel_publish_trace(const rf_trace_t *t)
+{
+    taskENTER_CRITICAL(&s_pub_lock);
+    s_pub_trace = *t;
     taskEXIT_CRITICAL(&s_pub_lock);
 }
 
@@ -95,8 +103,10 @@ static void panel_task(void *arg)
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
         lfd3k_status_t st;
+        rf_trace_t trace;
         taskENTER_CRITICAL(&s_pub_lock);
         st = s_pub;
+        trace = s_pub_trace;
         taskEXIT_CRITICAL(&s_pub_lock);
 
         for (int i = 0; i < 2; i++) {
@@ -117,6 +127,7 @@ static void panel_task(void *arg)
             }
         }
 
+        panel_render_set_trace(&trace);
         panel_render(&st, s_name, now_ms, fb);
         commit_frame(fb);
 

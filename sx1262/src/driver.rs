@@ -204,6 +204,29 @@ impl<B: Bus> Sx1262<B> {
         Ok(u16::from_be_bytes([hi, lo]))
     }
 
+    /// True while a transmission is in progress (SetTx issued, not done).
+    pub fn transmitting(&self) -> bool {
+        matches!(self.state, State::Tx { .. })
+    }
+
+    /// Instantaneous channel RSSI in dBm (GetRssiInst, one 3-byte SPI
+    /// transaction). Only valid while receiving: `None` in Tx, Idle, before
+    /// init, after a failure, or when BUSY stays high past the runtime
+    /// limit (which also fails the driver, as for any command). Does not
+    /// touch the receive state.
+    pub fn rssi_inst(&mut self) -> Option<i16> {
+        if self.failed || !self.ready || !matches!(self.state, State::Rx { .. }) {
+            return None;
+        }
+        let mut rx = [0u8; 3];
+        if self.read(&cmd::get_rssi_inst(), &mut rx).is_err() {
+            self.abort();
+            return None;
+        }
+        let [_, _, raw] = rx;
+        Some(-(i16::from(raw) / 2))
+    }
+
     /// Set chip output power in dBm, clamped to -9..=22. Applied now when
     /// the chip is idle, otherwise at the next `send`. Before `init` the
     /// value is only stored, and `init(power_dbm)` replaces it: init's

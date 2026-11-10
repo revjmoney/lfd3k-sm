@@ -27,11 +27,67 @@ const ERR_NAME: c_int = -4;
 /// next DIO1 edge or 10 ms tick, so nothing is lost by stopping at 8.
 const RX_PER_POLL: usize = 8;
 
+/// Samples in the channel trace ring (matches `RF_TRACE_N` in the firmware).
+const TRACE_N: usize = 64;
+/// Milliseconds between trace samples.
+const TRACE_MS: u32 = 50;
+
+/// Fixed ring of channel samples for the idle scope, oldest overwritten.
+struct Trace {
+    dbm: [i8; TRACE_N],
+    tx: [u8; TRACE_N],
+    /// Next slot to write.
+    head: usize,
+    count: usize,
+    /// `now_ms` of the last sample; `None` until the first.
+    last_ms: Option<u32>,
+}
+
+impl Trace {
+    const fn new() -> Self {
+        Trace {
+            dbm: [0; TRACE_N],
+            tx: [0; TRACE_N],
+            head: 0,
+            count: 0,
+            last_ms: None,
+        }
+    }
+
+    fn push(&mut self, dbm: i8, tx: u8) {
+        if let Some(s) = self.dbm.get_mut(self.head) {
+            *s = dbm;
+        }
+        if let Some(s) = self.tx.get_mut(self.head) {
+            *s = tx;
+        }
+        self.head = (self.head + 1) % TRACE_N;
+        self.count = (self.count + 1).min(TRACE_N);
+    }
+
+    /// Take one sample if 50 ms have passed since the last one.
+    fn sample(&mut self, radio: &mut Sx1262<HalBus>, now_ms: u32) {
+        if let Some(last) = self.last_ms {
+            if now_ms.wrapping_sub(last) < TRACE_MS {
+                return;
+            }
+        }
+        if radio.transmitting() {
+            self.last_ms = Some(now_ms);
+            self.push(0, 1);
+        } else if let Some(r) = radio.rssi_inst() {
+            self.last_ms = Some(now_ms);
+            self.push(r.clamp(-128, 0) as i8, 0);
+        }
+    }
+}
+
 struct Device {
     modem: Modem,
     radio: Sx1262<HalBus>,
     /// Last S30 value given to the radio.
     power: i8,
+    trace: Trace,
 }
 
 /// The static slot. `dev` always holds a valid (blank) device; `live` says
@@ -56,6 +112,7 @@ static HOLDER: Holder = Holder(UnsafeCell::new(Slot {
         modem: Modem::blank(),
         radio: Sx1262::new(HalBus),
         power: 0,
+        trace: Trace::new(),
     },
 }));
 
@@ -167,6 +224,7 @@ pub unsafe extern "C" fn lfd3k_init(
     dev.modem.reset(cfg);
     dev.radio = Sx1262::new(HalBus);
     dev.power = 0;
+    dev.trace = Trace::new();
     slot.live = true;
     if !last_panic.is_null() && len > 0 {
         // SAFETY: the caller guarantees `last_panic` is valid for `len`
@@ -205,7 +263,38 @@ pub extern "C" fn lfd3k_poll(now_ms: u32) {
             d.modem.radio_rx(frame, info, &mut d.radio, now_ms);
         }
         d.modem.tick(&mut d.radio, now_ms);
+        d.trace.sample(&mut d.radio, now_ms);
     });
+}
+
+/// Copies the channel trace, oldest first, into `dbm` and `tx` (each `cap`
+/// entries) and returns the count (at most 64 and `cap`). Either pointer
+/// may be null to skip that array. Returns 0 before init.
+///
+/// # Safety
+/// Each non-null pointer must be valid for writes of `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_rf_trace(dbm: *mut i8, tx: *mut u8, cap: usize) -> usize {
+    with_device(|d| {
+        let t = &d.trace;
+        let n = t.count.min(cap);
+        // Oldest of the `count` entries sits at head - count (mod N); skip
+        // the oldest ones if the caller's buffer is smaller.
+        let start = (t.head + TRACE_N - n) % TRACE_N;
+        for i in 0..n {
+            let k = (start + i) % TRACE_N;
+            if !dbm.is_null() {
+                // SAFETY: i < n <= cap, and the caller guarantees `cap` bytes.
+                unsafe { dbm.add(i).write(t.dbm.get(k).copied().unwrap_or(0)) };
+            }
+            if !tx.is_null() {
+                // SAFETY: as above.
+                unsafe { tx.add(i).write(t.tx.get(k).copied().unwrap_or(0)) };
+            }
+        }
+        n
+    })
+    .unwrap_or(0)
 }
 
 /// Host bytes into the modem. Returns the bytes taken (all of them in

@@ -70,6 +70,12 @@ typedef struct {
 } lfd3k_status_t;
 void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
 
+/* Channel trace for the idle scope: up to 64 samples taken every 50 ms in
+ * lfd3k_poll (dbm: -128..0, oldest first; tx: 1 for samples taken while
+ * transmitting). Copies at most cap samples (the newest), returns the count.
+ * Either pointer may be NULL. Returns 0 before init. */
+size_t   lfd3k_rf_trace(int8_t *dbm, uint8_t *tx, size_t cap);
+
 /* ---- Settings (NVS blob) and Wi-Fi. ---- */
 
 /* Hotspot and client network. All strings NUL terminated. */
