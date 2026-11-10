@@ -22,6 +22,7 @@
 | TX power setting S30 (SX1262 chip output in dBm, signed) and the TX POWER line in AT&V | done | 2026-11-10 |
 | FFI device glue: one static Modem plus SX1262 driver behind a C ABI (`lfd3k_init`, `lfd3k_poll`, `lfd3k_host_in`, `lfd3k_host_out`, `lfd3k_take_fb_request`, `lfd3k_status`), S30 changes applied to the radio at runtime, device panic handler stores `file:line` through the HAL and restarts | done | 2026-11-10 |
 | AT+FB frame buffer dump request (the modem only raises a flag; the firmware writes the dump and OK), LAST CRASH line on ATI, RADIO line in AT&V | done | 2026-11-10 |
+| Firmware platform: modem task (core 1, priority 20) runs the Rust core; SX1262 on SPI2 with the GC1109 front end, native USB carries only the modem stream (console on UART0), station name AXISMODEM-XXXX from the MAC, AT+FB dump streamed without blocking, crash note kept across the restart | done | 2026-11-10 |
 | Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library and logs LFD3K-SM core <version> once a second; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs | done | 2026-11-10 |
 
 ## Settings

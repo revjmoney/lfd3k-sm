@@ -1,4 +1,6 @@
-idf_component_register(SRCS "main.c" INCLUDE_DIRS "." "../include")
+idf_component_register(SRCS "main.c" "hal_radio.c" "usb_link.c" "panel.c"
+                       INCLUDE_DIRS "." "../include"
+                       REQUIRES driver esp_timer esp_system esp_hw_support esp_driver_usb_serial_jtag)
 
 # Rust core, built by build_core.ps1 (cargo +esp, xtensa-esp32s3-none-elf).
 set(LFD3K_CORE_LIB "${CMAKE_CURRENT_LIST_DIR}/../lib/liblfd3k_ffi.a")
