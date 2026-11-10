@@ -66,3 +66,4 @@ Notes:
 - 2026-11-09: Call state machine and Modem: call setup, training, data, retrain, resync, escape, online command mode, ATI release name.
 - 2026-11-10: Retrain notices kept off the data stream, tier cap honored both ways, resync and queue fixes.
 - 2026-11-10: Simulator, demo transcript (docs/phase1-demo.txt) and firmware skeleton that builds with the core linked (not flashed).
+- 2026-11-10: One lost keepalive reply no longer steps the tier down (re-probe after about 1 RTO, retrain only after two unanswered probes); answerer waits half an RTO longer before starting a retrain and TierSet retries are jittered, so both ends never retrain in lock step.

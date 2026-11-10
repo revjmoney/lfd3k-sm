@@ -166,9 +166,18 @@ pub struct Link {
     last_change: u32,
     ewma_x32: i32,
     good_since: Option<u32>,
+    /// Since when the average has been under the step-down line.
+    low_since: Option<u32>,
+    /// Keepalive PINGs sent since we last heard the peer.
+    ping_out: u8,
+    ping_last: u32,
+    ping_wait: u32,
+    /// xorshift32 state for retry jitter, seeded from call id and role.
+    rng: u32,
     pending: Option<Tier>,
     pend_last: u32,
     pend_tries: u8,
+    pend_wait: u32,
     silence_done: bool,
     turn: bool,
     turn_start: u32,
@@ -224,9 +233,15 @@ impl Link {
             last_change: 0,
             ewma_x32: 0,
             good_since: None,
+            low_since: None,
+            ping_out: 0,
+            ping_last: 0,
+            ping_wait: 0,
+            rng: 1,
             pending: None,
             pend_last: 0,
             pend_tries: 0,
+            pend_wait: 0,
             silence_done: false,
             turn: true,
             turn_start: 0,
@@ -396,6 +411,27 @@ impl Link {
         self.q_len = n;
     }
 
+    /// Deterministic jitter in 0..=max ms. The seed mixes call id and role,
+    /// so the two ends of a call never draw the same sequence.
+    fn jitter(&mut self, max: u32) -> u32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        x % max.saturating_add(1)
+    }
+
+    /// Extra wait the answerer adds before starting anything the caller
+    /// may start too (retrains, probes), so the two never collide in step.
+    fn role_off(&self, rto: u32) -> u32 {
+        if self.role == Role::Answerer {
+            rto / 2
+        } else {
+            0
+        }
+    }
+
     /// Drop the pending retrain and any of its TierSets still queued.
     fn clear_pending(&mut self) {
         self.pending = None;
@@ -410,6 +446,12 @@ impl Link {
         // Only last call's Hangup or CallReject may still go out.
         self.q_retain(|f| f.urgent);
         self.role = role;
+        let mix = if role == Role::Answerer {
+            0x5BD1_E995
+        } else {
+            0x9E37_79B9
+        };
+        self.rng = (u32::from(self.call_id).wrapping_mul(0x0101_0101) ^ mix) | 1;
         self.tx.reset();
         self.rx.reset();
         self.staged = None;
@@ -547,6 +589,8 @@ impl Link {
         self.pending = Some(t);
         self.pend_last = now;
         self.pend_tries = 1;
+        let rto = rto_ms(self.tier);
+        self.pend_wait = rto.saturating_add(self.jitter(rto / 2));
         let cur = self.tier;
         self.enq(cur, FrameType::TierSet, 0, &[t.index()], true, false);
     }
@@ -558,6 +602,8 @@ impl Link {
         self.last_change = now;
         self.ewma_x32 = i32::from(snr) * 8;
         self.good_since = None;
+        self.low_since = None;
+        self.ping_out = 0;
         self.silence_done = false;
         self.need_listen = true;
         self.turn = true;
@@ -717,6 +763,7 @@ impl Link {
         self.last_rx = now;
         self.last_snr = info.snr_x4;
         self.silence_done = false;
+        self.ping_out = 0;
         if self.state == State::Resync {
             self.state = State::Connected;
             self.ewma_x32 = i32::from(info.snr_x4) * 8;
@@ -804,6 +851,7 @@ impl Link {
     fn switch(&mut self, t: Tier, now: u32) {
         self.last_change = now;
         self.good_since = None;
+        self.low_since = None;
         self.need_listen = true;
         if t != self.tier {
             self.tier = t;
@@ -918,20 +966,27 @@ impl Link {
             self.need_listen = true;
             return;
         }
+        let off = self.role_off(rto);
         if let Some(p) = self.pending {
-            if since(now, self.pend_last) >= rto {
+            if since(now, self.pend_last) >= self.pend_wait {
                 if self.pend_tries >= 3 {
                     self.clear_pending(); // resync recovers if the peer moved
                 } else {
                     self.pend_tries += 1;
                     self.pend_last = now;
+                    self.pend_wait = rto.saturating_add(self.jitter(rto / 2));
                     let cur = self.tier;
                     self.enq(cur, FrameType::TierSet, 0, &[p.index()], true, false);
                 }
             }
             return;
         }
-        if silent >= rto.saturating_mul(4) && !self.silence_done {
+        // Real loss: 4 RTOs silent and at least two probes unanswered (one
+        // lost keepalive reply is not enough).
+        if silent >= rto.saturating_mul(4).saturating_add(off)
+            && self.ping_out >= 2
+            && !self.silence_done
+        {
             self.silence_done = true;
             if let Some(s) = self.tier.slower() {
                 self.request(s, now);
@@ -946,15 +1001,20 @@ impl Link {
         let floor = i32::from(self.tier.snr_floor_x4());
         if let Some(s) = self.tier.slower() {
             if ewma < floor + s20 - 8 {
-                self.request(s, now);
+                let l = *self.low_since.get_or_insert(now);
+                if since(now, l) >= off {
+                    self.low_since = None;
+                    self.request(s, now);
+                }
                 return;
             }
         }
+        self.low_since = None;
         let up = self.tier.faster().filter(|f| *f <= self.cap);
         match up {
             Some(f) if ewma > i32::from(f.snr_floor_x4()) + s20 + 12 => {
                 let g = *self.good_since.get_or_insert(now);
-                if since(now, g) >= UP_HOLD_MS {
+                if since(now, g) >= UP_HOLD_MS.saturating_add(off) {
                     self.good_since = None;
                     self.request(f, now);
                 }
@@ -1074,6 +1134,30 @@ impl Link {
             let n = mk(FrameType::Ack, 0, 0, a, &[sack], out, self.call_id)?;
             return Some((n, t, false, false));
         }
+        // Probe the peer: first PING after 2 RTOs (answerer 2.5) of hearing
+        // nothing, then again after about 1 RTO (jittered) while unanswered.
+        let rto = rto_ms(t);
+        let idle = rto.saturating_mul(2).saturating_add(self.role_off(rto));
+        let probe = if self.ping_out == 0 {
+            since(now, self.last_rx) >= idle
+        } else {
+            since(now, self.ping_last) >= self.ping_wait
+        };
+        if probe {
+            self.ping_out = self.ping_out.saturating_add(1);
+            self.ping_last = now;
+            self.ping_wait = rto.saturating_add(self.jitter(rto / 4));
+            let n = mk(
+                FrameType::Keepalive,
+                FLAG_PING,
+                0,
+                0,
+                &self.ka_payload(),
+                out,
+                self.call_id,
+            )?;
+            return Some((n, t, true, false));
+        }
         if self.stage(now) {
             let (seq, len) = self.staged.take()?;
             self.ka_reply = false;
@@ -1088,18 +1172,11 @@ impl Link {
             )?;
             return Some((n, t, false, true));
         }
-        let rto = rto_ms(t);
-        let mut idle = rto.saturating_mul(2);
-        if self.role == Role::Answerer {
-            idle = idle.saturating_add(rto / 2);
-        }
-        let quiet = since(now, self.last_tx) >= idle && since(now, self.last_rx) >= idle;
-        if self.ka_reply || quiet {
-            let flags = if self.ka_reply { 0 } else { FLAG_PING };
+        if self.ka_reply {
             self.ka_reply = false;
             let n = mk(
                 FrameType::Keepalive,
-                flags,
+                0,
                 0,
                 0,
                 &self.ka_payload(),
