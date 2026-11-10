@@ -374,7 +374,6 @@ fn flow_control_never_loses_bytes() {
 }
 
 #[test]
-#[ignore = "BUG: +++ held while ArqTx is full escapes after S12 although the host kept offering data"]
 fn plus_plus_plus_under_backpressure_is_data() {
     // SF12: the send window stays full for seconds.
     let mut h = Harness::new(SimChannel::constant_db(-16, 12));

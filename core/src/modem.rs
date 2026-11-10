@@ -184,6 +184,9 @@ pub struct Modem {
     /// S2 characters held as a possible escape (0 to 3).
     esc: u8,
     esc_last: u32,
+    /// The held S2 characters can no longer be an escape (more input was
+    /// offered after them); they only wait to be sent as data.
+    esc_dead: bool,
     last_host: u32,
     /// Latest retrain seen in data mode, printed on escape.
     retrain_note: Option<Tier>,
@@ -211,6 +214,7 @@ impl Modem {
             verbose: true,
             esc: 0,
             esc_last: 0,
+            esc_dead: false,
             last_host: 0,
             retrain_note: None,
             retrains: [None; HISTORY],
@@ -248,12 +252,15 @@ impl Modem {
     }
 
     pub fn tick<R: Radio>(&mut self, radio: &mut R, now_ms: u32) {
-        if self.mode == Mode::Data
+        if self.mode == Mode::Data && self.esc > 0 && self.esc_dead {
+            self.flush_esc();
+        } else if self.mode == Mode::Data
             && self.esc > 0
             && now_ms.wrapping_sub(self.esc_last) >= self.guard()
         {
             if self.esc == 3 {
                 self.esc = 0;
+                self.esc_dead = false;
                 self.mode = Mode::OnlineCommand;
                 self.result(ResultCode::Ok);
                 if let Some(t) = self.retrain_note.take() {
@@ -297,6 +304,14 @@ impl Modem {
 
     /// Push held escape characters as data. True when none are left.
     fn flush_esc(&mut self) -> bool {
+        let done = self.flush_held();
+        if done {
+            self.esc_dead = false;
+        }
+        done
+    }
+
+    fn flush_held(&mut self) -> bool {
         let c = self.esc_char();
         let held = [c; 3];
         let n = self
@@ -308,25 +323,38 @@ impl Modem {
 
     /// Escape rule: S12 guard of silence, three S2 characters each less than
     /// S12 apart, then S12 of silence (checked in tick). Otherwise data.
+    ///
+    /// Any non-empty offer counts as host activity for the guard, even if
+    /// the call refuses the bytes (send window full). Held S2 characters
+    /// followed by any further offered byte are released as data.
     fn data_input(&mut self, bytes: &[u8], now: u32) -> usize {
+        if bytes.is_empty() {
+            return 0;
+        }
         let guard = self.guard();
         let c = self.esc_char();
+        let quiet_before = now.wrapping_sub(self.last_host) >= guard;
+        self.last_host = now;
         let mut used = 0;
-        for &b in bytes {
+        for (i, &b) in bytes.iter().enumerate() {
             if self.esc > 0
-                && (b != c || self.esc >= 3 || now.wrapping_sub(self.esc_last) >= guard)
-                && !self.flush_esc()
+                && (self.esc_dead
+                    || b != c
+                    || self.esc >= 3
+                    || now.wrapping_sub(self.esc_last) >= guard)
             {
-                break;
+                self.esc_dead = true;
+                if !self.flush_esc() {
+                    break;
+                }
             }
-            let start = self.esc == 0 && now.wrapping_sub(self.last_host) >= guard;
+            let start = self.esc == 0 && i == 0 && quiet_before;
             if b == c && (start || self.esc > 0) {
                 self.esc += 1;
                 self.esc_last = now;
             } else if self.link.push_data(&[b]) == 0 {
                 break;
             }
-            self.last_host = now;
             used += 1;
         }
         used
@@ -402,6 +430,7 @@ impl Modem {
                 Some(t) if self.link.is_connected() => {
                     self.mode = Mode::Data;
                     self.esc = 0;
+                    self.esc_dead = false;
                     self.last_host = now;
                     self.result(ResultCode::Connect(t));
                 }
@@ -535,6 +564,7 @@ impl Modem {
                     self.fresh_call();
                     self.mode = Mode::Data;
                     self.esc = 0;
+                    self.esc_dead = false;
                     self.last_host = now;
                     self.result(ResultCode::Connect(t));
                 }
