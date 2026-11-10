@@ -14,7 +14,7 @@ use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWE
 use crate::frame::{valid_name, NAME_MAX};
 use crate::link::{Event, Link, State};
 use crate::radio::{Radio, RxInfo};
-use crate::settings::{parse_hostport, Forward, Settings, MAX_FWD};
+use crate::settings::{parse_hostport, Forward, Settings, WireMode, MAX_FWD};
 use crate::tier::Tier;
 
 /// ATI line 1.
@@ -51,7 +51,7 @@ impl Config {
     /// 1 to 16 printable ASCII characters (the same rule as a CallReq name),
     /// so a modem can never hold a name it could not dial or answer to.
     pub fn new(name: &str) -> Option<Config> {
-        if !valid_name(name) {
+        if !valid_name(name) || name.contains(':') {
             return None;
         }
         let mut c = Config {
@@ -245,13 +245,15 @@ pub struct Modem {
     /// Metadata of the last frame handed to `radio_rx`.
     last_rx: Option<RxInfo>,
     /// Hotspot, client network, forwards and publish setting. Its `sregs`,
-    /// `echo` and `verbose` are not live: those stay in `cfg.sregs`,
-    /// `echo` and `verbose`, and are merged in by `settings()`.
+    /// `echo` and `verbose` mirror the live `cfg.sregs`, `echo` and
+    /// `verbose` (copied after every command line by `sync_set`).
     set: Settings,
     /// The profile `ATZ` restores: what was loaded or last saved.
     saved: Settings,
     /// `AT&W` was entered; the platform saves `settings()`.
     save_req: bool,
+    /// Hotspot or client settings changed (AT+WAP, AT+WSTA, ATZ).
+    wifi_changed: bool,
     /// Last line from `set_wifi_status`.
     wifi: [u8; WIFI_STATUS_MAX],
     wifi_len: usize,
@@ -275,6 +277,7 @@ impl Modem {
             saved: set.clone(),
             set,
             save_req: false,
+            wifi_changed: false,
             wifi: [0; WIFI_STATUS_MAX],
             wifi_len: 0,
             cfg,
@@ -322,13 +325,21 @@ impl Modem {
         core::mem::take(&mut self.save_req)
     }
 
+    /// True once after AT+WAP, AT+WSTA (any form that took effect) or ATZ
+    /// (clears the flag): the platform re-reads `settings()` and re-applies Wi-Fi.
+    pub fn take_wifi_changed(&mut self) -> bool {
+        core::mem::take(&mut self.wifi_changed)
+    }
+
     /// The current settings, live S registers, E and V included.
-    pub fn settings(&self) -> Settings {
-        let mut s = self.set.clone();
-        s.sregs = self.cfg.sregs;
-        s.echo = self.echo;
-        s.verbose = self.verbose;
-        s
+    pub fn settings(&self) -> &Settings {
+        &self.set
+    }
+
+    fn sync_set(&mut self) {
+        self.set.sregs = self.cfg.sregs;
+        self.set.echo = self.echo;
+        self.set.verbose = self.verbose;
     }
 
     /// Boot: make `s` (from `Settings::from_blob`) the current settings and
@@ -339,6 +350,7 @@ impl Modem {
         self.verbose = s.verbose;
         self.saved.clone_from(&s);
         self.set = s;
+        self.wifi_changed = true;
     }
 
     /// True while the generated hotspot password may be shown on the OLED:
@@ -349,8 +361,11 @@ impl Modem {
     }
 
     /// The platform saw a device join the hotspot: stop showing the password.
+    /// The cleared flag is saved: this also asks for a save.
     pub fn note_ap_client_joined(&mut self) {
         self.set.show_ap_pass = false;
+        self.saved.show_ap_pass = false;
+        self.save_req = true;
     }
 
     /// Remember the previous boot's crash note for ATI. Only printable
@@ -603,6 +618,7 @@ impl Modem {
             Some(Ok(cmd)) if !self.line_over => self.exec(cmd, radio, now),
             _ => self.result(ResultCode::Error),
         }
+        self.sync_set();
     }
 
     fn exec<R: Radio>(&mut self, cmd: AtCmd<'_>, radio: &mut R, now: u32) {
@@ -622,6 +638,7 @@ impl Modem {
                     };
                     self.result(code);
                 } else if self.mode != Mode::Command
+                    || name.contains(':')
                     || !self.link.dial(name_of(&self.cfg), name, now)
                 {
                     self.result(ResultCode::Error);
@@ -788,6 +805,7 @@ impl Modem {
                 let shown = self.set.show_ap_pass && self.saved.show_ap_pass;
                 self.set.clone_from(&self.saved);
                 self.set.show_ap_pass = shown;
+                self.wifi_changed = true;
                 self.result(ResultCode::Ok);
             }
             AtCmd::Save => {
@@ -811,10 +829,12 @@ impl Modem {
             }
             AtCmd::WapPower(on) => {
                 self.set.ap_on = on;
+                self.wifi_changed = true;
                 self.result(ResultCode::Ok);
             }
             AtCmd::WapSet { ssid, pass } => {
                 let ok = self.set.set_ap(ssid, pass);
+                self.wifi_changed |= ok;
                 self.ok_or_error(ok);
             }
             AtCmd::WstaQuery => {
@@ -828,10 +848,12 @@ impl Modem {
             }
             AtCmd::WstaForget => {
                 self.set.clear_sta();
+                self.wifi_changed = true;
                 self.result(ResultCode::Ok);
             }
             AtCmd::WstaSet { ssid, pass } => {
                 let ok = self.set.set_sta(ssid, pass);
+                self.wifi_changed |= ok;
                 self.ok_or_error(ok);
             }
             AtCmd::WifiQuery => {
@@ -851,6 +873,11 @@ impl Modem {
                         t.put(b"FWD ").put(f.name().as_bytes()).put(b" ");
                         t.put(f.host().as_bytes()).put(b":");
                         t.num(u32::from(f.port()), 1);
+                        t.put(if f.mode() == WireMode::Telnet {
+                            b" T"
+                        } else {
+                            b" R"
+                        });
                     }
                     if t.n > 0 {
                         self.info(t.bytes());

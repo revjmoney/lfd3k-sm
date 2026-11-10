@@ -206,7 +206,7 @@ impl Forward {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Settings {
     pub ap_on: bool,
     ap_ssid: [u8; SSID_MAX],
@@ -225,6 +225,25 @@ pub struct Settings {
     pub verbose: bool,
     /// The hotspot password may still be shown on the OLED.
     pub show_ap_pass: bool,
+}
+
+/// Passwords are never printed.
+impl core::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Settings")
+            .field("ap_on", &self.ap_on)
+            .field("ap_ssid", &self.ap_ssid())
+            .field("ap_pass", &"********")
+            .field("sta_ssid", &self.sta_ssid())
+            .field("sta_pass", &"********")
+            .field("fwd", &self.fwd)
+            .field("publish", &self.publish)
+            .field("sregs", &self.sregs)
+            .field("echo", &self.echo)
+            .field("verbose", &self.verbose)
+            .field("show_ap_pass", &self.show_ap_pass)
+            .finish()
+    }
 }
 
 impl Settings {
@@ -461,6 +480,16 @@ impl Settings {
         }
         for slot in s.fwd.iter_mut() {
             *slot = Forward::read(r.take(FWD_REC)?)?;
+        }
+        for (i, f) in s.fwd.iter().flatten().enumerate() {
+            if s.fwd
+                .iter()
+                .flatten()
+                .skip(i + 1)
+                .any(|g| g.name().eq_ignore_ascii_case(f.name()))
+            {
+                return None;
+            }
         }
         s.publish = match publish {
             NO_PUB => None,

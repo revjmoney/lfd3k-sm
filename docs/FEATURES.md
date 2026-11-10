@@ -68,7 +68,7 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | AT+WSTA=<ssid>,<pass> | Set the client network (password 8 to 63 chars) |
 | AT+WSTA=0 | Forget the client network |
 | AT+WIFI? | Print the platform's live Wi-Fi status line, or `WIFI OFF` before it reports one |
-| AT+FWD? | List forwards as `FWD <name> <host>:<port>` |
+| AT+FWD? | List forwards as `FWD <name> <host>:<port> <T|R>` (wire mode) |
 | AT+FWD=<name>,<host>,<port>[,T\|R] | Add or replace a forward (name compares case-insensitively). ERROR if all 8 slots are used |
 | AT+FWD=<name> | Delete a forward (ERROR if there is none; clears AT+PUB if it pointed there) |
 | AT+PUB? | Print `PUB <name>` or `PUB NONE` |
@@ -89,7 +89,7 @@ Notes:
 - ATH during a call prints NO CARRIER; with no call it prints OK. ATZ restores the saved settings (S registers, echo, verbose, hotspot, client network, forwards, publish; power-on defaults when nothing was loaded or saved) and hangs up silently.
 - ATA with nothing ringing prints NO CARRIER; ATA in online command mode (a call is up) prints ERROR and the call stays up.
 - A partial command line typed before a call connects (during RING or while dialing) is dropped at CONNECT.
-- The station name is 1 to 16 printable ASCII characters (Config::new refuses anything else).
+- The station name is 1 to 16 printable ASCII characters without `:` (Config::new refuses anything else), so a dial like `BBS:1` is always host:port, never a radio name. Radio dial names containing `:` print ERROR.
 - ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
 - ATI gets a fourth line `LAST CRASH: <note>` only when the previous boot ended in a panic (the note is `file:line`, up to 64 printable characters). With no crash it prints three lines, as before.
 - AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
@@ -98,6 +98,7 @@ Notes:
 - ATDT order: a forward name (any case) first, then `host:port`, else a radio dial. Use `ATDT`, not bare `ATD`, for host names that start with T or P. Until the Wi-Fi dial lands, a forward or host:port dial prints NO CARRIER at once and starts nothing.
 - AT&V adds `WIFI AP <ON|OFF> <ssid>  STA <ssid|OFF>`, `PUB <name|NONE>` and `FWD <count>` after the RADIO line.
 - AT&W sets a save-wanted flag the platform takes (`Modem::take_save_request`) and reads with `Modem::settings()`. `Modem::load_settings` applies a loaded copy at boot, including S0 auto-answer and S30. ATZ restores that copy.
+- `Modem::take_wifi_changed()` is true once after AT+WAP (any form that took effect), AT+WSTA (any form that took effect), ATZ or a settings load; the platform then re-reads `Modem::settings()` (a reference) and re-applies Wi-Fi. `note_ap_client_joined` also asks for a save.
 - The hotspot password may be shown on the OLED (`Modem::show_ap_pass`) until a device joins (`note_ap_client_joined`) or AT&W saved with a client network set; the flag is part of the saved blob.
 
 ## Front panel (OLED)
