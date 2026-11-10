@@ -980,7 +980,11 @@ impl Modem {
             snr_x4: snr,
             ..info
         };
-        self.dir_heard(r.name, Some(r.services), both, now);
+        // HIDDEN: an overheard answer only refreshes a name already known,
+        // like a ScanReq (only beacons add strangers there).
+        if self.set.beacon != BeaconMode::Hidden || self.dir.get(r.name).is_some() {
+            self.dir_heard(r.name, Some(r.services), both, now);
+        }
         let print = self.verbose && self.mode != Mode::Data;
         let Some(scan) = self.disc.scan.as_mut() else {
             return;
@@ -1061,6 +1065,11 @@ impl Modem {
             BeaconMode::Hidden => {
                 self.disc.beacon = None;
                 self.disc.answer = None;
+                // A scan whose ScanReq has not gone out yet never will.
+                if self.disc.scan.is_some_and(|s| s.sent.is_none()) {
+                    self.disc.scan = None;
+                    self.result(ResultCode::Error);
+                }
             }
         }
         // Scan window over, or a ScanReq that never found air.
@@ -1169,6 +1178,11 @@ impl Modem {
 
     /// Print `AT+DIR?` lines while the host output has room, then OK.
     fn pump_list(&mut self) {
+        // Data mode is 8-bit clean: a listing ends when a call takes the host.
+        if self.mode == Mode::Data {
+            self.dir_list = None;
+            return;
+        }
         while let Some((next, at)) = self.dir_list {
             let mut i = usize::from(next);
             while i < DIR_MAX && self.dir.slot(i).is_none() {
