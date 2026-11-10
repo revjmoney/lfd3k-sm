@@ -35,6 +35,8 @@ pub struct FakeHal {
     pub dev_errors: u16,
     /// Frame returned by GetRxBufferStatus and ReadBuffer.
     pub rx_payload: Vec<u8>,
+    /// GetRssiInst raw byte (dBm = -raw / 2).
+    pub rssi_inst: u8,
     /// GetPacketStatus bytes.
     pub rssi_pkt: u8,
     pub snr_pkt: u8,
@@ -65,6 +67,7 @@ impl FakeHal {
             regs: BTreeMap::new(),
             dev_errors: 0,
             rx_payload: Vec::new(),
+            rssi_inst: 0,
             rssi_pkt: 0,
             snr_pkt: 0,
             sf: 0,
@@ -107,6 +110,7 @@ impl FakeHal {
                     put(3 + i, v);
                 }
             }
+            0x15 => put(2, self.rssi_inst),
             0x14 => {
                 put(2, self.rssi_pkt);
                 put(3, self.snr_pkt);

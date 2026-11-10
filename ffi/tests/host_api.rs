@@ -6,7 +6,7 @@
 //! be set up and driven through the C entry points.
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::{Mutex, MutexGuard};
 
@@ -14,10 +14,7 @@ use lfd3k_core::arq::{CHUNK, WINDOW};
 use lfd3k_core::frame::{decode, FrameType};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 use lfd3k_ffi::panic::{format_note, NOTE_LEN};
-use lfd3k_ffi::{
-    fake_hal, lfd3k_core_version, lfd3k_host_in, lfd3k_host_out, lfd3k_init, lfd3k_poll,
-    lfd3k_status, lfd3k_status_t, lfd3k_take_fb_request,
-};
+use lfd3k_ffi::*;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -558,4 +555,699 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
         }
     }
     assert_eq!(first, Some(CHUNK), "first data frame is a full ARQ chunk");
+}
+
+// ---- Phase 3: Wi-Fi settings, the wire, SimNet and the channel trace. ----
+
+fn cstr(s: &str) -> CString {
+    CString::new(s).unwrap()
+}
+
+/// Byte compare that reports the first difference, not 10 KB of numbers.
+fn same(got: &[u8], want: &[u8], what: &str) {
+    let at = got.iter().zip(want).position(|(a, b)| a != b);
+    assert!(
+        at.is_none() && got.len() == want.len(),
+        "{what}: got {} bytes, want {}, first difference at {at:?}",
+        got.len(),
+        want.len()
+    );
+}
+
+/// `lfd3k_take_wire_request` with a 64 byte host buffer.
+fn wire_req() -> Option<(String, u16)> {
+    let mut host = [0 as c_char; 64];
+    let mut port = 0u16;
+    if unsafe { lfd3k_take_wire_request(host.as_mut_ptr(), host.len(), &mut port) } {
+        let h = unsafe { CStr::from_ptr(host.as_ptr()) };
+        Some((h.to_str().unwrap().to_string(), port))
+    } else {
+        None
+    }
+}
+
+fn wire_out_all() -> Vec<u8> {
+    let mut all = Vec::new();
+    let mut buf = [0u8; 100];
+    loop {
+        let n = unsafe { lfd3k_wire_out(buf.as_mut_ptr(), buf.len()) };
+        if n == 0 {
+            return all;
+        }
+        all.extend_from_slice(&buf[..n]);
+    }
+}
+
+fn wire_in(bytes: &[u8], now: u32) -> usize {
+    unsafe { lfd3k_wire_in(bytes.as_ptr(), bytes.len(), now) }
+}
+
+fn take_save() -> Option<Vec<u8>> {
+    let mut blob = [0u8; 1024];
+    let mut len = 0usize;
+    if unsafe { lfd3k_take_save(blob.as_mut_ptr(), blob.len(), &mut len) } {
+        Some(blob[..len].to_vec())
+    } else {
+        None
+    }
+}
+
+fn load(blob: &[u8]) -> i32 {
+    unsafe { lfd3k_load_settings(blob.as_ptr(), blob.len()) }
+}
+
+fn wifi_cfg() -> lfd3k_wifi_cfg_t {
+    let mut c = lfd3k_wifi_cfg_t {
+        ap_on: 9,
+        sta_set: 9,
+        ap_ssid: [0xAA; 33],
+        ap_pass: [0xAA; 64],
+        sta_ssid: [0xAA; 33],
+        sta_pass: [0xAA; 64],
+    };
+    unsafe { lfd3k_get_wifi_config(&mut c) };
+    c
+}
+
+fn cfg_str(b: &[u8]) -> String {
+    let n = b.iter().position(|&c| c == 0).expect("NUL terminated");
+    String::from_utf8(b[..n].to_vec()).unwrap()
+}
+
+/// Types a command line (command mode) and returns the modem's reply.
+fn cmd(line: &str, now: u32) -> String {
+    let mut v = line.as_bytes().to_vec();
+    v.push(b'\r');
+    assert_eq!(host_in(&v, now), v.len(), "{line}");
+    lfd3k_poll(now);
+    text(&host_out())
+}
+
+#[test]
+fn wire_bytes_cross_in_order() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    assert!(cmd("AT+FWD=S,h.example,7000", 1).ends_with("\r\nOK\r\n"));
+    // Dial: nothing to close, one request, taken once; a short buffer is
+    // refused and keeps the request.
+    assert!(cmd("ATDT S", 2).contains("DIALING S"));
+    assert!(!lfd3k_take_wire_close());
+    assert_eq!(status(3).wire, 1);
+    let mut small = [0 as c_char; 32];
+    let mut port = 0u16;
+    assert!(!unsafe { lfd3k_take_wire_request(small.as_mut_ptr(), 32, &mut port) });
+    assert!(!unsafe { lfd3k_take_wire_request(ptr::null_mut(), 64, &mut port) });
+    assert_eq!(wire_req(), Some(("h.example".to_string(), 7000)));
+    assert_eq!(wire_req(), None);
+    // Connected: CONNECT WIFI TCP, data mode.
+    lfd3k_wire_event(1, 10);
+    lfd3k_poll(11);
+    assert!(text(&host_out()).contains("\r\nCONNECT WIFI TCP\r\n"));
+    assert_eq!(status(12).wire, 2);
+
+    // Both directions at once, in odd sized pieces with polls in between:
+    // everything arrives once and in order (no '+', so no escape logic).
+    let up = pattern(3_000, 21);
+    let down = pattern(5_000, 22);
+    assert!(up.contains(&b'\r') && down.contains(&b'\r'));
+    let (mut iu, mut id) = (0, 0);
+    let (mut got_wire, mut got_host) = (Vec::new(), Vec::new());
+    let sizes = [1usize, 7, 64, 255, 3, 190, 2048];
+    let mut now = 20u32;
+    for spin in 0.. {
+        assert!(spin < 100_000, "stuck at {iu}/{id}");
+        if iu >= up.len()
+            && id >= down.len()
+            && got_wire.len() == up.len()
+            && got_host.len() == down.len()
+        {
+            break;
+        }
+        let n = sizes[spin % sizes.len()];
+        let e = (iu + n).min(up.len());
+        iu += host_in(&up[iu..e], now);
+        got_wire.extend_from_slice(&wire_out_all());
+        let e = (id + n).min(down.len());
+        id += wire_in(&down[id..e], now);
+        now += 1;
+        lfd3k_poll(now);
+        got_host.extend_from_slice(&host_out());
+    }
+    same(&got_wire, &up, "host to wire");
+    same(&got_host, &down, "wire to host");
+
+    // A burst bigger than the ring: only part is taken, the rest is offered
+    // again and nothing is lost (the platform keeps what was not taken).
+    let burst = pattern(10_000, 23);
+    let took = wire_in(&burst, now);
+    assert!(took > 0 && took < burst.len(), "took {took}");
+    let (mut off, mut got) = (took, host_out());
+    let mut spins = 0;
+    while off < burst.len() {
+        spins += 1;
+        assert!(spins < 10_000);
+        now += 1;
+        lfd3k_poll(now);
+        got.extend_from_slice(&host_out());
+        off += wire_in(&burst[off..], now);
+    }
+    // What the core still holds drains over the next polls.
+    for _ in 0..100 {
+        now += 1;
+        lfd3k_poll(now);
+        got.extend_from_slice(&host_out());
+    }
+    same(&got, &burst, "burst");
+
+    // Escape, hang up: the close is asked for once and the status clears.
+    now += 1_100;
+    lfd3k_poll(now);
+    assert_eq!(host_in(b"+++", now), 3);
+    now += 1_100;
+    lfd3k_poll(now);
+    assert!(text(&host_out()).ends_with("\r\nOK\r\n"));
+    assert!(cmd("ATH", now).ends_with("\r\nNO CARRIER\r\n"));
+    assert!(lfd3k_take_wire_close());
+    assert!(!lfd3k_take_wire_close(), "once");
+    assert_eq!(status(now).wire, 0);
+
+    // The far end closing (event 3) gives NO CARRIER and no close request.
+    assert!(cmd("ATDT S", now + 1).contains("DIALING"));
+    assert!(wire_req().is_some());
+    lfd3k_wire_event(1, now + 2);
+    lfd3k_wire_event(7, now + 2); // unknown events are ignored
+    lfd3k_poll(now + 3);
+    assert_eq!(status(now + 3).wire, 2);
+    host_out();
+    lfd3k_wire_event(3, now + 4);
+    lfd3k_poll(now + 5);
+    assert!(text(&host_out()).ends_with("\r\nNO CARRIER\r\n"));
+    assert!(!lfd3k_take_wire_close());
+    assert_eq!(status(now + 5).wire, 0);
+    // Refused: NO CARRIER at once.
+    assert!(cmd("ATDT S", now + 10).contains("DIALING"));
+    assert!(wire_req().is_some());
+    lfd3k_wire_event(2, now + 11);
+    lfd3k_poll(now + 12);
+    assert!(text(&host_out()).ends_with("\r\nNO CARRIER\r\n"));
+
+    // Everything is a safe no-op with null pointers.
+    assert_eq!(unsafe { lfd3k_wire_in(ptr::null(), 5, 0) }, 0);
+    assert_eq!(unsafe { lfd3k_wire_out(ptr::null_mut(), 5) }, 0);
+}
+
+#[test]
+fn settings_load_save_roundtrip_c_abi() {
+    let _g = serial();
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    cmd("ATE0", 0);
+    // First boot: no blob, or a rejected one. The platform loads, gets -1,
+    // and asks for defaults with a generated password.
+    assert_eq!(load(&[0xFF; 1024]), -1, "erased flash");
+    assert_eq!(load(&[]), -1);
+    assert_eq!(unsafe { lfd3k_load_settings(ptr::null(), 899) }, -1);
+    assert!(take_save().is_none(), "a rejected blob asks for nothing");
+    assert!(!lfd3k_take_wifi_changed());
+    // Bad passwords change nothing: null, short, long, comma, non-ASCII.
+    unsafe { lfd3k_default_settings(ptr::null()) };
+    for bad in [
+        "short",
+        &"p".repeat(64),
+        "has,comma-123",
+        "caf\u{e9}caf\u{e9}",
+    ] {
+        unsafe { lfd3k_default_settings(cstr(bad).as_ptr()) };
+        assert!(take_save().is_none(), "{bad}");
+        assert_eq!(cfg_str(&wifi_cfg().ap_pass), "");
+    }
+    unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
+    let first = take_save().expect("defaults ask for a save");
+    assert!(take_save().is_none(), "once");
+    assert_eq!(first.len(), 899);
+    assert!(lfd3k_take_wifi_changed());
+    let c = wifi_cfg();
+    assert_eq!((c.ap_on, c.sta_set), (1, 0));
+    assert_eq!(cfg_str(&c.ap_ssid), "AXISMODEM-1234");
+    assert_eq!(cfg_str(&c.ap_pass), "hotspotpw234");
+    assert!(lfd3k_show_ap_pass());
+
+    // Configure over the AT side, save with AT&W.
+    assert!(cmd("AT+FWD=AXIS,192.168.1.164,23", 1).ends_with("OK\r\n"));
+    assert!(cmd("AT+FWD=echo,10.0.0.9,7000", 1).ends_with("OK\r\n"));
+    assert!(cmd("AT+PUB=echo", 1).ends_with("OK\r\n"));
+    assert!(cmd("ATS7=45", 1).ends_with("OK\r\n"));
+    assert!(cmd("AT+WSTA=HomeNet,Rev-Home-Pass-1", 1).ends_with("OK\r\n"));
+    assert!(lfd3k_take_wifi_changed(), "AT+WSTA flags the platform");
+    assert!(!lfd3k_take_wifi_changed());
+    let c = wifi_cfg();
+    assert_eq!(c.sta_set, 1);
+    assert_eq!(cfg_str(&c.sta_ssid), "HomeNet");
+    assert_eq!(
+        cfg_str(&c.sta_pass),
+        "Rev-Home-Pass-1",
+        "the platform needs it"
+    );
+    assert!(cmd("AT&W", 2).ends_with("OK\r\n"));
+    // A buffer under 1 KB is refused and the request is kept.
+    let mut small = [0u8; 900];
+    let mut len = 0usize;
+    assert!(!unsafe { lfd3k_take_save(small.as_mut_ptr(), small.len(), &mut len) });
+    assert!(!unsafe { lfd3k_take_save(ptr::null_mut(), 1024, &mut len) });
+    assert!(!unsafe { lfd3k_take_save(small.as_mut_ptr(), 1024, ptr::null_mut()) });
+    let blob = take_save().expect("the kept request");
+    assert_eq!(blob.len(), 899);
+    assert!(!lfd3k_show_ap_pass(), "saved once with a client network");
+
+    // Power cycle: init, load the blob, and it all comes back.
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    cmd("ATE0", 0);
+    assert_eq!(load(&blob), 0);
+    assert!(lfd3k_take_wifi_changed(), "a load flags the platform");
+    let c = wifi_cfg();
+    assert_eq!(cfg_str(&c.ap_pass), "hotspotpw234");
+    assert_eq!(cfg_str(&c.sta_ssid), "HomeNet");
+    let t = cmd("AT+FWD?", 3);
+    assert!(
+        t.contains("FWD AXIS 192.168.1.164:23 T") && t.contains("FWD echo 10.0.0.9:7000 R"),
+        "{t:?}"
+    );
+    // (Echo came back on with the blob: the saved profile had E1.)
+    assert!(cmd("AT+PUB?", 3).ends_with("\r\nPUB echo\r\n\r\nOK\r\n"));
+    assert!(cmd("ATS7?", 3).ends_with("\r\n045\r\n\r\nOK\r\n"));
+    let v = cmd("AT&V", 3);
+    assert!(
+        v.contains("PWSHOW 0") && !v.contains("Rev-Home-Pass-1"),
+        "{v:?}"
+    );
+    // Saving again gives a blob equal to the one loaded.
+    cmd("AT&W", 4);
+    assert_eq!(take_save().unwrap(), blob);
+
+    // The password is hidden once a device joins (and a save is asked for).
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
+    take_save();
+    assert!(lfd3k_show_ap_pass());
+    lfd3k_note_ap_client_joined();
+    assert!(!lfd3k_show_ap_pass());
+    let hidden = take_save().expect("joining asks for a save");
+    assert_ne!(hidden, first, "the blob now says hidden");
+    assert_eq!(load(&hidden), 0);
+    assert!(!lfd3k_show_ap_pass());
+}
+
+#[test]
+fn wifi_status_line_and_stack_free_c_abi() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    assert_eq!(cmd("AT+WIFI?", 1), "\r\nWIFI OFF\r\n\r\nOK\r\n");
+    unsafe {
+        lfd3k_set_wifi_status(cstr("AP AXISMODEM-1234 0/4  STA 192.168.1.50 -61 dBm").as_ptr())
+    };
+    assert_eq!(
+        cmd("AT+WIFI?", 1),
+        "\r\nAP AXISMODEM-1234 0/4  STA 192.168.1.50 -61 dBm\r\n\r\nOK\r\n"
+    );
+    // 96 bytes are kept, control bytes become '?', a null is ignored.
+    unsafe { lfd3k_set_wifi_status(cstr(&"w".repeat(200)).as_ptr()) };
+    let t = cmd("AT+WIFI?", 2);
+    assert!(
+        t.contains(&"w".repeat(96)) && !t.contains(&"w".repeat(97)),
+        "{t:?}"
+    );
+    unsafe { lfd3k_set_wifi_status(CString::new(vec![b'a', 0x01, b'b']).unwrap().as_ptr()) };
+    assert_eq!(cmd("AT+WIFI?", 3), "\r\na?b\r\n\r\nOK\r\n");
+    unsafe { lfd3k_set_wifi_status(ptr::null()) };
+    assert!(cmd("AT+WIFI?", 4).contains("a?b"));
+    // STACK FREE shows in AT&V only after the platform reports it.
+    assert!(!cmd("AT&V", 5).contains("STACK FREE"));
+    lfd3k_set_stack_free(9_216);
+    assert!(cmd("AT&V", 6).contains("\r\nSTACK FREE 9216\r\n"));
+}
+
+#[test]
+fn status_wire_and_simnet_fields() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    let st = status(1);
+    assert_eq!((st.wire, st.simnet, st.state), (0, 0, 0));
+    cmd("AT+FWD=S,h.example,7000", 1);
+    cmd("ATDT S", 2);
+    assert_eq!(status(3).wire, 1, "dialing");
+    wire_req();
+    lfd3k_wire_event(1, 4);
+    lfd3k_poll(5);
+    let st = status(6);
+    assert_eq!(st.wire, 2, "online");
+    assert!(st.lights & 0b10 != 0, "CD is on for a Wi-Fi call");
+    lfd3k_wire_event(3, 7);
+    lfd3k_poll(8);
+    assert_eq!(status(9).wire, 0);
+    host_out();
+
+    // SimNet on and off shows in the status.
+    assert_eq!(cmd("AT+SIMNET=10.1.2.3", 20), "\r\nOK\r\n");
+    assert_eq!(status(21).simnet, 1);
+    assert_eq!(cmd("AT+SIMNET=0", 22), "\r\nOK\r\n");
+    assert_eq!(status(23).simnet, 0);
+    // A new init is on the real radio again (SimNet is never remembered).
+    cmd("AT+SIMNET=10.1.2.3", 24);
+    assert_eq!(init("CALLER"), 0);
+    assert_eq!(status(0).simnet, 0);
+
+    // Bridging: a radio call answered here goes to the published forward.
+    let mut rig = Rig::new();
+    rig.ffi_in(b"ATS0=1\rATE0\rAT+FWD=BBS,h.example,2323\rAT+PUB=BBS\r");
+    rig.run_ms(5);
+    let now = rig.now;
+    assert_eq!(rig.peer.host_input(b"ATDT CALLER\r", &mut rig.pr, now), 12);
+    let ok = rig.run_until(30_000, |r| {
+        status(r.now).wire == 3 && status(r.now).state != 0
+    });
+    assert!(
+        ok,
+        "FFI: {:?}\nPEER: {:?}",
+        text(&rig.ffi_out),
+        text(&rig.peer_out)
+    );
+    // No other state shows while the bridge's connection is pending.
+    assert_eq!(wire_req(), Some(("h.example".to_string(), 2323)));
+    lfd3k_wire_event(1, rig.now);
+    rig.run_ms(5);
+    assert_eq!(status(rig.now).wire, 3, "bridging");
+    assert!(text(&rig.ffi_out).contains("\r\nBRIDGE BBS\r\n"));
+    // Server bytes reach the radio caller, the caller's bytes reach the wire.
+    let banner = b"WELCOME TO THE BBS\r\n";
+    assert_eq!(wire_in(banner, rig.now), banner.len());
+    let mut from_peer = Vec::new();
+    let t0 = rig.now;
+    let mut typed = false;
+    while rig.now - t0 < 20_000 {
+        rig.run_ms(10);
+        from_peer.extend_from_slice(&wire_out_all());
+        let seen = rig.peer_out.windows(banner.len()).any(|w| w == banner);
+        if seen && !typed {
+            let now = rig.now;
+            assert_eq!(rig.peer.host_input(b"hello", &mut rig.pr, now), 5);
+            typed = true;
+        }
+        if typed && from_peer.ends_with(b"hello") {
+            break;
+        }
+    }
+    assert!(
+        typed,
+        "the banner crossed the radio: {:?}",
+        text(&rig.peer_out)
+    );
+    assert_eq!(from_peer, b"hello");
+    assert_eq!(status(rig.now).wire, 3);
+}
+
+/// Pass the SimNet switch on the C ABI and return the peer address taken.
+fn take_simnet() -> (i32, [u8; 4]) {
+    let mut ip = [0u8; 4];
+    let r = unsafe { lfd3k_take_simnet(ip.as_mut_ptr()) };
+    (r, ip)
+}
+
+fn spi_ops() -> Vec<u8> {
+    fake_hal::with(|h| h.xfers.iter().map(|t| t[0]).collect())
+}
+
+/// A CallReq from PEER to `callee` as the SimNet datagram a peer would send.
+fn call_req_datagram(callee: &str, tier: Tier) -> Vec<u8> {
+    let mut p = [0u8; 40];
+    let n = lfd3k_core::frame::call_req_payload("PEER", callee, &mut p).unwrap();
+    let hdr = lfd3k_core::frame::Header {
+        ftype: FrameType::CallReq,
+        flags: 0,
+        call_id: 9,
+        seq: 0,
+        ack: 0,
+    };
+    let mut f = [0u8; 255];
+    let m = lfd3k_core::frame::encode(&hdr, &p[..n], &mut f).unwrap();
+    let mut d = [0u8; lfd3k_core::simnet::DGRAM_MAX];
+    let k = lfd3k_core::simnet::build(tier, 32, -70, &f[..m], &mut d);
+    d[..k].to_vec()
+}
+
+#[test]
+fn simnet_switch_never_touches_spi_tx() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    lfd3k_poll(1);
+    // Control: on the SX1262 a dial goes out through SetTx.
+    cmd("ATDT PEER", 2);
+    assert!(
+        fake_hal::with(|h| !h.tx_frames.is_empty()),
+        "the chip transmitted"
+    );
+    assert!(spi_ops().contains(&0x83));
+    cmd("ATH", 3);
+    cmd("ATH", 4);
+
+    // Switch: the chip goes quiet, the dial becomes a datagram.
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    lfd3k_poll(1);
+    assert_eq!(cmd("AT+SIMNET=192.168.1.77", 5), "\r\nOK\r\n");
+    assert_eq!(take_simnet(), (1, [192, 168, 1, 77]));
+    assert_eq!(take_simnet().0, -1, "taken once");
+    fake_hal::with(|h| {
+        h.xfers.clear();
+        h.tx_frames.clear();
+        h.udp_out.clear();
+    });
+    let t = cmd("ATDT PEER", 10);
+    assert!(t.contains("DIALING PEER"), "{t:?}");
+    lfd3k_poll(20);
+    lfd3k_poll(30);
+    let (ops, tx, udp) = fake_hal::with(|h| {
+        (
+            h.xfers.iter().map(|t| t[0]).collect::<Vec<u8>>(),
+            h.tx_frames.len(),
+            h.udp_out.clone(),
+        )
+    });
+    assert!(
+        !ops.contains(&0x83),
+        "SetTx on the SPI bus in SimNet: {ops:?}"
+    );
+    assert_eq!(tx, 0);
+    assert!(ops.is_empty(), "no SPI traffic at all in SimNet: {ops:?}");
+    assert_eq!(udp.len(), 1, "one CallReq datagram");
+    let (tier, snr, rssi, frame) = lfd3k_core::simnet::parse(&udp[0]).expect("a SimNet datagram");
+    assert_eq!(tier, Tier::Sf12, "calls start on the robust tier");
+    assert_eq!((snr, rssi), (32, -70));
+    let f = decode(frame).unwrap();
+    assert_eq!(f.header.ftype, FrameType::CallReq);
+    assert_eq!(
+        lfd3k_core::frame::parse_call_req(f.payload).unwrap(),
+        ("CALLER", "PEER")
+    );
+    // Hanging up goes out as datagrams too.
+    cmd("ATH", 40);
+    lfd3k_poll(50);
+    assert!(!spi_ops().contains(&0x83));
+    assert_eq!(fake_hal::with(|h| h.tx_frames.len()), 0);
+}
+
+#[test]
+fn simnet_off_returns_to_listening() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    lfd3k_poll(1);
+    assert!(
+        fake_hal::with(|h| h.rx_mode),
+        "listening on the chip at boot"
+    );
+    cmd("AT+SIMNET=10.0.0.2", 2);
+    lfd3k_poll(3);
+    assert!(
+        !fake_hal::with(|h| h.rx_mode),
+        "the chip is in standby in SimNet"
+    );
+    assert_eq!(take_simnet().0, 1);
+    // While on, a CallReq datagram for us rings after its airtime (the HAL
+    // clock is what the simulated radio reads).
+    let d = call_req_datagram("CALLER", Tier::Sf12);
+    assert_eq!(unsafe { lfd3k_udp_in(d.as_ptr(), d.len(), 0) }, d.len());
+    fake_hal::with(|h| h.now_us += 5_000_000);
+    lfd3k_poll(100);
+    assert!(text(&host_out()).contains("\r\nRING\r\n"));
+    assert_eq!(status(101).simnet, 1);
+    cmd("ATH", 110);
+    host_out();
+
+    // Off again: the next poll puts the chip back in receive, and the status
+    // and AT&V say so.
+    fake_hal::with(|h| h.xfers.clear());
+    assert_eq!(cmd("AT+SIMNET=0", 120), "\r\nOK\r\n");
+    assert_eq!(take_simnet().0, 0, "close the UDP socket");
+    assert_eq!(take_simnet().0, -1);
+    lfd3k_poll(121);
+    assert!(fake_hal::with(|h| h.rx_mode), "listening on the chip again");
+    assert!(spi_ops().contains(&0x82), "SetRx");
+    assert_eq!(status(122).simnet, 0);
+    assert!(!cmd("AT&V", 123).contains("SIMNET"));
+    assert_eq!(lfd3k_simnet_due_ms(), u32::MAX);
+    // Datagrams are dropped now (no ring), and a dial uses the chip again.
+    assert_eq!(unsafe { lfd3k_udp_in(d.as_ptr(), d.len(), 0) }, d.len());
+    fake_hal::with(|h| h.now_us += 5_000_000);
+    lfd3k_poll(200);
+    assert!(!text(&host_out()).contains("RING"));
+    fake_hal::with(|h| {
+        h.tx_frames.clear();
+        h.udp_out.clear();
+    });
+    cmd("ATDT PEER", 210);
+    assert!(fake_hal::with(
+        |h| !h.tx_frames.is_empty() && h.udp_out.is_empty()
+    ));
+    // Null and early calls are harmless.
+    assert_eq!(unsafe { lfd3k_udp_in(ptr::null(), 5, 0) }, 0);
+    assert_eq!(unsafe { lfd3k_take_simnet(ptr::null_mut()) }, -1);
+}
+
+#[test]
+fn simnet_not_saved_in_blob() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
+    cmd("ATE0", 0);
+    cmd("AT&W", 1);
+    let plain = take_save().expect("blob");
+    // The same settings with SimNet on save to the very same bytes.
+    assert!(cmd("AT+SIMNET=10.9.8.7", 2).ends_with("OK\r\n"));
+    cmd("AT&W", 3);
+    let with = take_save().expect("blob");
+    assert_eq!(with, plain);
+    assert!(!with.windows(4).any(|w| w == [10, 9, 8, 7]));
+    assert!(!with.windows(7).any(|w| w == b"10.9.8."));
+    // After a "reboot" that loads it, SimNet is off and the chip is in use.
+    assert_eq!(init("CALLER"), 0);
+    assert_eq!(load(&with), 0);
+    assert_eq!(cmd("AT+SIMNET?", 4), "\r\nSIMNET OFF\r\n\r\nOK\r\n");
+    assert_eq!(take_simnet().0, -1);
+    assert_eq!(status(5).simnet, 0);
+}
+
+#[test]
+fn rf_trace_samples_while_listening() {
+    let _g = serial();
+    let mut dbm = [0i8; 64];
+    let mut tx = [9u8; 64];
+    assert_eq!(init("CALLER"), 0);
+    fake_hal::with(|h| h.rssi_inst = 200); // -100 dBm
+    let trace = |cap: usize| {
+        let (mut d, mut t) = (vec![0i8; cap], vec![9u8; cap]);
+        let n = unsafe { lfd3k_rf_trace(d.as_mut_ptr(), t.as_mut_ptr(), cap) };
+        (d[..n].to_vec(), t[..n].to_vec())
+    };
+    assert_eq!(trace(64).0.len(), 0, "no sample yet");
+    // Polled every 10 ms for a second: one sample per 50 ms.
+    for ms in (0..=1_000).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    let (d, t) = trace(64);
+    assert!((19..=21).contains(&d.len()), "{} samples", d.len());
+    assert!(d.iter().all(|&v| v == -100), "{d:?}");
+    assert!(t.iter().all(|&v| v == 0), "not transmitting");
+    // The level changes: newest samples show it, oldest first.
+    fake_hal::with(|h| h.rssi_inst = 160); // -80 dBm
+    for ms in (1_010..=1_500).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    let (d2, _) = trace(64);
+    assert_eq!(d2.last(), Some(&-80));
+    assert_eq!(d2[0], -100);
+    let at = d2.iter().position(|&v| v == -80).unwrap();
+    assert!(
+        d2[at..].iter().all(|&v| v == -80),
+        "ordered in time: {d2:?}"
+    );
+    // The ring holds 64; a smaller buffer gets the newest ones.
+    for ms in (1_510..=10_000).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    let (d3, t3) = trace(64);
+    assert_eq!((d3.len(), t3.len()), (64, 64));
+    assert!(d3.iter().all(|&v| v == -80));
+    let (d4, _) = trace(10);
+    assert_eq!(d4.len(), 10);
+    // Either pointer may be null; a zero cap gives nothing.
+    assert_eq!(
+        unsafe { lfd3k_rf_trace(ptr::null_mut(), tx.as_mut_ptr(), 8) },
+        8
+    );
+    assert_eq!(
+        unsafe { lfd3k_rf_trace(dbm.as_mut_ptr(), ptr::null_mut(), 8) },
+        8
+    );
+    assert_eq!(
+        unsafe { lfd3k_rf_trace(dbm.as_mut_ptr(), tx.as_mut_ptr(), 0) },
+        0
+    );
+    // Values are clamped to the signed byte range (the chip can say -127.5).
+    fake_hal::with(|h| h.rssi_inst = 255);
+    for ms in (10_010..=10_100).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    assert_eq!(trace(64).0.last(), Some(&-127));
+}
+
+#[test]
+fn rf_trace_marks_tx() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    fake_hal::with(|h| h.rssi_inst = 200);
+    let trace = || {
+        let (mut d, mut t) = ([0i8; 64], [9u8; 64]);
+        let n = unsafe { lfd3k_rf_trace(d.as_mut_ptr(), t.as_mut_ptr(), 64) };
+        (d[..n].to_vec(), t[..n].to_vec())
+    };
+    for ms in (0..=200).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    let before = trace().0.len();
+    assert!(before >= 3);
+    // On the air, a transmission is marked tx with no level (the chip cannot
+    // measure while sending), and there is no SPI read for it.
+    // SimNet: the simulated radio is transmitting for the frame's airtime on
+    // the HAL clock, which the fake advances by hand.
+    cmd("AT+SIMNET=10.0.0.2", 210);
+    lfd3k_poll(215);
+    host_out();
+    cmd("ATDT PEER", 220);
+    fake_hal::with(|h| {
+        h.step_us = 1;
+    });
+    fake_hal::with(|h| h.xfers.clear());
+    for ms in (230..=400).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    let (d, t) = trace();
+    let marks: Vec<usize> = (0..t.len()).filter(|&i| t[i] == 1).collect();
+    assert!(!marks.is_empty(), "the dial shows as tx: {t:?}");
+    assert!(
+        marks.iter().all(|&i| d[i] == 0),
+        "tx samples carry no level"
+    );
+    // Samples before the dial are listening ones (tx 0, -100 dBm).
+    assert!(t[..before].iter().all(|&v| v == 0) && d[..before].iter().all(|&v| v == -100));
+    // And the marks are contiguous with the transmission, then listening again
+    // once its airtime has passed on the HAL clock.
+    fake_hal::with(|h| h.now_us += 10_000_000);
+    for ms in (410..=700).step_by(10) {
+        lfd3k_poll(ms);
+    }
+    let (_, t2) = trace();
+    assert_eq!(t2.last(), Some(&0), "listening again after the airtime");
 }

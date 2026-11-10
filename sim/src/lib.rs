@@ -1128,6 +1128,17 @@ impl UdpPort {
         })
     }
 
+    /// The address the socket is bound to (the port, when bound with port 0).
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.sock.local_addr()
+    }
+
+    /// Point the port at its peer (two ports on ephemeral loopback ports
+    /// learn each other's address after both are bound).
+    pub fn set_peer(&mut self, peer: std::net::SocketAddr) {
+        self.peer = peer;
+    }
+
     /// The next datagram from the peer into `buf`, if one is waiting.
     /// Datagrams from other addresses are read and dropped.
     pub fn recv(&self, buf: &mut [u8]) -> Option<usize> {

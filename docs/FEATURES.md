@@ -132,6 +132,7 @@ Notes:
 
 ## Change log
 
+- 2026-11-10: Phase 3 task 6, tests: 71 new Rust tests (core integration 27 in `core/tests/telnet.rs` and `settings.rs`, sim 35 in `wire.rs`, `simnet.rs`, `phase3_props.rs`, ffi host 9 in `host_api.rs`) and 25 Python tests (`python -m unittest tools/test_lfd3k_term.py`, fakes only). They cover the telnet filter and CR rule, settings blob and AT commands, wire calls and the radio to forward bridge, SimNet alone and two modems over loopback UDP, the C ABI for settings, wire, SimNet and the channel trace, and the bench terminal redaction and PWSHOW gate. phase1-demo.txt regenerated (AT&V Wi-Fi lines).
 - 2026-11-10: Phase 3 task 5, Wi-Fi rows and wire screens on the OLED, AT&V `PWSHOW`, bench terminal redaction and `--shot-safe`, panel_check covers the net rows and wire screens (new mockups idle_ap, idle_ip, idle_pw, wifi_tcp, bridge, with a fake password), docs/phase3-bench.md. No new Rust tests (task 6); the existing 72 pass.
 - 2026-11-10: Phase 3 task 2 fix round 1: a long subnegotiation never leaks into data, the CR rule follows our sending direction only, CR LF stays CR LF and a lone CR is held up to 50 ms (RFC 854), incoming CR NUL becomes CR when the server is not BINARY, Wi-Fi dial is ERROR while a close is pending.
 - 2026-11-10: Phase 3 task 2, wire call path (core/src/wire.rs), telnet client filter (core/src/telnet.rs), radio to forward bridge, BUSY during a Wi-Fi call, FakeWire in the simulator. No new tests yet (task 6); the existing 72 pass.
