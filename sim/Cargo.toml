@@ -1,0 +1,8 @@
+[package]
+name = "lfd3k-sim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lfd3k-core = { path = "../core" }

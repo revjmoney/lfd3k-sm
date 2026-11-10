@@ -1,0 +1,4 @@
+target/
+firmware/.pio/
+firmware/lib/*.a
+.superpowers/
