@@ -228,7 +228,7 @@ impl Default for Link {
 }
 
 impl Link {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Link {
             state: State::Idle,
             role: Role::Caller,

@@ -102,7 +102,7 @@ fn symbol_us(tier: Tier) -> u64 {
 }
 
 impl<B: Bus> Sx1262<B> {
-    pub fn new(bus: B) -> Self {
+    pub const fn new(bus: B) -> Self {
         Sx1262 {
             bus,
             state: State::Idle,

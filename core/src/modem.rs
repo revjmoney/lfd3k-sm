@@ -58,6 +58,13 @@ pub struct Config {
 }
 
 impl Config {
+    /// No name: only for the constant `Modem::blank`, never for a live modem.
+    pub const BLANK: Config = Config {
+        name: [0; NAME_MAX],
+        name_len: 0,
+        sregs: SRegs::new(),
+    };
+
     /// Station name with default S registers. `None` unless the name is
     /// 1 to 16 printable ASCII characters (the same rule as a CallReq name),
     /// so a modem can never hold a name it could not dial or answer to.
@@ -271,6 +278,8 @@ pub struct Modem {
     /// Wi-Fi call state, wire request and close flags, the two wire rings
     /// and the telnet filter.
     wire: Wire,
+    /// Modem task stack headroom reported by the firmware, bytes.
+    stack_free: Option<u32>,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -282,20 +291,21 @@ fn onoff(on: bool) -> &'static [u8] {
 }
 
 impl Modem {
+    /// Never inlined: the result is returned through a caller supplied slot
+    /// (see `lfd3k_init`), so a 11 KB `Modem` is built where it will live.
+    #[inline(never)]
     pub fn new(cfg: Config) -> Self {
-        // Until the platform calls `load_settings` there is no hotspot
-        // password and the hotspot is off.
-        let mut set = Settings::defaults(name_of(&cfg), "");
-        set.ap_on = false;
+        let mut m = Self::blank();
+        m.reset(cfg);
+        m
+    }
+
+    /// A nameless modem in its initial state, as a constant: a static can
+    /// hold it, and `reset` then makes it a real one in place (the `Modem` is
+    /// over 11 KB, too big to build on a small task stack and move).
+    pub const fn blank() -> Self {
         Modem {
-            saved: set.clone(),
-            set,
-            save_req: false,
-            wifi_changed: false,
-            wifi: [0; WIFI_STATUS_MAX],
-            wifi_len: 0,
-            wire: Wire::new(),
-            cfg,
+            cfg: Config::BLANK,
             link: Link::new(),
             mode: Mode::Command,
             out: OutRing {
@@ -320,7 +330,50 @@ impl Modem {
             note_len: 0,
             radio_diag: None,
             last_rx: None,
+            set: Settings::BLANK,
+            saved: Settings::BLANK,
+            save_req: false,
+            wifi_changed: false,
+            wifi: [0; WIFI_STATUS_MAX],
+            wifi_len: 0,
+            wire: Wire::new(),
+            stack_free: None,
         }
+    }
+
+    /// Back to the state `Modem::new(cfg)` gives, assigning field by field in
+    /// place (the largest temporary is one field, never a whole `Modem`).
+    pub fn reset(&mut self, cfg: Config) {
+        // Until the platform calls `load_settings` there is no hotspot
+        // password and the hotspot is off.
+        self.set = Settings::defaults(name_of(&cfg), "");
+        self.set.ap_on = false;
+        self.saved.clone_from(&self.set);
+        self.cfg = cfg;
+        self.link = Link::new();
+        self.mode = Mode::Command;
+        self.out.head = 0;
+        self.out.len = 0;
+        self.line_len = 0;
+        self.line_over = false;
+        self.echo = true;
+        self.verbose = true;
+        self.esc = 0;
+        self.esc_last = 0;
+        self.esc_dead = false;
+        self.last_host = 0;
+        self.retrain_note = None;
+        self.retrains = [None; HISTORY];
+        self.closing = false;
+        self.fb_request = false;
+        self.note_len = 0;
+        self.radio_diag = None;
+        self.last_rx = None;
+        self.save_req = false;
+        self.wifi_changed = false;
+        self.wifi_len = 0;
+        self.wire.reset_all();
+        self.stack_free = None;
     }
 
     /// The platform's live Wi-Fi status line for `AT+WIFI?`
@@ -332,6 +385,18 @@ impl Modem {
             *d = if (0x20..0x7F).contains(&c) { c } else { b'?' };
             self.wifi_len += 1;
         }
+    }
+
+    /// Ask the platform to save `settings()` (as `AT&W` does). First boot
+    /// uses it after loading the defaults.
+    pub fn request_save(&mut self) {
+        self.save_req = true;
+    }
+
+    /// The firmware's modem task stack high-water mark (bytes still free),
+    /// shown by `AT&V` as `STACK FREE <n>`.
+    pub fn set_stack_free(&mut self, bytes: u32) {
+        self.stack_free = Some(bytes);
     }
 
     /// True once after `AT&W` was entered (clears the flag). The platform
@@ -969,6 +1034,11 @@ impl Modem {
                 let mut t = Txt::new();
                 t.put(b"FWD ").num(self.set.fwd_count() as u32, 1);
                 self.info(t.bytes());
+                if let Some(n) = self.stack_free {
+                    let mut t = Txt::new();
+                    t.put(b"STACK FREE ").num(n, 1);
+                    self.info(t.bytes());
+                }
                 let mut t = Txt::new();
                 t.put(b"TIER ");
                 match self.link.tier().filter(|_| self.link.is_connected()) {

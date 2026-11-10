@@ -92,12 +92,23 @@ impl Default for Telnet {
     }
 }
 
+impl Opts {
+    const OFF: Opts = Opts {
+        him_binary: false,
+        him_echo: false,
+        him_sga: false,
+        us_binary: false,
+        us_sga: false,
+        us_naws: false,
+    };
+}
+
 impl Telnet {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Telnet {
             on: false,
             st: In::Data,
-            o: Opts::default(),
+            o: Opts::OFF,
             rq: [0; RQ_CAP],
             rq_head: 0,
             rq_len: 0,

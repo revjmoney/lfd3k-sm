@@ -247,6 +247,26 @@ impl core::fmt::Debug for Settings {
 }
 
 impl Settings {
+    /// Hotspot off, nothing named or set, no password: what a `Modem` holds
+    /// before `reset` or `load_settings`. A constant, so it can sit in a static.
+    pub const BLANK: Settings = Settings {
+        ap_on: false,
+        ap_ssid: [0; SSID_MAX],
+        ap_ssid_len: 0,
+        ap_pass: [0; PASS_MAX],
+        ap_pass_len: 0,
+        sta_ssid: [0; SSID_MAX],
+        sta_ssid_len: 0,
+        sta_pass: [0; PASS_MAX],
+        sta_pass_len: 0,
+        fwd: [None; MAX_FWD],
+        publish: None,
+        sregs: SRegs::new(),
+        echo: true,
+        verbose: true,
+        show_ap_pass: true,
+    };
+
     /// Hotspot on, SSID = `name`, password `ap_pass` (8 to 63 characters),
     /// no client network, no forwards, nothing published, S registers at
     /// their power-on values, E1 V1, password still to be shown. Never

@@ -443,10 +443,12 @@ impl SRegs {
     /// Register numbers present, for `AT&V`.
     pub const NUMBERS: [u8; 8] = [0, 2, 7, 12, 20, 21, 22, 30];
 
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let mut vals = [0u16; 8];
-        for (v, r) in vals.iter_mut().zip(REGS.iter()) {
-            *v = r.3 as u16;
+        let mut i = 0;
+        while i < vals.len() {
+            vals[i] = REGS[i].3 as u16;
+            i += 1;
         }
         SRegs { vals }
     }

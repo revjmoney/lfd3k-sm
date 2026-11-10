@@ -186,7 +186,7 @@ pub(crate) struct Wire {
 }
 
 impl Wire {
-    pub(crate) fn new() -> Wire {
+    pub(crate) const fn new() -> Wire {
         Wire {
             call: Call::None,
             req: None,
@@ -201,6 +201,21 @@ impl Wire {
             last_rx: None,
             cr_flush: false,
         }
+    }
+
+    /// Back to `Wire::new()` in place (no 4 KB temporary).
+    pub(crate) fn reset_all(&mut self) {
+        self.call = Call::None;
+        self.req = None;
+        self.close = false;
+        self.rx.clear();
+        self.tx.clear();
+        self.tn = Telnet::new();
+        self.pend = None;
+        self.name_len = 0;
+        self.last_tx = None;
+        self.last_rx = None;
+        self.cr_flush = false;
     }
 
     pub(crate) fn name(&self) -> &[u8] {

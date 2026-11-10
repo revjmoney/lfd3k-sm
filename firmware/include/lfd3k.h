@@ -66,8 +66,59 @@ typedef struct {
     int16_t rssi;
     int16_t snr_x4;
     uint8_t radio_ok;
+    uint8_t wire;      /* 0 none, 1 dialing, 2 online, 3 bridging a radio call */
 } lfd3k_status_t;
 void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
+
+/* ---- Settings (NVS blob) and Wi-Fi. ---- */
+
+/* Hotspot and client network. All strings NUL terminated. */
+typedef struct {
+    uint8_t ap_on;
+    uint8_t sta_set;          /* 1 when a client network is set */
+    char    ap_ssid[33];
+    char    ap_pass[64];
+    char    sta_ssid[33];
+    char    sta_pass[64];
+} lfd3k_wifi_cfg_t;
+
+/* Load the saved blob. 0 accepted, -1 rejected or not initialised (defaults
+ * remain; call lfd3k_default_settings and save). */
+int      lfd3k_load_settings(const uint8_t *blob, size_t len);
+/* True once when AT&W (or a hotspot join) asked for a save: fills blob and
+ * *len. cap must be at least 1024 (LFD3K_BLOB_LEN), else false and the
+ * request is kept. */
+#define LFD3K_BLOB_LEN 1024
+bool     lfd3k_take_save(uint8_t *blob, size_t cap, size_t *len);
+/* First boot: factory settings, hotspot password ap_pass (8 to 63 printable
+ * characters); asks for a save. A bad password changes nothing. */
+void     lfd3k_default_settings(const char *ap_pass);
+void     lfd3k_get_wifi_config(lfd3k_wifi_cfg_t *out);
+/* True once after AT+WAP, AT+WSTA, ATZ or a load changed Wi-Fi settings. */
+bool     lfd3k_take_wifi_changed(void);
+/* Live status line for AT+WIFI? (up to 96 bytes kept). */
+void     lfd3k_set_wifi_status(const char *line);
+/* True while the generated hotspot password may be shown on the OLED. */
+bool     lfd3k_show_ap_pass(void);
+/* A device joined the hotspot: hide the password (asks for a save). */
+void     lfd3k_note_ap_client_joined(void);
+/* Modem task stack high-water mark in bytes free; AT&V prints STACK FREE <n>. */
+void     lfd3k_set_stack_free(uint32_t bytes);
+
+/* ---- The wire (a TCP connection for Wi-Fi calls and bridges). ---- */
+
+/* True once when a call wants a connection: host (NUL terminated) and port.
+ * cap must be at least 64, else false and the request is kept. Poll
+ * lfd3k_take_wire_close first. */
+bool     lfd3k_take_wire_request(char *host, size_t cap, uint16_t *port);
+/* ev: 1 connected, 2 failed, 3 closed by the far end; others ignored. */
+void     lfd3k_wire_event(int ev, uint32_t now_ms);
+/* Bytes received from the socket; returns the bytes taken (offer the rest later). */
+size_t   lfd3k_wire_in(const uint8_t *buf, size_t len, uint32_t now_ms);
+/* Bytes to send on the socket (telnet encoded); returns the bytes written. */
+size_t   lfd3k_wire_out(uint8_t *buf, size_t len);
+/* True once when the socket should be closed (drain lfd3k_wire_out first). */
+bool     lfd3k_take_wire_close(void);
 
 #ifdef __cplusplus
 }
