@@ -14,7 +14,7 @@ Open PowerShell for every command. Replace `COMn` with the V4 port you find in s
 4. Find the entry with hardware ID `VID_303A` and `PID_1001`. That is the V4. Right-click it, Properties, Details, Hardware Ids to check.
 5. Write down its COM number. It can change after a reset or a new plug, so look again if a command says the port is gone.
 6. COM15 is the lathe and COM9 is the V3. Never use those.
-7. Write down the MAC of the V4 if you want to use the bench terminal. In Device Manager, Details, pick "Device instance path" or "Bus reported device description". The USB serial number is the MAC, like `AA:BB:CC:DD:EE:FF`.
+7. The MAC: esptool prints it in step 1 as a line like `MAC: aa:bb:cc:dd:ee:ff`. Write it down. The bench terminal uses it to make sure it is talking to this V4 and nothing else.
 
 ## 1. Back up the V4
 
@@ -66,10 +66,10 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 2. Erase the chip. This clears the old otadata and the Radar settings, so the chip cannot boot the wrong slot:
 
    ```
-   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 erase_flash
+   python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --after no-reset erase_flash
    ```
 
-3. Unplug the V4 and plug it back in if the port vanished. Check the COM number again in Device Manager.
+3. It stays in download mode for the next step. If the port vanished anyway, unplug the V4, plug it back in and check the COM number again in Device Manager.
 4. Flash, the easy way:
 
    ```
