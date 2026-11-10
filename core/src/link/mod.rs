@@ -216,6 +216,9 @@ pub struct Link {
     ev: [Event; EVLEN],
     ev_head: usize,
     ev_len: usize,
+    /// The modem is busy with a Wi-Fi call: an incoming CallReq is
+    /// rejected (the caller sees BUSY) even while the link is idle.
+    engaged: bool,
 }
 
 impl Default for Link {
@@ -281,7 +284,23 @@ impl Link {
             ev: [Event::Ring; EVLEN],
             ev_head: 0,
             ev_len: 0,
+            engaged: false,
         }
+    }
+
+    /// While true, an idle link answers every CallReq with CallReject.
+    pub fn set_engaged(&mut self, on: bool) {
+        self.engaged = on;
+    }
+
+    /// Who started the current (or last) call.
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// True when no sent data waits for an acknowledgement.
+    pub fn tx_idle(&self) -> bool {
+        self.tx.idle()
     }
 
     pub fn state(&self) -> State {

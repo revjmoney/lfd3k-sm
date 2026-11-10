@@ -25,6 +25,7 @@
 | Firmware platform: modem task (core 1, priority 20) runs the Rust core; SX1262 on SPI2 with the GC1109 front end, native USB carries only the modem stream (console on UART0), station name AXISMODEM-XXXX from the MAC, AT+FB dump streamed without blocking, crash note kept across the restart | done | 2026-11-10 |
 | Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs. Phase 1 logged the core version once a second; phase 2 replaced that with the modem task (see Firmware platform above) | done | 2026-11-10 |
 | Phase 3 task 1, core settings: hotspot, client network, up to 8 forwards (name, host, port, telnet or raw), published forward, S registers, E and V in one `Settings` model with a 899 byte versioned blob (magic LFS1, CRC-16/CCITT-FALSE, refused whole on any bad field); AT+WAP, AT+WSTA, AT+WIFI?, AT+FWD, AT+PUB, AT&W, ATZ reload; ATDT resolves a forward name or host:port (replies NO CARRIER until the Wi-Fi dial lands) | done | 2026-11-10 |
+| Phase 3 task 2, wire call path: ATDT to a forward or host:port opens a TCP stream through the platform (`take_wire_request`, `wire_connected`, `wire_failed`, `wire_closed`, `wire_input`, `wire_output`, `take_wire_close`), prints DIALING, then CONNECT WIFI TCP, data mode with escape, ATO and ATH as on radio, NO CARRIER on refuse, close or S7 timeout; answered radio calls bridged to the AT+PUB forward (BRIDGE <name> on the host); telnet client filter for T mode (answers the AXIS negotiation, strips commands, doubles 0xFF, CR NUL without BINARY); two 2 KB wire rings with back pressure both ways; BUSY to radio callers during a Wi-Fi call; `wire_state()`; FakeWire server in the simulator | done | 2026-11-10 |
 
 ## Settings
 
@@ -78,7 +79,7 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | ATZ | Reset |
 
 Result codes: OK 0, CONNECT 1, RING 2, NO CARRIER 3, ERROR 4, BUSY 7, NO ANSWER 8.
-Verbose CONNECT reads CONNECT <tier name> <air bps>/ARQ. RETRAIN lines are verbose only.
+Verbose CONNECT reads CONNECT <tier name> <air bps>/ARQ on radio and CONNECT WIFI TCP on a Wi-Fi call. RETRAIN lines are verbose only.
 
 Notes:
 - ATD strips one leading T or P, as Hayes does. To dial a name that starts with T or P, use the full prefix: ATDT TOM or ATDP PAT (ATDTOM would dial OM).
@@ -95,7 +96,12 @@ Notes:
 - AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
 - S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.
 - Command lines are up to 128 bytes. `+` command arguments split on commas: an SSID, forward name or password may not contain a comma. SSID and password are taken as typed; the fields of AT+FWD are trimmed, so `AT+FWD=bbs, bbs.example.com, 23` works.
-- ATDT order: a forward name (any case) first, then `host:port`, else a radio dial. Use `ATDT`, not bare `ATD`, for host names that start with T or P. Until the Wi-Fi dial lands, a forward or host:port dial prints NO CARRIER at once and starts nothing.
+- ATDT order: a forward name (any case) first, then `host:port`, else a radio dial. Use `ATDT`, not bare `ATD`, for host names that start with T or P.
+- Wi-Fi dial (forward or host:port): `DIALING <target>` (verbose), then `CONNECT WIFI TCP` (numeric 1) when the platform's TCP connect succeeds, and data mode. No fake speed in the connect string. A refused or failed connect prints NO CARRIER; no connect within S7 seconds prints NO CARRIER and closes the attempt. When the far end closes, everything it sent is shown first (data mode), then NO CARRIER. The escape, ATO (prints CONNECT WIFI TCP again) and ATH (NO CARRIER, also while dialing) work as on a radio call; ATZ hangs up silently. ATDT or ATA while any call is up prints ERROR.
+- Wire mode: telnet (T) or raw (R), from the forward, or for host:port T on port 23 and R otherwise. In T mode the modem is a telnet client: it answers WILL ECHO, WILL SGA and WILL BINARY with DO, DO SGA and DO BINARY with WILL, DO NAWS with WILL NAWS plus an 80 x 25 window size, refuses everything else (DONT, WONT), never sends anything first, strips all commands and subnegotiations from what it receives (IAC IAC becomes one 0xFF), sends 0xFF as IAC IAC and, unless BINARY is on both ways, every CR as CR NUL. Raw mode passes bytes untouched.
+- Bridge (AT+PUB set): a radio call this modem answers is connected to the published forward only, never to any other host. The radio caller sees its normal CONNECT; what it sends before the wire is up is buffered (up to 2 KB, then the radio window holds it). The local host stays in command mode and sees `BRIDGE <name>` (verbose) once the wire connects, and NO CARRIER when the bridge ends. If the wire fails, does not connect within S7 seconds, or closes (after what it sent has reached the caller, at most S7 seconds), the radio call is hung up and the caller sees NO CARRIER. If the radio call drops, or the host types ATH or ATZ, the wire is closed. ATO during a bridge prints ERROR.
+- One call at a time: a radio caller during a Wi-Fi call gets BUSY.
+- `Modem::wire_state()`: 0 none, 1 dialing, 2 online, 3 bridging. `call_state()` shows a Wi-Fi call as dialing (1) or online (4, or 5 in online command mode). Lights during a Wi-Fi call: OH and CD on, SD and RD on wire traffic, HS and EC off, no tier.
 - AT&V adds `WIFI AP <ON|OFF> <ssid>  STA <ssid|OFF>`, `PUB <name|NONE>` and `FWD <count>` after the RADIO line.
 - AT&W sets a save-wanted flag the platform takes (`Modem::take_save_request`) and reads with `Modem::settings()`. `Modem::load_settings` applies a loaded copy at boot, including S0 auto-answer and S30. ATZ restores that copy.
 - `Modem::take_wifi_changed()` is true once after AT+WAP (any form that took effect), AT+WSTA (any form that took effect), ATZ or a settings load; the platform then re-reads `Modem::settings()` (a reference) and re-applies Wi-Fi. `note_ap_client_joined` also asks for a save.
@@ -114,6 +120,7 @@ Notes:
 
 ## Change log
 
+- 2026-11-10: Phase 3 task 2, wire call path (core/src/wire.rs), telnet client filter (core/src/telnet.rs), radio to forward bridge, BUSY during a Wi-Fi call, FakeWire in the simulator. No new tests yet (task 6); the existing 72 pass.
 - 2026-11-10: Phase 3 task 1, core settings model (core/src/settings.rs), Wi-Fi, forward and publish AT commands, AT&W, ATZ reload, WIFI, PUB and FWD lines in AT&V. No new tests yet (task 6); the existing 72 pass.
 - 2026-11-10: FFI device glue (lfd3k.h C ABI), AT+FB, LAST CRASH on ATI, RADIO line in AT&V, resetting device panic handler.
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.

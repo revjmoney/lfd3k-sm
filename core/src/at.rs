@@ -313,6 +313,8 @@ pub enum ResultCode {
     Busy,
     NoAnswer,
     Connect(Tier),
+    /// A Wi-Fi (TCP) call: `CONNECT WIFI TCP`, numeric 1.
+    ConnectWifi,
     Retrain(Tier),
 }
 
@@ -380,6 +382,7 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
                 b.put_u32(t.air_bps());
                 b.put(b"/ARQ");
             }
+            ResultCode::ConnectWifi => b.put(b"CONNECT WIFI TCP"),
             ResultCode::Retrain(t) => {
                 b.put(b"RETRAIN ");
                 b.put(t.name().as_bytes());
@@ -391,7 +394,7 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
     } else {
         let n = match code {
             ResultCode::Ok => 0,
-            ResultCode::Connect(_) => 1,
+            ResultCode::Connect(_) | ResultCode::ConnectWifi => 1,
             ResultCode::Ring => 2,
             ResultCode::NoCarrier => 3,
             ResultCode::Error => 4,
