@@ -16,7 +16,9 @@ use crate::panic::NOTE_LEN;
 /// `lfd3k_init` result for a name that is not 1 to 16 printable ASCII
 /// characters (not NUL terminated within 17 bytes counts too).
 const ERR_NAME: c_int = -4;
-/// Frames drained per `lfd3k_poll` at most.
+/// Frames drained per `lfd3k_poll` at most. A bound so one poll cannot run
+/// long if the radio keeps reporting frames; the firmware polls again on the
+/// next DIO1 edge or 10 ms tick, so nothing is lost by stopping at 8.
 const RX_PER_POLL: usize = 8;
 
 struct Device {
@@ -36,6 +38,16 @@ struct Holder(UnsafeCell<Option<Device>>);
 unsafe impl Sync for Holder {}
 
 static HOLDER: Holder = Holder(UnsafeCell::new(None));
+
+/// Give the radio the current S30 power if it changed (ATS30=, ATZ).
+fn sync_power(d: &mut Device) {
+    let p = d.modem.tx_power_dbm();
+    if p != d.power {
+        d.power = p;
+        // A failure marks the driver failed; AT&V and status show it.
+        let _ = d.radio.set_power(p);
+    }
+}
 
 /// Run `f` on the device, or return `None` before init.
 fn with_device<R>(f: impl FnOnce(&mut Device) -> R) -> Option<R> {
@@ -112,6 +124,9 @@ pub unsafe extern "C" fn lfd3k_init(
     last_panic: *const u8,
     len: usize,
 ) -> c_int {
+    // A failed re-init leaves no stale state: clear first.
+    // SAFETY: single-task contract (see `Holder`); no other reference live.
+    unsafe { *HOLDER.0.get() = None };
     let mut nbuf = [0u8; 17];
     // SAFETY: forwarded from this function's contract.
     let Some(name) = (unsafe { read_name(name, &mut nbuf) }) else {
@@ -152,12 +167,7 @@ pub unsafe extern "C" fn lfd3k_init(
 #[no_mangle]
 pub extern "C" fn lfd3k_poll(now_ms: u32) {
     with_device(|d| {
-        let p = d.modem.tx_power_dbm();
-        if p != d.power {
-            d.power = p;
-            // A failure marks the driver failed; AT&V and status show it.
-            let _ = d.radio.set_power(p);
-        }
+        sync_power(d);
         let mut buf = [0u8; 255];
         for _ in 0..RX_PER_POLL {
             let Some((n, info)) = d.radio.service(&mut buf) else {
@@ -182,7 +192,25 @@ pub unsafe extern "C" fn lfd3k_host_in(buf: *const u8, len: usize, now_ms: u32) 
     }
     // SAFETY: the caller guarantees `buf` is valid for `len` bytes.
     let bytes = unsafe { core::slice::from_raw_parts(buf, len) };
-    with_device(|d| d.modem.host_input(bytes, &mut d.radio, now_ms)).unwrap_or(0)
+    with_device(|d| {
+        // Feed one line at a time and sync S30 after each, so ATS30=n then
+        // ATD in one batch sends the dial at the new power.
+        sync_power(d);
+        let mut used = 0;
+        while used < bytes.len() {
+            let rest = bytes.get(used..).unwrap_or(&[]);
+            let end = rest.iter().position(|&c| c == b'\r').map_or(rest.len(), |i| i + 1);
+            let seg = rest.get(..end).unwrap_or(&[]);
+            let n = d.modem.host_input(seg, &mut d.radio, now_ms);
+            used += n;
+            sync_power(d);
+            if n < seg.len() {
+                break;
+            }
+        }
+        used
+    })
+    .unwrap_or(0)
 }
 
 /// Bytes for the host (echo, result codes, call data). Returns the bytes
