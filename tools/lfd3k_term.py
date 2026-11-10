@@ -205,7 +205,12 @@ def main(argv=None):
         log = open(a.log, "a", encoding="utf-8") if a.log else None
         red = (Redactor(), Redactor())
         for line in a.send:
-            s.write(line.encode("ascii") + b"\r")
+            if line == "+++":
+                # The escape: guard time of silence on both sides, no CR.
+                drain(s, 1500, log, red=red, allow_secret=a.allow_secret)
+                s.write(b"+++")
+            else:
+                s.write(line.encode("ascii") + b"\r")
             drain(s, a.wait_ms, log, red=red, allow_secret=a.allow_secret)
         if a.shot:
             s.write(b"AT+FB\r")
