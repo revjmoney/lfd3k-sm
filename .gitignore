@@ -2,3 +2,4 @@ target/
 firmware/.pio/
 firmware/lib/*.a
 .superpowers/
+firmware/sdkconfig.heltec_v4

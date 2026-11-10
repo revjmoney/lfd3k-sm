@@ -14,6 +14,9 @@
 | Resync: 8 RTOs of silence drops both ends to SF12, caller pings, then jumps back up to the best tier; NO CARRIER after S22 seconds of silence | done | 2026-11-09 |
 | Escape and online command mode: guard time S12, three S2 characters, guard time, OK; ATO back online; ATH hangs up (Hangup sent twice) | done | 2026-11-09 |
 | ATI banner: name, version with release name, release tagline | done | 2026-11-09 |
+| PC simulator: seeded half duplex LoRa channel (SNR profiles, loss by margin, collisions, drop hook, frame trace) and a two modem harness (CALLER and AXIS) | done | 2026-11-10 |
+| Phase 1 demo: `cargo run -p lfd3k-sim -- [--snr <dB>] [--seed <n>] [--out <file>] [--trace <file>]`, two 4 KB ANSI screens, SNR dip and recovery, escape, ATO, AT&V, ATH | done | 2026-11-10 |
+| Firmware skeleton (Heltec V4, ESP-IDF via PlatformIO): links the Rust core as a static library and logs LFD3K-SM core <version> once a second; 16 MB flash, two 1.5 MB OTA slots, 1 MB littlefs | done | 2026-11-10 |
 
 ## Settings
 
@@ -62,3 +65,4 @@ Notes:
 - 2026-11-09: Cargo workspace (core, sim, ffi) created.
 - 2026-11-09: Call state machine and Modem: call setup, training, data, retrain, resync, escape, online command mode, ATI release name.
 - 2026-11-10: Retrain notices kept off the data stream, tier cap honored both ways, resync and queue fixes.
+- 2026-11-10: Simulator, demo transcript (docs/phase1-demo.txt) and firmware skeleton that builds with the core linked (not flashed).
