@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 lfd3k-core = { path = "../core" }
+
+[dev-dependencies]
+# Fuzz tests only (MIT OR Apache-2.0). Default features off: no fork/timeout crates.
+proptest = { version = "1", default-features = false, features = ["std"] }

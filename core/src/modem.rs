@@ -596,3 +596,63 @@ impl Modem {
         self.retrain_note = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A radio that never hears anything and finishes every send at once.
+    struct NullRadio;
+
+    impl Radio for NullRadio {
+        fn send(&mut self, _tier: Tier, _frame: &[u8]) {}
+        fn listen(&mut self, _tier: Tier) {}
+        fn busy(&self) -> bool {
+            false
+        }
+    }
+
+    fn output(m: &mut Modem) -> String {
+        let mut all = Vec::new();
+        let mut buf = [0u8; 100];
+        loop {
+            let n = m.host_output(&mut buf);
+            if n == 0 {
+                break;
+            }
+            all.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8(all).unwrap()
+    }
+
+    #[test]
+    fn ati_banner() {
+        let mut m = Modem::new(Config::new("CALLER"));
+        let mut r = NullRadio;
+        assert_eq!(m.host_input(b"ATI\r", &mut r, 0), 4);
+        assert_eq!(
+            output(&mut m),
+            "ATI\r\
+             \r\nLORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM\
+             \r\nv0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M\
+             \r\nS0N1C B00M R4D10 PR0 MAX\r\n\
+             \r\nOK\r\n"
+        );
+        // Lowercase, echo off: the same three lines, then OK.
+        m.host_input(b"ATE0\r", &mut r, 10);
+        output(&mut m);
+        m.host_input(b"ati\r", &mut r, 20);
+        let text = output(&mut m);
+        let lines: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines,
+            [
+                "LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM",
+                "v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M",
+                "S0N1C B00M R4D10 PR0 MAX",
+                "OK",
+            ]
+        );
+        assert!(!text.contains('\u{2014}') && !text.contains("--"));
+    }
+}

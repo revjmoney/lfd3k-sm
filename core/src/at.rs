@@ -281,3 +281,156 @@ impl SRegs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_commands() {
+        let ok: &[(&str, AtCmd)] = &[
+            ("AT", AtCmd::Attention),
+            ("at", AtCmd::Attention),
+            ("  AT  ", AtCmd::Attention),
+            ("ATDT AXIS", AtCmd::Dial("AXIS")),
+            ("ATDTAXIS", AtCmd::Dial("AXIS")),
+            ("atdt axis", AtCmd::Dial("axis")),
+            ("ATD AXIS", AtCmd::Dial("AXIS")),
+            ("ATDAXIS", AtCmd::Dial("AXIS")),
+            ("ATDP BBS", AtCmd::Dial("BBS")),
+            ("ATDT ABCDEFGHIJKLMNOP", AtCmd::Dial("ABCDEFGHIJKLMNOP")),
+            ("ATDT  SPACED NAME  ", AtCmd::Dial("SPACED NAME")),
+            ("ATA", AtCmd::Answer),
+            ("ata", AtCmd::Answer),
+            ("ATH", AtCmd::Hangup),
+            ("ATH0", AtCmd::Hangup),
+            ("ath0", AtCmd::Hangup),
+            ("ATO", AtCmd::Online),
+            ("ato", AtCmd::Online),
+            ("ATI", AtCmd::Info),
+            ("ati", AtCmd::Info),
+            ("ATV0", AtCmd::Verbose(false)),
+            ("ATV1", AtCmd::Verbose(true)),
+            ("atv1", AtCmd::Verbose(true)),
+            ("ATE0", AtCmd::Echo(false)),
+            ("ATE1", AtCmd::Echo(true)),
+            ("ate0", AtCmd::Echo(false)),
+            ("ATS7=45", AtCmd::SetReg(7, 45)),
+            ("ats22=255", AtCmd::SetReg(22, 255)),
+            ("ATS0=1", AtCmd::SetReg(0, 1)),
+            ("ATS7?", AtCmd::GetReg(7)),
+            ("ats12?", AtCmd::GetReg(12)),
+            ("AT&V", AtCmd::ShowConfig),
+            ("at&v", AtCmd::ShowConfig),
+            ("ATZ", AtCmd::Reset),
+            ("atz", AtCmd::Reset),
+        ];
+        for (line, want) in ok {
+            assert_eq!(parse_line(line), Ok(*want), "{line:?}");
+        }
+        let bad: &[(&str, AtError)] = &[
+            ("", AtError::Unknown),
+            ("A", AtError::Unknown),
+            ("HELLO", AtError::Unknown),
+            ("ATX", AtError::Unknown),
+            ("AT&F", AtError::Unknown),
+            ("ATDT", AtError::BadArg),
+            ("ATD", AtError::BadArg),
+            ("ATDT ABCDEFGHIJKLMNOPQ", AtError::BadArg),
+            ("ATA1", AtError::BadArg),
+            ("ATH1", AtError::BadArg),
+            ("ATV2", AtError::BadArg),
+            ("ATE", AtError::BadArg),
+            ("ATS7", AtError::BadArg),
+            ("ATS7=", AtError::BadArg),
+            ("ATS7=x", AtError::BadArg),
+            ("ATS7=-1", AtError::BadArg),
+            ("ATS7=99999", AtError::BadArg),
+            ("ATS=5", AtError::BadArg),
+            ("ATS999=1", AtError::BadArg),
+        ];
+        for (line, want) in bad {
+            assert_eq!(parse_line(line), Err(*want), "{line:?}");
+        }
+    }
+
+    fn fmt(code: ResultCode, verbose: bool) -> Vec<u8> {
+        let mut b = [0u8; 64];
+        let n = format_result(&code, verbose, &mut b);
+        b[..n].to_vec()
+    }
+
+    #[test]
+    fn result_strings() {
+        let verbose: &[(ResultCode, &str)] = &[
+            (ResultCode::Ok, "\r\nOK\r\n"),
+            (ResultCode::Error, "\r\nERROR\r\n"),
+            (ResultCode::Ring, "\r\nRING\r\n"),
+            (ResultCode::NoCarrier, "\r\nNO CARRIER\r\n"),
+            (ResultCode::Busy, "\r\nBUSY\r\n"),
+            (ResultCode::NoAnswer, "\r\nNO ANSWER\r\n"),
+            (ResultCode::Connect(Tier::Sf7), "\r\nCONNECT LORA SF7 BW500 21875/ARQ\r\n"),
+            (ResultCode::Connect(Tier::Sf5), "\r\nCONNECT LORA SF5 BW500 62500/ARQ\r\n"),
+            (ResultCode::Connect(Tier::Sf12), "\r\nCONNECT LORA SF12 BW500 1172/ARQ\r\n"),
+            (ResultCode::Retrain(Tier::Sf11), "\r\nRETRAIN LORA SF11 BW500 2148\r\n"),
+            (ResultCode::Retrain(Tier::Sf6), "\r\nRETRAIN LORA SF6 BW500 37500\r\n"),
+        ];
+        for (code, want) in verbose {
+            assert_eq!(fmt(*code, true), want.as_bytes(), "{code:?}");
+        }
+        let numeric: &[(ResultCode, &str)] = &[
+            (ResultCode::Ok, "0\r"),
+            (ResultCode::Connect(Tier::Sf5), "1\r"),
+            (ResultCode::Ring, "2\r"),
+            (ResultCode::NoCarrier, "3\r"),
+            (ResultCode::Error, "4\r"),
+            (ResultCode::Busy, "7\r"),
+            (ResultCode::NoAnswer, "8\r"),
+            (ResultCode::Retrain(Tier::Sf9), ""),
+        ];
+        for (code, want) in numeric {
+            assert_eq!(fmt(*code, false), want.as_bytes(), "{code:?}");
+        }
+        // Never a truncated line: too small a buffer gives 0.
+        let mut small = [0u8; 10];
+        assert_eq!(format_result(&ResultCode::Connect(Tier::Sf7), true, &mut small), 0);
+        assert_eq!(format_result(&ResultCode::Ok, false, &mut [0u8; 1]), 0);
+        assert_eq!(format_result(&ResultCode::Ok, true, &mut []), 0);
+    }
+
+    #[test]
+    fn sregs_defaults_and_bounds() {
+        let s = SRegs::new();
+        assert_eq!(SRegs::default(), s);
+        // (register, default, min, max) from the plan and FEATURES.md.
+        let table: [(u8, u16, u16, u16); 7] = [
+            (0, 0, 0, 255),
+            (2, 43, 0, 127),
+            (7, 30, 1, 255),
+            (12, 50, 0, 255),
+            (20, 20, 0, 200),
+            (21, 7, 0, 7),
+            (22, 20, 1, 255),
+        ];
+        for (n, def, min, max) in table {
+            assert_eq!(s.get(n), Some(def), "S{n} default");
+            let mut r = SRegs::new();
+            assert!(r.set(n, min), "S{n}={min}");
+            assert_eq!(r.get(n), Some(min));
+            assert!(r.set(n, max), "S{n}={max}");
+            assert_eq!(r.get(n), Some(max));
+            assert!(!r.set(n, max + 1), "S{n}={} accepted", max + 1);
+            assert_eq!(r.get(n), Some(max), "rejected write changed S{n}");
+            if min > 0 {
+                assert!(!r.set(n, min - 1), "S{n}={} accepted", min - 1);
+                assert_eq!(r.get(n), Some(max));
+            }
+            assert!(!r.set(n, u16::MAX));
+        }
+        for n in [1u8, 3, 6, 8, 13, 19, 23, 255] {
+            assert_eq!(s.get(n), None, "S{n} should not exist");
+            assert!(!SRegs::new().set(n, 0));
+        }
+        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22]);
+    }
+}

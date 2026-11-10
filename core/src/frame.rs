@@ -155,3 +155,149 @@ pub fn parse_call_req(p: &[u8]) -> Result<(&str, &str), FrameError> {
     }
     Ok((a, b))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [FrameType; 11] = [
+        FrameType::CallReq,
+        FrameType::CallAck,
+        FrameType::CallReject,
+        FrameType::Train,
+        FrameType::TrainAck,
+        FrameType::Data,
+        FrameType::Ack,
+        FrameType::TierSet,
+        FrameType::TierAck,
+        FrameType::Hangup,
+        FrameType::Keepalive,
+    ];
+
+    /// A payload of the right shape for each type.
+    fn payload_for(t: FrameType, scratch: &mut [u8; MAX_PAYLOAD]) -> usize {
+        match t {
+            FrameType::CallReq => call_req_payload("CALLER", "AXIS", scratch).unwrap(),
+            FrameType::Train | FrameType::TrainAck => {
+                scratch[..3].copy_from_slice(&[7, 0xF0, 0xFF]);
+                3
+            }
+            FrameType::TierSet | FrameType::TierAck => {
+                scratch[0] = 3;
+                1
+            }
+            FrameType::Ack => {
+                scratch[0] = 0b1010_0101;
+                1
+            }
+            FrameType::Data => {
+                for (i, b) in scratch.iter_mut().enumerate() {
+                    *b = (i * 7) as u8;
+                }
+                MAX_PAYLOAD
+            }
+            _ => {
+                scratch[..2].copy_from_slice(&[0x34, 0x12]);
+                2
+            }
+        }
+    }
+
+    #[test]
+    fn round_trip_every_type() {
+        assert_eq!(MAX_PAYLOAD, 251);
+        for (i, t) in ALL.iter().enumerate() {
+            assert_eq!(*t as u8, i as u8 + 1);
+            assert_eq!(FrameType::from_u8(*t as u8), Some(*t));
+            let mut p = [0u8; MAX_PAYLOAD];
+            let plen = payload_for(*t, &mut p);
+            let h = Header {
+                ftype: *t,
+                flags: 0x0F & (i as u8),
+                call_id: 0xA5,
+                seq: 200 + i as u8,
+                ack: 255 - i as u8,
+            };
+            let mut out = [0u8; MAX_FRAME];
+            let n = encode(&h, &p[..plen], &mut out).unwrap();
+            assert_eq!(n, HEADER_LEN + plen);
+            assert_eq!(out[0] >> 4, *t as u8);
+            let f = decode(&out[..n]).unwrap();
+            assert_eq!(f.header, h);
+            assert_eq!(f.payload, &p[..plen]);
+        }
+        // Flags above 4 bits never leak into the type nibble.
+        let h = Header { ftype: FrameType::Data, flags: 0xFF, call_id: 1, seq: 2, ack: 3 };
+        let mut out = [0u8; 8];
+        let n = encode(&h, &[], &mut out).unwrap();
+        let f = decode(&out[..n]).unwrap();
+        assert_eq!(f.header.ftype, FrameType::Data);
+        assert_eq!(f.header.flags, 0x0F);
+        // Oversized payload and too small an output buffer are errors.
+        assert_eq!(encode(&h, &[0; MAX_PAYLOAD + 1], &mut [0; 300]), Err(FrameError::TooLong));
+        assert_eq!(encode(&h, &[0; 10], &mut [0; 13]), Err(FrameError::TooShort));
+    }
+
+    #[test]
+    fn rejects_short_and_bad_type() {
+        assert_eq!(decode(&[]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[0x60]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[0x60, 1, 2]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[0x00, 1, 2, 3]), Err(FrameError::BadType));
+        assert_eq!(decode(&[0xF0, 1, 2, 3]), Err(FrameError::BadType));
+        assert_eq!(decode(&[0xC0, 1, 2, 3]), Err(FrameError::BadType));
+        assert_eq!(decode(&[0x60; MAX_FRAME + 1]), Err(FrameError::TooLong));
+        assert_eq!(FrameType::from_u8(0), None);
+        assert_eq!(FrameType::from_u8(12), None);
+        assert_eq!(FrameType::from_u8(15), None);
+        // Wrong payload shapes for the types that have one.
+        assert_eq!(decode(&[0x80, 1, 2, 3]), Err(FrameError::BadPayload));
+        assert_eq!(decode(&[0x80, 1, 2, 3, 8]), Err(FrameError::BadPayload));
+        assert_eq!(decode(&[0x90, 1, 2, 3, 0, 0]), Err(FrameError::BadPayload));
+        assert_eq!(decode(&[0x40, 1, 2, 3, 9, 0, 0]), Err(FrameError::BadPayload));
+        assert_eq!(decode(&[0x70, 1, 2, 3]), Err(FrameError::BadPayload));
+        assert_eq!(decode(&[0x10, 1, 2, 3, 0]), Err(FrameError::BadPayload));
+        // A bare header is a valid Data, Hangup or Keepalive frame.
+        assert!(decode(&[0x60, 1, 2, 3]).is_ok());
+        assert!(decode(&[0xA0, 1, 2, 3]).is_ok());
+    }
+
+    #[test]
+    fn call_req_names() {
+        let mut p = [0u8; MAX_PAYLOAD];
+        let n = call_req_payload("CALLER", "AXIS", &mut p).unwrap();
+        assert_eq!(&p[..n], b"\x06CALLER\x04AXIS");
+        assert_eq!(parse_call_req(&p[..n]), Ok(("CALLER", "AXIS")));
+
+        let sixteen = "ABCDEFGHIJKLMNOP";
+        let n = call_req_payload(sixteen, "a b~!", &mut p).unwrap();
+        assert_eq!(parse_call_req(&p[..n]), Ok((sixteen, "a b~!")));
+
+        let seventeen = "ABCDEFGHIJKLMNOPQ";
+        assert_eq!(call_req_payload(seventeen, "AXIS", &mut p), Err(FrameError::BadPayload));
+        assert_eq!(call_req_payload("AXIS", seventeen, &mut p), Err(FrameError::BadPayload));
+        assert_eq!(call_req_payload("", "AXIS", &mut p), Err(FrameError::BadPayload));
+        assert_eq!(call_req_payload("AX\tIS", "B", &mut p), Err(FrameError::BadPayload));
+        assert_eq!(call_req_payload("A", "B\x7F", &mut p), Err(FrameError::BadPayload));
+        assert_eq!(call_req_payload("A", "\u{e9}", &mut p), Err(FrameError::BadPayload));
+        assert_eq!(call_req_payload("A", "B", &mut [0u8; 3]), Err(FrameError::TooShort));
+
+        // Hand-built payloads: 17 chars, non-printable, bad lengths, bad UTF-8.
+        let mut long = vec![17u8];
+        long.extend_from_slice(seventeen.as_bytes());
+        long.extend_from_slice(b"\x01B");
+        assert!(parse_call_req(&long).is_err());
+        assert!(parse_call_req(b"\x02A\x00\x01B").is_err());
+        assert!(parse_call_req(b"\x01A\x01\n").is_err());
+        assert!(parse_call_req(b"\x01A\x02B").is_err());
+        assert!(parse_call_req(b"\x01A\x01BC").is_err());
+        assert!(parse_call_req(b"\x05A").is_err());
+        assert!(parse_call_req(b"\x00\x01B").is_err());
+        assert!(parse_call_req(b"\x01\xFF\x01B").is_err());
+        assert!(parse_call_req(b"").is_err());
+        // The same payloads inside a CallReq frame are rejected by decode.
+        let mut f = vec![0x10, 1, 0, 0];
+        f.extend_from_slice(&long);
+        assert_eq!(decode(&f), Err(FrameError::BadPayload));
+    }
+}

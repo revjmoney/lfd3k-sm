@@ -299,3 +299,193 @@ impl ArqRx {
         *self = Self::new();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pattern(len: usize, salt: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i * 31 + salt * 17) % 251) as u8).collect()
+    }
+
+    fn read_all(rx: &mut ArqRx) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 77];
+        loop {
+            let n = rx.read(&mut buf);
+            if n == 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    /// Queues 8 full chunks and sends them all once at t = 0.
+    fn sent_window(data: &[u8]) -> (ArqTx, Vec<(u8, Vec<u8>)>) {
+        let mut tx = ArqTx::new();
+        assert_eq!(tx.push(data), WINDOW * CHUNK);
+        let mut frames = Vec::new();
+        while let Some((seq, d)) = tx.next_to_send(0, 1000) {
+            frames.push((seq, d.to_vec()));
+        }
+        (tx, frames)
+    }
+
+    #[test]
+    fn in_order_delivery_with_loss() {
+        let data = pattern(WINDOW * CHUNK, 1);
+        let (mut tx, frames) = sent_window(&data);
+        assert_eq!(frames.len(), 8);
+        let seqs: Vec<u8> = frames.iter().map(|f| f.0).collect();
+        assert_eq!(seqs, [0, 1, 2, 3, 4, 5, 6, 7]);
+
+        let mut rx = ArqRx::new();
+        for (seq, d) in &frames {
+            if *seq != 2 && *seq != 5 {
+                assert!(rx.on_data(*seq, d));
+            }
+        }
+        // Only frames 0 and 1 are deliverable; 3, 4, 6, 7 are held.
+        assert_eq!(rx.ack_state(), (2, 0b0001_1011));
+        let first = read_all(&mut rx);
+        assert_eq!(first, &data[..2 * CHUNK]);
+
+        let (ack, sack) = rx.ack_state();
+        tx.on_ack(ack, sack);
+        let mut resent = Vec::new();
+        while let Some((seq, d)) = tx.next_to_send(1000, 1000) {
+            resent.push((seq, d.to_vec()));
+        }
+        for (seq, d) in &resent {
+            assert!(rx.on_data(*seq, d));
+        }
+        let mut got = first;
+        got.extend(read_all(&mut rx));
+        assert_eq!(got, data);
+        let (ack, sack) = rx.ack_state();
+        assert_eq!((ack, sack), (8, 0));
+        tx.on_ack(ack, sack);
+        assert!(tx.idle());
+    }
+
+    #[test]
+    fn sack_resends_only_missing() {
+        let data = pattern(WINDOW * CHUNK, 2);
+        let (mut tx, frames) = sent_window(&data);
+        let mut rx = ArqRx::new();
+        for (seq, d) in &frames {
+            if *seq != 2 && *seq != 5 {
+                rx.on_data(*seq, d);
+            }
+        }
+        let (ack, sack) = rx.ack_state();
+        tx.on_ack(ack, sack);
+        // Nothing is resent before the RTO.
+        assert!(tx.next_to_send(999, 1000).is_none());
+        let a = tx.next_to_send(1000, 1000).map(|(s, d)| (s, d.to_vec()));
+        let b = tx.next_to_send(1000, 1000).map(|(s, d)| (s, d.to_vec()));
+        assert_eq!(a, Some((2, data[2 * CHUNK..3 * CHUNK].to_vec())));
+        assert_eq!(b, Some((5, data[5 * CHUNK..6 * CHUNK].to_vec())));
+        assert!(tx.next_to_send(1000, 1000).is_none());
+        // Lost again: one more round, still only 2 and 5.
+        let again: Vec<u8> =
+            core::iter::from_fn(|| tx.next_to_send(2000, 1000).map(|f| f.0)).collect();
+        assert_eq!(again, [2, 5]);
+        // Stale, duplicate and nonsense acks change nothing.
+        tx.on_ack(0, 0xFF);
+        tx.on_ack(200, 0);
+        let again: Vec<u8> =
+            core::iter::from_fn(|| tx.next_to_send(3000, 1000).map(|f| f.0)).collect();
+        assert_eq!(again, [2, 5]);
+        // Duplicates at the receiver are ignored; out of window is refused.
+        assert!(rx.on_data(3, &[9; 5]));
+        assert!(!rx.on_data(10, &[1]));
+        assert!(!rx.on_data(255, &[1]));
+        assert!(!rx.on_data(2, &[0; CHUNK + 1]));
+    }
+
+    #[test]
+    fn wraps_sequence_numbers() {
+        let mut tx = ArqTx::new();
+        let mut rx = ArqRx::new();
+        let total = 600usize;
+        let mut sent = Vec::new();
+        let mut got = Vec::new();
+        let mut queued = 0usize;
+        let mut seqs_seen = Vec::new();
+        let mut now = 0u32;
+        let mut rounds = 0;
+        while got.len() < total * CHUNK {
+            rounds += 1;
+            assert!(rounds < 10_000, "no progress");
+            while queued < total && tx.free() >= CHUNK {
+                let chunk = pattern(CHUNK, queued);
+                assert_eq!(tx.push(&chunk), CHUNK);
+                sent.extend_from_slice(&chunk);
+                queued += 1;
+            }
+            let mut n = 0;
+            while let Some((seq, d)) = tx.next_to_send(now, 50) {
+                seqs_seen.push(seq);
+                // Lose every 7th transmission.
+                n += 1;
+                if (seqs_seen.len() % 7) != 3 {
+                    let d = d.to_vec();
+                    rx.on_data(seq, &d);
+                }
+                if n > WINDOW {
+                    break;
+                }
+            }
+            got.extend(read_all(&mut rx));
+            let (ack, sack) = rx.ack_state();
+            tx.on_ack(ack, sack);
+            now = now.wrapping_add(60);
+        }
+        assert_eq!(got.len(), sent.len());
+        assert!(got == sent, "data differs after wrap");
+        assert!(tx.idle());
+        // 600 chunks means the u8 sequence wrapped twice: seq 0 carried
+        // chunks 0, 256 and 512.
+        assert!(seqs_seen.iter().filter(|&&s| s == 0).count() >= 3);
+        assert!(seqs_seen.contains(&255));
+    }
+
+    #[test]
+    fn push_respects_free() {
+        let mut tx = ArqTx::new();
+        assert_eq!(tx.free(), WINDOW * CHUNK);
+        assert!(tx.idle());
+        assert_eq!(tx.push(&[1; 50]), 50);
+        assert_eq!(tx.free(), WINDOW * CHUNK - 50);
+        // The unsent newest slot is topped up, not started fresh.
+        assert_eq!(tx.push(&[2; 100]), 100);
+        assert_eq!(tx.free(), WINDOW * CHUNK - 150);
+        // Once sent, a short slot's tail is no longer free.
+        let (seq, d) = tx.next_to_send(0, 100).unwrap();
+        assert_eq!((seq, d.len()), (0, 150));
+        assert_eq!(tx.free(), (WINDOW - 1) * CHUNK);
+        let big = vec![3u8; 5000];
+        let n = tx.push(&big);
+        assert_eq!(n, (WINDOW - 1) * CHUNK);
+        assert_eq!(tx.free(), 0);
+        assert_eq!(tx.push(&big), 0);
+        assert_eq!(tx.push(&[]), 0);
+        // Acking frees whole slots again.
+        let mut sent = 0;
+        while tx.next_to_send(0, 100).is_some() {
+            sent += 1;
+        }
+        assert_eq!(sent, WINDOW - 1);
+        assert_eq!(tx.free(), 0);
+        tx.on_ack(3, 0);
+        assert_eq!(tx.free(), 3 * CHUNK);
+        assert_eq!(tx.push(&big), 3 * CHUNK);
+        assert_eq!(tx.free(), 0);
+        // Acks for frames never sent are refused.
+        tx.on_ack(3 + WINDOW as u8, 0);
+        assert_eq!(tx.free(), 0);
+        tx.reset();
+        assert_eq!(tx.free(), WINDOW * CHUNK);
+    }
+}
