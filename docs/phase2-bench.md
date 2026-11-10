@@ -176,7 +176,7 @@ The bench terminal only opens the port once it has checked the USB identity. It 
 3. Take a picture of the OLED:
 
    ```
-   python F:\lfd3k-sm\tools\lfd3k_term.py --port COMn --expect-mac AA:BB:CC:DD:EE:FF --shot F:\lfd3k-sm\backups\oled.png
+   python F:\lfd3k-sm\tools\lfd3k_term.py --port COMn --expect-mac AA:BB:CC:DD:EE:FF --shot-safe --shot F:\lfd3k-sm\backups\oled.png
    ```
 
    Expected: a 128 by 64 picture of the front panel (the same layout as the files in `docs\phase2-bench\mockups`). It can be taken during a dial too.

@@ -1,10 +1,12 @@
 /* Front panel layout (128x64). Pure C, no ESP-IDF.
  *
  *  y  0..10   eight light boxes, 15 wide at x = 16*i: OH CD SD RD HS EC DC AA
- *  y 14..27   state word or tier name, 2x text, centred
+ *  y 14..27   state word or tier name, 2x text, centred (Wi-Fi call: WIFI TCP, BRIDGE)
  *  y 30..36   rate line, 1x text, centred (online) / carrier pulse (idle, y 33..35)
  *  y 39..43   tier ladder, 8 cells 14 wide at x = 16*i (training, online)
- *  y 46..52   board name (up to 16 chars) at x 0; LFD3K-SM when none given
+ *  y 46..52   board name (up to 16 chars) at x 0; LFD3K-SM when none given. While idle it
+ *             alternates every 3 s with Wi-Fi rows: AP <ssid>, PW <pass> (only while the
+ *             core allows it), IP <a.b.c.d> (only with a client address); 21 chars at most
  *  y 55..60   RSSI text x 0, RSSI bar x 44..61, SNR text x 66, SNR bar x 110..127
  *             (last decoded frame; while idle with a channel trace: the live channel
  *             level and its rise above the noise floor)
@@ -79,6 +81,55 @@ static void text(uint8_t *fb, int x, int y, const char *t, int sc, int on)
 static void text_c(uint8_t *fb, int y, const char *t, int sc)
 {
     text(fb, (W - text_w(t, sc)) / 2, y, t, sc, 1);
+}
+
+/* ---- Wi-Fi rows on the idle name line ---- */
+#define NET_ROW_MS  3000u
+#define NET_ROW_MAX 21 /* 21 cells of 6 px fit in 128 */
+
+static panel_net_t s_net;
+static int s_have_net;
+
+void panel_render_set_net(const panel_net_t *n)
+{
+    if (n == NULL) {
+        s_have_net = 0;
+        memset(&s_net, 0, sizeof(s_net));
+        return;
+    }
+    s_net = *n;
+    /* never trust a missing NUL */
+    s_net.ap_ssid[sizeof(s_net.ap_ssid) - 1] = 0;
+    s_net.ap_pass[sizeof(s_net.ap_pass) - 1] = 0;
+    s_net.ip[sizeof(s_net.ip) - 1] = 0;
+    if (!s_net.show_pass) {
+        memset(s_net.ap_pass, 0, sizeof(s_net.ap_pass)); /* the secret rule, again */
+    }
+    s_have_net = 1;
+}
+
+/* "<tag> <value>" cut to NET_ROW_MAX characters. */
+static void net_row(char *out, size_t cap, const char *tag, const char *val)
+{
+    snprintf(out, cap, "%s %.*s", tag, (int)(NET_ROW_MAX - strlen(tag) - 1), val);
+}
+
+/* The text for the name row at now_ms: the board name, or the Wi-Fi row whose turn it is. */
+static void name_row(char *out, size_t cap, const char *nm, uint32_t now_ms)
+{
+    char rows[4][NET_ROW_MAX + 1];
+    int n = 0;
+    snprintf(rows[n++], sizeof(rows[0]), "%s", nm);
+    if (s_have_net && s_net.ap_on && s_net.ap_ssid[0]) {
+        net_row(rows[n++], sizeof(rows[0]), "AP", s_net.ap_ssid);
+        if (s_net.show_pass && s_net.ap_pass[0]) {
+            net_row(rows[n++], sizeof(rows[0]), "PW", s_net.ap_pass);
+        }
+    }
+    if (s_have_net && s_net.sta_up && s_net.ip[0]) {
+        net_row(rows[n++], sizeof(rows[0]), "IP", s_net.ip);
+    }
+    snprintf(out, cap, "%s", rows[(now_ms / NET_ROW_MS) % (uint32_t)n]);
 }
 
 static const char *const LIGHT[8] = {"OH", "CD", "SD", "RD", "HS", "EC", "DC", "AA"};
@@ -453,7 +504,7 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
 
     int tier = (s->tier >= 0 && s->tier <= 7) ? s->tier : -1;
 
-    if (!s->radio_ok) {
+    if (!s->radio_ok && s->wire != 1 && s->wire != 2) { /* a pure Wi-Fi call needs no radio */
         text_c(fb, 16, "RADIO FAIL", 2);
         text_c(fb, 33, "CHECK BOARD", 1);
         if ((now_ms / 500) & 1) {
@@ -488,7 +539,20 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
         }
         case 4:
         case 5:
-            if (in_call) {
+            if (s->wire == 2) { /* Wi-Fi TCP call: no tier, no ladder */
+                text_c(fb, 14, "WIFI TCP", 2);
+                text_c(fb, 30, s->state == 5 ? "CMD" : "ONLINE", 1);
+            } else if (s->wire == 3) { /* radio call bridged to a forward */
+                text_c(fb, 14, "BRIDGE", 2);
+                if (tier >= 0) {
+                    snprintf(line, sizeof(line), "SF%u BW500 %lu BPS", (unsigned)TIER_SF[tier],
+                             (unsigned long)TIER_BPS[tier]);
+                    text_c(fb, 30, line, 1);
+                    ladder(fb, tier, -1, 0);
+                } else {
+                    text_c(fb, 30, s->state == 5 ? "CMD" : "ONLINE", 1);
+                }
+            } else if (in_call) {
                 snprintf(line, sizeof(line), "SF%u BW500", (unsigned)TIER_SF[tier]);
                 text_c(fb, 14, line, 2);
                 snprintf(line, sizeof(line), "%s %lu BPS", s->state == 5 ? "CMD" : "ONLINE",
@@ -522,7 +586,13 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
         nl = 8;
     }
     nm[nl] = 0;
-    text(fb, 0, 46, nm, 1, 1);
+    if (s->state == 0 && s->radio_ok) {
+        char row[NET_ROW_MAX + 17];
+        name_row(row, sizeof(row), nm, now_ms);
+        text(fb, 0, 46, row, 1, 1);
+    } else {
+        text(fb, 0, 46, nm, 1, 1);
+    }
 
     int heard = s->rssi != 0 || s->snr_x4 != 0;
     char rv[16], sv[16];

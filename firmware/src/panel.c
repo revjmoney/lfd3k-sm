@@ -22,6 +22,7 @@ static const char *TAG = "panel";
 
 static portMUX_TYPE s_pub_lock = portMUX_INITIALIZER_UNLOCKED;
 static rf_trace_t s_pub_trace; /* zero count: plain breathing line */
+static panel_net_t s_pub_net;  /* all zero: no Wi-Fi rows */
 static lfd3k_status_t s_pub = {.lights = 0, .state = 0, .tier = -1, .rssi = 0, .snr_x4 = 0, .radio_ok = 1};
 
 static SemaphoreHandle_t s_frame_lock;
@@ -49,6 +50,13 @@ void panel_publish_trace(const rf_trace_t *t)
 {
     taskENTER_CRITICAL(&s_pub_lock);
     s_pub_trace = *t;
+    taskEXIT_CRITICAL(&s_pub_lock);
+}
+
+void panel_publish_net(const panel_net_t *n)
+{
+    taskENTER_CRITICAL(&s_pub_lock);
+    s_pub_net = *n;
     taskEXIT_CRITICAL(&s_pub_lock);
 }
 
@@ -104,9 +112,11 @@ static void panel_task(void *arg)
 
         lfd3k_status_t st;
         rf_trace_t trace;
+        panel_net_t net;
         taskENTER_CRITICAL(&s_pub_lock);
         st = s_pub;
         trace = s_pub_trace;
+        net = s_pub_net;
         taskEXIT_CRITICAL(&s_pub_lock);
 
         for (int i = 0; i < 2; i++) {
@@ -128,6 +138,8 @@ static void panel_task(void *arg)
         }
 
         panel_render_set_trace(&trace);
+        panel_render_set_net(&net);
+        memset(&net, 0, sizeof(net)); /* the password never lingers on this stack */
         panel_render(&st, s_name, now_ms, fb);
         commit_frame(fb);
 

@@ -22,6 +22,20 @@ typedef struct {
 /* Hand the renderer the latest trace (NULL or count 0: a plain breathing line). */
 void panel_render_set_trace(const rf_trace_t *t);
 
+/* Wi-Fi strings for the idle bottom row. All fields NUL terminated. ap_pass is only
+ * filled (and only drawn) while show_pass is 1; the caller wipes it otherwise. */
+typedef struct {
+    char ap_ssid[33];
+    char ap_pass[64];
+    uint8_t show_pass;
+    char ip[16]; /* dotted quad, empty without one */
+    uint8_t ap_on;
+    uint8_t sta_up; /* client side has an IP */
+} panel_net_t;
+
+/* Hand the renderer the latest Wi-Fi strings (NULL: none, the name row stays). */
+void panel_render_set_net(const panel_net_t *n);
+
 /* Draws the front panel for status s (name: board name, NULL or empty shows LFD3K-SM) at time now_ms. Keeps a little animation
  * memory (last state) in statics; call it with non-decreasing now_ms. */
 void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES]);

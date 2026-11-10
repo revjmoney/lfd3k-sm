@@ -20,6 +20,7 @@ static QueueHandle_t s_cfgq;                 /* length 1, xQueueOverwrite */
 static esp_netif_t *s_sta_netif;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static char s_status[96] = "WIFI AP OFF 0 CLIENTS STA OFF NO IP";
+static char s_ip[16];                        /* client address, empty without one */
 static volatile bool s_ap_joined;
 static volatile bool s_sta_wanted;
 static volatile int64_t s_retry_at_us;       /* 0 = none */
@@ -129,10 +130,12 @@ static void build_status(void)
         }
     }
     char line[128]; /* the core keeps 96 */
+    bool have_ip = strcmp(ip, "NO IP") != 0;
     snprintf(line, sizeof(line), "WIFI AP %s %d CLIENTS STA %s %s",
              s_cfg.ap_on ? s_cfg.ap_ssid : "OFF", clients,
              s_cfg.sta_set ? s_cfg.sta_ssid : "OFF", ip);
     portENTER_CRITICAL(&s_mux);
+    strlcpy(s_ip, have_ip ? ip : "", sizeof(s_ip));
     strlcpy(s_status, line, sizeof(s_status));
     portEXIT_CRITICAL(&s_mux);
 }
@@ -188,6 +191,14 @@ void wifi_link_get_status(char *out, size_t cap)
     portENTER_CRITICAL(&s_mux);
     strlcpy(out, s_status, cap);
     portEXIT_CRITICAL(&s_mux);
+}
+
+void wifi_link_get_ip(char *out, bool *up)
+{
+    portENTER_CRITICAL(&s_mux);
+    strlcpy(out, s_ip, 16);
+    portEXIT_CRITICAL(&s_mux);
+    *up = out[0] != 0;
 }
 
 bool wifi_link_take_ap_joined(void)

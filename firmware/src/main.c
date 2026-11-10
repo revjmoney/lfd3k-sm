@@ -164,6 +164,28 @@ static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
     }
 }
 
+/* Wi-Fi strings for the OLED rows, once a second. The hotspot password goes along only
+ * while the core allows it on screen; every copy is wiped after use. */
+static void publish_net(void)
+{
+    lfd3k_wifi_cfg_t wc;
+    panel_net_t n;
+    memset(&n, 0, sizeof(n));
+    lfd3k_get_wifi_config(&wc);
+    n.show_pass = lfd3k_show_ap_pass() ? 1 : 0;
+    n.ap_on = (wc.ap_on && wc.ap_ssid[0]) ? 1 : 0;
+    memcpy(n.ap_ssid, wc.ap_ssid, sizeof(n.ap_ssid) - 1);
+    if (n.show_pass) {
+        memcpy(n.ap_pass, wc.ap_pass, sizeof(n.ap_pass) - 1);
+    }
+    memset(&wc, 0, sizeof(wc));
+    bool up = false;
+    wifi_link_get_ip(n.ip, &up);
+    n.sta_up = up ? 1 : 0;
+    panel_publish_net(&n);
+    memset(&n, 0, sizeof(n));
+}
+
 static void modem_task(void *arg)
 {
     (void)arg;
@@ -260,6 +282,7 @@ static void modem_task(void *arg)
                 snprintf(line, sizeof(line), "NVS FAIL %s", ws);
             }
             lfd3k_set_wifi_status(line);
+            publish_net();
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
         }
 

@@ -20,6 +20,11 @@ void panel_publish(const lfd3k_status_t *s);
  * 130 bytes, under the same spinlock as panel_publish). */
 void panel_publish_trace(const rf_trace_t *t);
 
+/* Modem task only: hand the panel the Wi-Fi strings for the idle bottom row (about
+ * 120 bytes, same spinlock). The caller fills ap_pass only while the core allows the
+ * password on screen and wipes its own copy afterwards. Call about once a second. */
+void panel_publish_net(const panel_net_t *n);
+
 /* Copy the last fully drawn 128x64 SSD1306 framebuffer (1024 bytes, page
  * order, bit 0 = top row of each page) into out. Called from the modem task.
  * Waits at most 5 ms; on timeout returns the previous snapshot. */

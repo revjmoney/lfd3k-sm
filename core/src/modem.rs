@@ -1082,6 +1082,10 @@ impl Modem {
                 };
                 self.info(t.bytes());
                 let mut t = Txt::new();
+                t.put(b"PWSHOW ")
+                    .put(if self.set.show_ap_pass { b"1" } else { b"0" });
+                self.info(t.bytes());
+                let mut t = Txt::new();
                 t.put(b"PUB ");
                 match self.set.published() {
                     Some(f) => t.put(f.name().as_bytes()),

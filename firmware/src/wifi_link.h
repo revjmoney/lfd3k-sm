@@ -13,6 +13,9 @@ void wifi_link_init(void);
 void wifi_link_apply(const lfd3k_wifi_cfg_t *cfg);
 /* Copies the latest status line (NUL terminated) into out. */
 void wifi_link_get_status(char *out, size_t cap);
+/* The client side address as dotted text (empty without one) and whether it is up.
+ * out needs 16 bytes. */
+void wifi_link_get_ip(char *out, bool *up);
 /* True once after a station joined the hotspot. */
 bool wifi_link_take_ap_joined(void);
 
