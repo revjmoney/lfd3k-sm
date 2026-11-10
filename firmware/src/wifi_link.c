@@ -65,6 +65,8 @@ static void apply(const lfd3k_wifi_cfg_t *c)
     wifi_mode_t mode = (ap && sta) ? WIFI_MODE_APSTA : ap ? WIFI_MODE_AP : sta ? WIFI_MODE_STA : WIFI_MODE_NULL;
     if (mode == WIFI_MODE_NULL) {
         ESP_LOGI(TAG, "Wi-Fi off");
+        memset(s_cfg.ap_pass, 0, sizeof(s_cfg.ap_pass)); /* never keep passwords */
+        memset(s_cfg.sta_pass, 0, sizeof(s_cfg.sta_pass));
         return;
     }
     wifi_config_t wc;
