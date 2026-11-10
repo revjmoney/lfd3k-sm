@@ -36,6 +36,10 @@ const BURST_MAX: u8 = 4;
 const TURN_YIELD_MS: u32 = 100;
 const UP_HOLD_MS: u32 = 10_000;
 const KA_LEN: usize = HEADER_LEN + 2;
+/// Training probes per tier before stepping one tier slower.
+const PROBE_TRIES: u8 = 2;
+/// Most jitter added to a training probe retry.
+const PROBE_JITTER_MS: u32 = 50;
 const QLEN: usize = 4;
 const QBUF: usize = 40;
 const EVLEN: usize = 8;
@@ -126,6 +130,11 @@ fn turn_gap_ms(t: Tier) -> u32 {
     (preamble_us(t) * 2 / 1000 + 20).max(40)
 }
 
+/// Caller's wait for a probe reply: 3 airtimes of a Keepalive plus 200 ms.
+fn caller_probe_ms(t: Tier) -> u32 {
+    air_ms(t, KA_LEN).saturating_mul(3).saturating_add(200)
+}
+
 fn is_tierset(f: &QFrame) -> bool {
     f.buf
         .first()
@@ -154,6 +163,8 @@ pub struct Link {
     start: u32,
     last_periodic: u32,
     probe_ms: u32,
+    /// Caller: training probes sent on this tier.
+    probe_tries: u8,
     rings: u8,
     last_req: u32,
     got_tierset: bool,
@@ -222,6 +233,7 @@ impl Link {
             start: 0,
             last_periodic: 0,
             probe_ms: 0,
+            probe_tries: 0,
             rings: 0,
             last_req: 0,
             got_tierset: false,
@@ -420,6 +432,13 @@ impl Link {
         x ^= x << 5;
         self.rng = x;
         x % max.saturating_add(1)
+    }
+
+    /// Caller's training probe: Keepalive PING on the trained tier.
+    fn send_probe(&mut self) {
+        let p = self.ka_payload();
+        let t = self.tier;
+        self.enq(t, FrameType::Keepalive, FLAG_PING, &p, true, false);
     }
 
     /// Extra wait the answerer adds before starting anything the caller
@@ -662,7 +681,12 @@ impl Link {
                     self.tier = t;
                     self.state = State::Probe;
                     self.start = now;
+                    // Long enough for both caller probes (window W each,
+                    // second one jittered), short enough to be back on SF12
+                    // before the caller's step-down TierSet at about 2 W.
                     self.probe_ms = air_ms(Tier::ROBUST, HEADER_LEN + 1)
+                        .saturating_add(caller_probe_ms(t))
+                        .saturating_add(PROBE_JITTER_MS)
                         .saturating_add(air_ms(t, KA_LEN))
                         .saturating_add(120);
                     self.need_listen = true;
@@ -685,13 +709,10 @@ impl Link {
                     self.tier = a;
                     self.state = State::Probe;
                     self.start = now;
-                    self.probe_ms = air_ms(self.tier, KA_LEN)
-                        .saturating_mul(3)
-                        .saturating_add(200);
+                    self.probe_ms = caller_probe_ms(a);
+                    self.probe_tries = 1;
                     self.need_listen = true;
-                    let p = self.ka_payload();
-                    let t = self.tier;
-                    self.enq(t, FrameType::Keepalive, FLAG_PING, &p, true, false);
+                    self.send_probe();
                 }
             }
             State::Probe => {
@@ -911,6 +932,14 @@ impl Link {
             State::Probe => {
                 if since(now, self.start) >= self.probe_ms {
                     match (self.role, self.tier.slower()) {
+                        (Role::Caller, _) if self.probe_tries < PROBE_TRIES => {
+                            // One more probe on the same tier, jittered.
+                            self.probe_tries += 1;
+                            self.start = now;
+                            self.probe_ms = caller_probe_ms(self.tier)
+                                .saturating_add(self.jitter(PROBE_JITTER_MS));
+                            self.send_probe();
+                        }
                         (Role::Caller, Some(s)) => self.start_tierset(s, now),
                         (Role::Caller, None) => self.fail(Event::NoCarrier, true),
                         (Role::Answerer, _) => {
