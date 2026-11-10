@@ -60,8 +60,24 @@
 //! end); then that side's segment stays open and its `received_*` would count
 //! the OK and later command output as data. Tests that read `received_*` on
 //! the escaping side wait past a tick after the guard (as `escape_a` does).
+//!
+//! # Fake wire
+//! A `FakeWire` attached to a modem (`attach_wire_a` / `attach_wire_b`) plays
+//! the platform plus a TCP server for that modem's Wi-Fi calls and bridges.
+//! It is serviced once per 1 ms step, after that step's ticks, and only when
+//! attached (a harness without one behaves exactly as before). Each service:
+//! 1. a close the modem asked for: what `wire_output` still holds is read
+//!    into `received`, then the connection is closed;
+//! 2. a new request is recorded and answered per `WireScript`;
+//! 3. a connect that is due calls `wire_connected` (after `connect_ms`) and
+//!    queues the script's opening bytes;
+//! 4. while open: everything from `wire_output` is recorded (and echoed,
+//!    per script), then queued server bytes go to `wire_input` (what it
+//!    refuses waits for the next step); a due close calls `wire_closed`.
 
 pub mod rng;
+
+use std::collections::VecDeque;
 
 use lfd3k_core::frame::{decode, FrameType};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
@@ -382,6 +398,214 @@ impl Host {
     }
 }
 
+/// What the AXIS telnet server sends on connect: `IAC WILL ECHO`,
+/// `IAC WILL SGA`, `IAC DO SGA`, `IAC WILL BINARY`, `IAC DO BINARY`,
+/// `IAC DO NAWS`.
+pub const AXIS_OPENING: &[u8] = &[
+    255, 251, 1, 255, 251, 3, 255, 253, 3, 255, 251, 0, 255, 253, 0, 255, 253, 31,
+];
+
+/// How a `FakeWire` server behaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireScript {
+    /// Every connect fails at once (`wire_failed`).
+    Refuse,
+    /// Connects never complete (the modem's S7 timer ends the dial).
+    NeverAnswer,
+    /// Echoes every byte it receives.
+    Echo,
+    /// Sends these bytes on connect, then echoes.
+    Banner(&'static [u8]),
+    /// Echoes, and closes once it has received this many bytes on the
+    /// connection (after the echo has been delivered).
+    CloseAfter(usize),
+    /// AXIS telnet server: sends `AXIS_OPENING` on connect, then echoes the
+    /// data it receives with telnet commands stripped (0xFF goes back as
+    /// `IAC IAC`). `received` keeps the raw bytes, negotiation included.
+    Telnet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireConn {
+    Closed,
+    /// Connect completes at this time (ms).
+    Connecting(u32),
+    /// NeverAnswer: the connect hangs.
+    Hanging,
+    Open,
+}
+
+/// Server side telnet filter state (what AXIS does with incoming bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SrvTn {
+    Data,
+    Iac,
+    Verb,
+    Sb,
+    SbIac,
+}
+
+/// Fake platform plus TCP server for one harness modem (see module docs).
+pub struct FakeWire {
+    pub script: WireScript,
+    /// Time from request to `wire_connected`, ms (default 0: next step).
+    pub connect_ms: u32,
+    conn: WireConn,
+    requests: Vec<(String, u16)>,
+    received: Vec<u8>,
+    /// Bytes received on the current connection.
+    conn_rx: usize,
+    to_modem: VecDeque<u8>,
+    closes_asked: u32,
+    close_now: bool,
+    tn: SrvTn,
+}
+
+impl FakeWire {
+    pub fn new(script: WireScript) -> FakeWire {
+        FakeWire {
+            script,
+            connect_ms: 0,
+            conn: WireConn::Closed,
+            requests: Vec::new(),
+            received: Vec::new(),
+            conn_rx: 0,
+            to_modem: VecDeque::new(),
+            closes_asked: 0,
+            close_now: false,
+            tn: SrvTn::Data,
+        }
+    }
+
+    /// Every connection request seen, in order: (host, port).
+    pub fn requests(&self) -> &[(String, u16)] {
+        &self.requests
+    }
+
+    /// Every byte the server received, over all connections, raw.
+    pub fn received(&self) -> &[u8] {
+        &self.received
+    }
+
+    /// Times the modem asked for the socket to be closed.
+    pub fn closes_asked(&self) -> u32 {
+        self.closes_asked
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.conn == WireConn::Open
+    }
+
+    /// Queue bytes for the modem now (while open).
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.to_modem.extend(bytes.iter().copied());
+    }
+
+    /// Close from the server side at the next service.
+    pub fn close(&mut self) {
+        self.close_now = true;
+    }
+
+    fn echo(&mut self, bytes: &[u8]) {
+        match self.script {
+            WireScript::Echo | WireScript::Banner(_) | WireScript::CloseAfter(_) => {
+                self.to_modem.extend(bytes.iter().copied());
+            }
+            WireScript::Telnet => {
+                for &b in bytes {
+                    self.tn = match (self.tn, b) {
+                        (SrvTn::Data, 255) => SrvTn::Iac,
+                        (SrvTn::Data, _) => {
+                            self.to_modem.push_back(b);
+                            SrvTn::Data
+                        }
+                        (SrvTn::Iac, 255) => {
+                            self.to_modem.extend([255, 255]);
+                            SrvTn::Data
+                        }
+                        (SrvTn::Iac, 251..=254) => SrvTn::Verb,
+                        (SrvTn::Iac, 250) => SrvTn::Sb,
+                        (SrvTn::Iac, _) | (SrvTn::Verb, _) => SrvTn::Data,
+                        (SrvTn::Sb, 255) => SrvTn::SbIac,
+                        (SrvTn::Sb, _) => SrvTn::Sb,
+                        (SrvTn::SbIac, 240) => SrvTn::Data,
+                        (SrvTn::SbIac, _) => SrvTn::Sb,
+                    };
+                }
+            }
+            WireScript::Refuse | WireScript::NeverAnswer => {}
+        }
+    }
+
+    fn read_out(&mut self, m: &mut Modem) {
+        let mut buf = [0u8; 256];
+        loop {
+            let n = m.wire_output(&mut buf);
+            if n == 0 {
+                break;
+            }
+            let got = buf.get(..n).unwrap_or(&[]).to_vec();
+            self.received.extend_from_slice(&got);
+            self.conn_rx += n;
+            if self.conn == WireConn::Open {
+                self.echo(&got);
+            }
+        }
+    }
+
+    fn shut(&mut self) {
+        self.conn = WireConn::Closed;
+        self.to_modem.clear();
+        self.close_now = false;
+    }
+
+    fn service(&mut self, m: &mut Modem, now: u32) {
+        if m.take_wire_close() {
+            self.closes_asked += 1;
+            if self.conn == WireConn::Open {
+                self.read_out(m);
+            }
+            self.shut();
+        }
+        if let Some(req) = m.take_wire_request() {
+            self.requests.push((req.host().to_string(), req.port()));
+            self.shut();
+            self.conn_rx = 0;
+            self.tn = SrvTn::Data;
+            match self.script {
+                WireScript::Refuse => m.wire_failed(now),
+                WireScript::NeverAnswer => self.conn = WireConn::Hanging,
+                _ => self.conn = WireConn::Connecting(now.wrapping_add(self.connect_ms)),
+            }
+        }
+        if let WireConn::Connecting(due) = self.conn {
+            if now >= due {
+                self.conn = WireConn::Open;
+                m.wire_connected(now);
+                match self.script {
+                    WireScript::Banner(b) => self.send(b),
+                    WireScript::Telnet => self.send(AXIS_OPENING),
+                    _ => {}
+                }
+            }
+        }
+        if self.conn != WireConn::Open {
+            return;
+        }
+        self.read_out(m);
+        if !self.to_modem.is_empty() {
+            let v: Vec<u8> = self.to_modem.iter().copied().collect();
+            let n = m.wire_input(&v, now);
+            self.to_modem.drain(..n.min(v.len()));
+        }
+        let limit_hit = matches!(self.script, WireScript::CloseAfter(n) if self.conn_rx >= n);
+        if self.close_now || (limit_hit && self.to_modem.is_empty()) {
+            self.shut();
+            m.wire_closed(now);
+        }
+    }
+}
+
 /// Two modems on one simulated channel.
 pub struct Harness {
     /// CALLER (radio 0).
@@ -398,6 +622,8 @@ pub struct Harness {
     stats: Stats,
     /// Per sender: (call id, next new sequence number) for resend counting.
     seqs: [Option<(u8, u8)>; 2],
+    /// Fake wire per modem, serviced each step when attached.
+    wires: [Option<FakeWire>; 2],
 }
 
 impl Harness {
@@ -422,6 +648,57 @@ impl Harness {
             trace: Vec::new(),
             stats: Stats::default(),
             seqs: [None, None],
+            wires: [None, None],
+        }
+    }
+
+    // Wire side.
+
+    /// Attach a fake TCP server (and platform) to CALLER's Wi-Fi side.
+    pub fn attach_wire_a(&mut self, w: FakeWire) {
+        self.wires[0] = Some(w);
+    }
+
+    /// Attach a fake TCP server (and platform) to AXIS's Wi-Fi side.
+    pub fn attach_wire_b(&mut self, w: FakeWire) {
+        self.wires[1] = Some(w);
+    }
+
+    pub fn wire_a(&self) -> Option<&FakeWire> {
+        self.wires[0].as_ref()
+    }
+
+    pub fn wire_b(&self) -> Option<&FakeWire> {
+        self.wires[1].as_ref()
+    }
+
+    pub fn wire_a_mut(&mut self) -> Option<&mut FakeWire> {
+        self.wires[0].as_mut()
+    }
+
+    pub fn wire_b_mut(&mut self) -> Option<&mut FakeWire> {
+        self.wires[1].as_mut()
+    }
+
+    /// Raw bytes CALLER's fake server received (empty if none attached).
+    pub fn wire_received_a(&self) -> Vec<u8> {
+        self.wire_a()
+            .map_or_else(Vec::new, |w| w.received().to_vec())
+    }
+
+    /// Raw bytes AXIS's fake server received (empty if none attached).
+    pub fn wire_received_b(&self) -> Vec<u8> {
+        self.wire_b()
+            .map_or_else(Vec::new, |w| w.received().to_vec())
+    }
+
+    fn service_wire(&mut self, side: usize) {
+        let Some(mut w) = self.wires.get_mut(side).and_then(Option::take) else {
+            return;
+        };
+        self.with(side, false, |m, _r, now| w.service(m, now));
+        if let Some(slot) = self.wires.get_mut(side) {
+            *slot = Some(w);
         }
     }
 
@@ -661,6 +938,11 @@ impl Harness {
             self.tick(0);
             self.tick(1);
         }
+        for side in 0..2 {
+            if self.wires[side].is_some() {
+                self.service_wire(side);
+            }
+        }
     }
 
     fn deliver_due(&mut self, now_us: u64) {
@@ -822,5 +1104,68 @@ impl Harness {
                 Outcome::Pending
             },
         });
+    }
+}
+
+/// A `DatagramPort` over a non-blocking std `UdpSocket`, for the simulated
+/// radio (`SimNetRadio`) on the PC: datagrams go to `peer`, and `recv`
+/// returns only those from the peer's IP address (any source port).
+pub struct UdpPort {
+    sock: std::net::UdpSocket,
+    peer: std::net::SocketAddr,
+    start: std::time::Instant,
+}
+
+impl UdpPort {
+    /// Binds `bind` (for example `0.0.0.0:4210`), non-blocking.
+    pub fn bind(bind: &str, peer: std::net::SocketAddr) -> std::io::Result<UdpPort> {
+        let sock = std::net::UdpSocket::bind(bind)?;
+        sock.set_nonblocking(true)?;
+        Ok(UdpPort {
+            sock,
+            peer,
+            start: std::time::Instant::now(),
+        })
+    }
+
+    /// The address the socket is bound to (the port, when bound with port 0).
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.sock.local_addr()
+    }
+
+    /// Point the port at its peer (two ports on ephemeral loopback ports
+    /// learn each other's address after both are bound).
+    pub fn set_peer(&mut self, peer: std::net::SocketAddr) {
+        self.peer = peer;
+    }
+
+    /// The next datagram from the peer into `buf`, if one is waiting.
+    /// Datagrams from other addresses are read and dropped.
+    pub fn recv(&self, buf: &mut [u8]) -> Option<usize> {
+        loop {
+            match self.sock.recv_from(buf) {
+                Ok((n, from)) if from.ip() == self.peer.ip() => return Some(n),
+                Ok(_) => continue,
+                // WouldBlock, or a Windows ICMP "port unreachable" reset:
+                // nothing more this poll.
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Milliseconds since the port was made (the clock `now_us` uses).
+    pub fn now_ms(&self) -> u32 {
+        self.start.elapsed().as_millis() as u32
+    }
+}
+
+impl lfd3k_core::DatagramPort for UdpPort {
+    fn send(&mut self, d: &[u8]) {
+        // UDP: a lost datagram is a lost frame, as on the air.
+        let _ = self.sock.send_to(d, self.peer);
+    }
+
+    fn now_us(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
     }
 }

@@ -1,0 +1,39 @@
+# Two lfd3k-pcmodem instances on one PC, talking over UDP on 127.0.0.1.
+# Run each half in its own terminal (B first, it answers):
+#   cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --name PCB --bind 127.0.0.1:4212 --peer 127.0.0.1 --port 4211 --script tools/simnet-loopback.txt --section B
+#   cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --name PCA --bind 127.0.0.1:4211 --peer 127.0.0.1 --port 4212 --script tools/simnet-loopback.txt --section A
+# A dials B, B auto answers (ATS0=1), a few lines each way, A escapes with
+# +++ and hangs up with ATH, both see NO CARRIER.
+
+[A]
+send AT
+expect OK 5
+sleep 2000
+send ATDT PCB
+expect DIALING PCB 5
+expect CONNECT 60
+send hello from A, line 1
+send hello from A, line 2
+expect hello from B, line 1 30
+expect hello from B, line 2 30
+send hello from A, line 3
+expect hello from B, line 3 30
+sleep 1500
+sendraw +++
+expect OK 10
+send AT&V
+expect TIER 5
+send ATH
+expect NO CARRIER 20
+
+[B]
+send ATS0=1
+expect OK 5
+expect RING 60
+expect CONNECT 60
+expect hello from A, line 2 30
+send hello from B, line 1
+send hello from B, line 2
+expect hello from A, line 3 30
+send hello from B, line 3
+expect NO CARRIER 120

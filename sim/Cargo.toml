@@ -3,6 +3,8 @@ name = "lfd3k-sim"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Two bins (the demo and lfd3k-pcmodem): plain `cargo run -p lfd3k-sim` runs the demo.
+default-run = "lfd3k-sim"
 
 [dependencies]
 lfd3k-core = { path = "../core" }

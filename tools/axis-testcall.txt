@@ -1,0 +1,14 @@
+# Test call from the PC modem to an AXIS board over the network (Wi-Fi tier).
+# Stops at the first screen: nothing is typed into the BBS, no login.
+#   lfd3k-pcmodem --peer 127.0.0.1 --name PCMODEM --fwd AXIS=<board ip>:23 --script tools/axis-testcall.txt
+send ATI
+expect OK 5
+send AT+FWD?
+expect OK 5
+send ATDT AXIS
+expect CONNECT WIFI TCP 20
+sleep 6000
+sendraw +++
+expect OK 10
+send ATH
+expect NO CARRIER 10

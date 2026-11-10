@@ -102,7 +102,7 @@ fn symbol_us(tier: Tier) -> u64 {
 }
 
 impl<B: Bus> Sx1262<B> {
-    pub fn new(bus: B) -> Self {
+    pub const fn new(bus: B) -> Self {
         Sx1262 {
             bus,
             state: State::Idle,
@@ -180,6 +180,9 @@ impl<B: Bus> Sx1262<B> {
         // Errata 15.2: better resistance to antenna mismatch.
         let clamp = self.read_register(cmd::REG_TX_CLAMP)?;
         self.write(&cmd::write_register(cmd::REG_TX_CLAMP, clamp | 0x1E))?;
+        // Boosted receive gain: a few dB more sensitivity for a little more current.
+        // Written after Calibrate (which would not touch it) and kept until reset.
+        self.write(&cmd::write_register(cmd::REG_RX_GAIN, cmd::RX_GAIN_BOOSTED))?;
         self.write(&cmd::clear_irq_status(cmd::IRQ_ALL))?;
 
         let status = self.get_status()?;
@@ -202,6 +205,46 @@ impl<B: Bus> Sx1262<B> {
         self.read(&cmd::get_device_errors(), &mut rx)?;
         let [_, _, hi, lo] = rx;
         Ok(u16::from_be_bytes([hi, lo]))
+    }
+
+    /// True while a transmission is in progress (SetTx issued, not done).
+    pub fn transmitting(&self) -> bool {
+        matches!(self.state, State::Tx { .. })
+    }
+
+    /// Instantaneous channel RSSI in dBm (GetRssiInst, one 3-byte SPI
+    /// transaction). Only valid while receiving: `None` in Tx, Idle, before
+    /// init, after a failure, or when BUSY stays high past the runtime
+    /// limit (which also fails the driver, as for any command). Does not
+    /// touch the receive state.
+    pub fn rssi_inst(&mut self) -> Option<i16> {
+        if self.failed || !self.ready || !matches!(self.state, State::Rx { .. }) {
+            return None;
+        }
+        let mut rx = [0u8; 3];
+        if self.read(&cmd::get_rssi_inst(), &mut rx).is_err() {
+            self.abort();
+            return None;
+        }
+        let [_, _, raw] = rx;
+        Some(-(i16::from(raw) / 2))
+    }
+
+    /// Stop whatever the chip is doing (a transmission is cut off) and put
+    /// it in standby with the front end in receive position. Nothing is
+    /// sent or heard until the next `send` or `listen`. A BUSY timeout
+    /// fails the driver, as for any command.
+    pub fn standby(&mut self) {
+        self.bus.fem(false);
+        if self.failed || !self.ready {
+            self.state = State::Idle;
+            return;
+        }
+        if self.write(&cmd::set_standby(cmd::STDBY_XOSC)).is_err() {
+            self.abort();
+            return;
+        }
+        self.state = State::Idle;
     }
 
     /// Set chip output power in dBm, clamped to -9..=22. Applied now when

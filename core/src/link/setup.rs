@@ -140,7 +140,7 @@ impl Link {
         if !callee.eq_ignore_ascii_case(me) || call_id == 0 {
             return;
         }
-        if self.state == State::Idle {
+        if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;

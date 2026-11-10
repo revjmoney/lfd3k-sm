@@ -28,6 +28,7 @@ pub const SET_TX: u8 = 0x83;
 pub const SET_RX: u8 = 0x82;
 pub const GET_RX_BUFFER_STATUS: u8 = 0x13;
 pub const GET_PACKET_STATUS: u8 = 0x14;
+pub const GET_RSSI_INST: u8 = 0x15;
 pub const GET_STATUS: u8 = 0xC0;
 pub const CLEAR_DEVICE_ERRORS: u8 = 0x07;
 pub const GET_DEVICE_ERRORS: u8 = 0x17;
@@ -62,6 +63,9 @@ pub const REG_SYNC_WORD_LSB: u16 = 0x0741;
 pub const REG_SENSITIVITY: u16 = 0x0889; // errata 15.1
 pub const REG_TX_CLAMP: u16 = 0x08D8; // errata 15.2
 pub const REG_OCP: u16 = 0x08E7;
+pub const REG_RX_GAIN: u16 = 0x08AC;
+/// RxGain: 0x94 power saving (reset value), 0x96 boosted (best sensitivity).
+pub const RX_GAIN_BOOSTED: u8 = 0x96;
 
 // Parameter values.
 pub const STDBY_RC: u8 = 0x00;
@@ -220,6 +224,11 @@ pub const fn get_rx_buffer_status() -> [u8; 4] {
 /// Frame for GetPacketStatus: reply is `[_, status, rssi_pkt, snr_pkt, signal_rssi]`.
 pub const fn get_packet_status() -> [u8; 5] {
     [GET_PACKET_STATUS, NOP, NOP, NOP, NOP]
+}
+
+/// Frame for GetRssiInst: reply is `[_, status, rssi_inst]`, dBm = -rssi_inst / 2.
+pub const fn get_rssi_inst() -> [u8; 3] {
+    [GET_RSSI_INST, NOP, NOP]
 }
 
 /// Frame for GetStatus: reply is `[_, status]`.

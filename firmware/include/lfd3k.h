@@ -26,6 +26,10 @@ void     lfd3k_hal_fem_tx(bool on);
 uint64_t lfd3k_hal_now_us(void);
 /* Store note (up to 64 bytes, "file:line") in RTC RAM, then esp_restart. */
 void     lfd3k_hal_panic(const uint8_t *note, size_t len);
+/* AT+SIMNET: queue one datagram (8 byte header plus frame, at most
+ * LFD3K_SIMNET_DGRAM_MAX bytes) for the UDP task to send to peer:4210.
+ * Never blocks; a full queue drops it. Called only while SimNet is on. */
+void     lfd3k_hal_udp_send(const uint8_t *d, size_t len);
 
 /* ---- Provided by Rust. ---- */
 
@@ -66,8 +70,91 @@ typedef struct {
     int16_t rssi;
     int16_t snr_x4;
     uint8_t radio_ok;
+    uint8_t wire;      /* 0 none, 1 dialing, 2 online, 3 bridging a radio call */
+    uint8_t simnet;    /* 1 while AT+SIMNET has the simulated radio on (OLED: SI for HS) */
 } lfd3k_status_t;
 void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
+
+/* Channel trace for the idle scope: up to 64 samples taken every 50 ms in
+ * lfd3k_poll (dbm: -128..0, oldest first; tx: 1 for samples taken while
+ * transmitting). Copies at most cap samples (the newest), returns the count.
+ * Either pointer may be NULL. Returns 0 before init. */
+size_t   lfd3k_rf_trace(int8_t *dbm, uint8_t *tx, size_t cap);
+
+/* ---- SimNet: the simulated radio over UDP (AT+SIMNET, test mode). ---- */
+
+#define LFD3K_SIMNET_PORT      4210
+#define LFD3K_SIMNET_HDR_LEN   8
+#define LFD3K_SIMNET_DGRAM_MAX (LFD3K_SIMNET_HDR_LEN + 255)
+
+/* Taken once after AT+SIMNET switched radios: -1 no change, 0 back on the
+ * SX1262 (close the UDP socket), 1 simulated radio on (ip gets the peer;
+ * open the socket). Every boot starts on the SX1262. */
+int      lfd3k_take_simnet(uint8_t ip[4]);
+/* A datagram from the peer (header and frame). Returns len (always all of
+ * it), 0 before init. Call lfd3k_poll after a batch. now_ms is unused. */
+size_t   lfd3k_udp_in(const uint8_t *d, size_t len, uint32_t now_ms);
+/* The UDP socket could not be opened (socket or bind failed): AT&V shows
+ * RADIO SIMNET <ip> NET FAIL. Call each loop with the UDP task's state. */
+void     lfd3k_set_simnet_net_fail(bool fail);
+/* Milliseconds until the simulated radio needs lfd3k_poll again (a frame's
+ * airtime ends), UINT32_MAX when nothing is pending or SimNet is off. */
+uint32_t lfd3k_simnet_due_ms(void);
+
+/* ---- Settings (NVS blob) and Wi-Fi. ---- */
+
+/* Hotspot and client network. All strings NUL terminated. */
+typedef struct {
+    uint8_t ap_on;
+    uint8_t sta_set;          /* 1 when a client network is set */
+    char    ap_ssid[33];
+    char    ap_pass[64];
+    char    sta_ssid[33];
+    char    sta_pass[64];
+} lfd3k_wifi_cfg_t;
+
+/* Load the saved blob. 0 accepted, -1 rejected or not initialised (defaults
+ * remain; call lfd3k_default_settings and save). */
+int      lfd3k_load_settings(const uint8_t *blob, size_t len);
+/* True once when AT&W (or a hotspot join) asked for a save: fills blob and
+ * *len. cap must be at least 1024 (LFD3K_BLOB_LEN), else false and the
+ * request is kept. */
+#define LFD3K_BLOB_LEN 1024
+bool     lfd3k_take_save(uint8_t *blob, size_t cap, size_t *len);
+/* First boot only: call it just after lfd3k_load_settings returned -1. It
+ * replaces ALL settings with factory ones: S registers, E and V go back to
+ * their power-on values and the hotspot reuses the current AP ssid, with
+ * password ap_pass (8 to 63 printable characters, no comma); asks for a
+ * save. A bad password changes nothing. */
+void     lfd3k_default_settings(const char *ap_pass);
+void     lfd3k_get_wifi_config(lfd3k_wifi_cfg_t *out);
+/* True once after AT+WAP, AT+WSTA, ATZ or a load changed Wi-Fi settings. */
+bool     lfd3k_take_wifi_changed(void);
+/* Live status line for AT+WIFI? (up to 96 bytes kept). */
+void     lfd3k_set_wifi_status(const char *line);
+/* True while the generated hotspot password may be shown on the OLED. */
+bool     lfd3k_show_ap_pass(void);
+/* A device joined the hotspot: hide the password (asks for a save). */
+void     lfd3k_note_ap_client_joined(void);
+/* Modem task stack high-water mark in bytes free; AT&V prints STACK FREE <n>. */
+void     lfd3k_set_stack_free(uint32_t bytes);
+/* Lowest free heap since boot in bytes; AT&V prints HEAP MIN <n>. */
+void     lfd3k_set_heap_min(uint32_t bytes);
+
+/* ---- The wire (a TCP connection for Wi-Fi calls and bridges). ---- */
+
+/* True once when a call wants a connection: host (NUL terminated) and port.
+ * cap must be at least 64, else false and the request is kept. Poll
+ * lfd3k_take_wire_close first. */
+bool     lfd3k_take_wire_request(char *host, size_t cap, uint16_t *port);
+/* ev: 1 connected, 2 failed, 3 closed by the far end; others ignored. */
+void     lfd3k_wire_event(int ev, uint32_t now_ms);
+/* Bytes received from the socket; returns the bytes taken (offer the rest later). */
+size_t   lfd3k_wire_in(const uint8_t *buf, size_t len, uint32_t now_ms);
+/* Bytes to send on the socket (telnet encoded); returns the bytes written. */
+size_t   lfd3k_wire_out(uint8_t *buf, size_t len);
+/* True once when the socket should be closed (drain lfd3k_wire_out first). */
+bool     lfd3k_take_wire_close(void);
 
 #ifdef __cplusplus
 }

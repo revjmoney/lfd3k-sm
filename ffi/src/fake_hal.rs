@@ -35,6 +35,8 @@ pub struct FakeHal {
     pub dev_errors: u16,
     /// Frame returned by GetRxBufferStatus and ReadBuffer.
     pub rx_payload: Vec<u8>,
+    /// GetRssiInst raw byte (dBm = -raw / 2).
+    pub rssi_inst: u8,
     /// GetPacketStatus bytes.
     pub rssi_pkt: u8,
     pub snr_pkt: u8,
@@ -44,6 +46,8 @@ pub struct FakeHal {
     pub rx_mode: bool,
     /// (SF, frame) of every SetTx, oldest first. Tests drain it.
     pub tx_frames: Vec<(u8, Vec<u8>)>,
+    /// Every datagram passed to `lfd3k_hal_udp_send`, oldest first.
+    pub udp_out: Vec<Vec<u8>>,
     buffer: Vec<u8>,
 }
 
@@ -63,11 +67,13 @@ impl FakeHal {
             regs: BTreeMap::new(),
             dev_errors: 0,
             rx_payload: Vec::new(),
+            rssi_inst: 0,
             rssi_pkt: 0,
             snr_pkt: 0,
             sf: 0,
             rx_mode: false,
             tx_frames: Vec::new(),
+            udp_out: Vec::new(),
             buffer: Vec::new(),
         }
     }
@@ -104,6 +110,7 @@ impl FakeHal {
                     put(3 + i, v);
                 }
             }
+            0x15 => put(2, self.rssi_inst),
             0x14 => {
                 put(2, self.rssi_pkt);
                 put(3, self.snr_pkt);
@@ -186,6 +193,10 @@ pub(crate) fn now_us() -> u64 {
     let t = s.now_us;
     s.now_us = t.saturating_add(s.step_us);
     t
+}
+
+pub(crate) fn udp_send(d: &[u8]) {
+    lock().udp_out.push(d.to_vec());
 }
 
 /// Used by tests that call the panic note path by hand.

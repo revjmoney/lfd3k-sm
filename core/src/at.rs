@@ -3,6 +3,9 @@
 //! One command per line in v0.1. Parsing is case-insensitive, tolerates
 //! surrounding whitespace, and never panics.
 
+use crate::settings::{
+    parse_hostport, parse_port, valid_fwd_name, valid_host, valid_pass, valid_ssid, WireMode,
+};
 use crate::tier::Tier;
 
 /// Longest accepted dial name, in bytes.
@@ -24,6 +27,49 @@ pub enum AtCmd<'a> {
     Reset,
     /// `AT+FB`: dump the frame buffer (the firmware answers).
     FrameBuffer,
+    /// `AT&W`: save the settings.
+    Save,
+    /// `AT+WAP?`
+    WapQuery,
+    /// `AT+WAP=0` / `AT+WAP=1`
+    WapPower(bool),
+    /// `AT+WAP=<ssid>,<pass>`
+    WapSet {
+        ssid: &'a str,
+        pass: &'a str,
+    },
+    /// `AT+WSTA?`
+    WstaQuery,
+    /// `AT+WSTA=0`
+    WstaForget,
+    /// `AT+WSTA=<ssid>,<pass>`
+    WstaSet {
+        ssid: &'a str,
+        pass: &'a str,
+    },
+    /// `AT+WIFI?`
+    WifiQuery,
+    /// `AT+FWD?`
+    FwdList,
+    /// `AT+FWD=<name>`
+    FwdDelete(&'a str),
+    /// `AT+FWD=<name>,<host>,<port>[,T|R]`
+    FwdSet {
+        name: &'a str,
+        host: &'a str,
+        port: u16,
+        mode: WireMode,
+    },
+    /// `AT+PUB?`
+    PubQuery,
+    /// `AT+PUB=0`
+    PubNone,
+    /// `AT+PUB=<name>`
+    Pub(&'a str),
+    /// `AT+SIMNET?`
+    SimNetQuery,
+    /// `AT+SIMNET=<a.b.c.d>` (Some) or `AT+SIMNET=0` (None).
+    SimNet(Option<[u8; 4]>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,17 +106,13 @@ pub fn parse_line(line: &str) -> Result<AtCmd<'_>, AtError> {
         b'&' => {
             if arg.eq_ignore_ascii_case("V") {
                 Ok(AtCmd::ShowConfig)
+            } else if arg.eq_ignore_ascii_case("W") {
+                Ok(AtCmd::Save)
             } else {
                 Err(AtError::Unknown)
             }
         }
-        b'+' => {
-            if arg.eq_ignore_ascii_case("FB") {
-                Ok(AtCmd::FrameBuffer)
-            } else {
-                Err(AtError::Unknown)
-            }
-        }
+        b'+' => parse_plus(arg),
         _ => Err(AtError::Unknown),
     }
 }
@@ -99,6 +141,160 @@ fn bool_arg(arg: &str) -> Result<bool, AtError> {
     }
 }
 
+/// Argument form of a `+` command.
+#[derive(Clone, Copy)]
+enum Form<'a> {
+    Query,
+    Set(&'a str),
+}
+
+/// `+FB`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET` (`arg` is
+/// after the `+`).
+///
+/// Arguments are split on commas only (an SSID or name may not contain
+/// one, nor may a password). SSID and password are taken as typed (inner
+/// and edge spaces kept, apart from the trim of the whole line); the fields
+/// of `+FWD` are trimmed so `AT+FWD=a, b.com, 23` works.
+fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
+    let Some(i) = arg.find(['=', '?']) else {
+        return if arg.eq_ignore_ascii_case("FB") {
+            Ok(AtCmd::FrameBuffer)
+        } else {
+            Err(AtError::Unknown)
+        };
+    };
+    let name = arg.get(..i).ok_or(AtError::Unknown)?.trim_end();
+    let rest = arg.get(i..).ok_or(AtError::Unknown)?;
+    let known = ["WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET"];
+    if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
+        return Err(AtError::Unknown);
+    }
+    let form = match rest.strip_prefix('=') {
+        Some(v) => Form::Set(v),
+        None if rest == "?" => Form::Query,
+        None => return Err(AtError::BadArg),
+    };
+    if name.eq_ignore_ascii_case("WAP") {
+        parse_wap(form)
+    } else if name.eq_ignore_ascii_case("WSTA") {
+        parse_wsta(form)
+    } else if name.eq_ignore_ascii_case("WIFI") {
+        match form {
+            Form::Query => Ok(AtCmd::WifiQuery),
+            Form::Set(_) => Err(AtError::BadArg),
+        }
+    } else if name.eq_ignore_ascii_case("FWD") {
+        parse_fwd(form)
+    } else if name.eq_ignore_ascii_case("SIMNET") {
+        parse_simnet(form)
+    } else {
+        parse_pub(form)
+    }
+}
+
+/// `<ssid>,<pass>`, both valid.
+fn ssid_pass(v: &str) -> Result<(&str, &str), AtError> {
+    let (ssid, pass) = v.split_once(',').ok_or(AtError::BadArg)?;
+    if valid_ssid(ssid) && valid_pass(pass) {
+        Ok((ssid, pass))
+    } else {
+        Err(AtError::BadArg)
+    }
+}
+
+fn parse_wap(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    match form {
+        Form::Query => Ok(AtCmd::WapQuery),
+        Form::Set("0") => Ok(AtCmd::WapPower(false)),
+        Form::Set("1") => Ok(AtCmd::WapPower(true)),
+        Form::Set(v) => ssid_pass(v).map(|(ssid, pass)| AtCmd::WapSet { ssid, pass }),
+    }
+}
+
+fn parse_wsta(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    match form {
+        Form::Query => Ok(AtCmd::WstaQuery),
+        Form::Set("0") => Ok(AtCmd::WstaForget),
+        Form::Set(v) => ssid_pass(v).map(|(ssid, pass)| AtCmd::WstaSet { ssid, pass }),
+    }
+}
+
+fn parse_fwd(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    let Form::Set(v) = form else {
+        return Ok(AtCmd::FwdList);
+    };
+    let mut it = v.split(',').map(str::trim);
+    let name = it
+        .next()
+        .filter(|n| valid_fwd_name(n))
+        .ok_or(AtError::BadArg)?;
+    let (host, port, mode) = (it.next(), it.next(), it.next());
+    if it.next().is_some() {
+        return Err(AtError::BadArg);
+    }
+    let (Some(host), Some(port)) = (host, port) else {
+        return if host.is_none() {
+            Ok(AtCmd::FwdDelete(name))
+        } else {
+            Err(AtError::BadArg)
+        };
+    };
+    let port = parse_port(port).ok_or(AtError::BadArg)?;
+    if !valid_host(host) {
+        return Err(AtError::BadArg);
+    }
+    let mode = match mode {
+        None => WireMode::default_for(port),
+        Some(m) if m.eq_ignore_ascii_case("T") => WireMode::Telnet,
+        Some(m) if m.eq_ignore_ascii_case("R") => WireMode::Raw,
+        Some(_) => return Err(AtError::BadArg),
+    };
+    Ok(AtCmd::FwdSet {
+        name,
+        host,
+        port,
+        mode,
+    })
+}
+
+fn parse_pub(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    match form {
+        Form::Query => Ok(AtCmd::PubQuery),
+        Form::Set("0") => Ok(AtCmd::PubNone),
+        Form::Set(n) if valid_fwd_name(n.trim()) => Ok(AtCmd::Pub(n.trim())),
+        Form::Set(_) => Err(AtError::BadArg),
+    }
+}
+
+/// `AT+SIMNET?`, `AT+SIMNET=0` or `AT+SIMNET=<a.b.c.d>` (not 0.0.0.0).
+fn parse_simnet(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    match form {
+        Form::Query => Ok(AtCmd::SimNetQuery),
+        Form::Set(v) if v.trim() == "0" => Ok(AtCmd::SimNet(None)),
+        Form::Set(v) => parse_ipv4(v.trim())
+            .filter(|ip| *ip != [0; 4])
+            .map(|ip| AtCmd::SimNet(Some(ip)))
+            .ok_or(AtError::BadArg),
+    }
+}
+
+/// Dotted quad, each part 1 to 3 digits, 0 to 255.
+pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut ip = [0u8; 4];
+    let mut it = s.split('.');
+    for d in ip.iter_mut() {
+        let part = it.next()?;
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *d = part.parse().ok()?;
+    }
+    if it.next().is_some() {
+        return None;
+    }
+    Some(ip)
+}
+
 fn parse_dial(arg: &str) -> Result<AtCmd<'_>, AtError> {
     // Strip one leading T or P dial modifier, as in ATDTAXIS.
     let mut name = arg;
@@ -108,7 +304,9 @@ fn parse_dial(arg: &str) -> Result<AtCmd<'_>, AtError> {
         }
     }
     let name = name.trim();
-    if name.is_empty() || name.len() > MAX_NAME {
+    // Up to 16 bytes is a station or forward name; longer is only valid as
+    // `host:port` (the modem decides which it is).
+    if name.is_empty() || (name.len() > MAX_NAME && parse_hostport(name).is_none()) {
         return Err(AtError::BadArg);
     }
     Ok(AtCmd::Dial(name))
@@ -151,6 +349,8 @@ pub enum ResultCode {
     Busy,
     NoAnswer,
     Connect(Tier),
+    /// A Wi-Fi (TCP) call: `CONNECT WIFI TCP`, numeric 1.
+    ConnectWifi,
     Retrain(Tier),
 }
 
@@ -218,6 +418,7 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
                 b.put_u32(t.air_bps());
                 b.put(b"/ARQ");
             }
+            ResultCode::ConnectWifi => b.put(b"CONNECT WIFI TCP"),
             ResultCode::Retrain(t) => {
                 b.put(b"RETRAIN ");
                 b.put(t.name().as_bytes());
@@ -229,7 +430,7 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
     } else {
         let n = match code {
             ResultCode::Ok => 0,
-            ResultCode::Connect(_) => 1,
+            ResultCode::Connect(_) | ResultCode::ConnectWifi => 1,
             ResultCode::Ring => 2,
             ResultCode::NoCarrier => 3,
             ResultCode::Error => 4,
@@ -278,10 +479,12 @@ impl SRegs {
     /// Register numbers present, for `AT&V`.
     pub const NUMBERS: [u8; 8] = [0, 2, 7, 12, 20, 21, 22, 30];
 
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let mut vals = [0u16; 8];
-        for (v, r) in vals.iter_mut().zip(REGS.iter()) {
-            *v = r.3 as u16;
+        let mut i = 0;
+        while i < vals.len() {
+            vals[i] = REGS[i].3 as u16;
+            i += 1;
         }
         SRegs { vals }
     }

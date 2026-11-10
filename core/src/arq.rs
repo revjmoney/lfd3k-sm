@@ -39,7 +39,7 @@ impl Default for ArqTx {
 }
 
 impl ArqTx {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         ArqTx {
             buf: [[0; CHUNK]; WINDOW],
             slots: [EMPTY_TX; WINDOW],
@@ -202,7 +202,7 @@ impl Default for ArqRx {
 }
 
 impl ArqRx {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         ArqRx {
             buf: [[0; CHUNK]; WINDOW],
             len: [0; WINDOW],

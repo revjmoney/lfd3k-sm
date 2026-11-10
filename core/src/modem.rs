@@ -9,12 +9,24 @@
 //! current tier and the last retrains. NO CARRIER ends a call as on a real
 //! modem, right after the received in-order data that fits in the host
 //! buffer (the call never leaves NO CARRIER pending).
+//!
+//! Wi-Fi calls (see `wire.rs`): ATDT to a forward or `host:port` prints
+//! `DIALING <target>`, raises a `WireReq` and waits S7 seconds for
+//! `wire_connected`, which prints `CONNECT WIFI TCP` and enters data mode;
+//! the escape, ATO and ATH work as on radio. A refused, failed or timed out
+//! dial, or the far end closing, prints NO CARRIER (after the received data,
+//! in data mode). An answered radio call with `AT+PUB` set is bridged to that
+//! forward: the host stays in command mode and sees only `BRIDGE <name>`
+//! (verbose) when the wire connects and NO CARRIER when the bridge ends.
+//! One call at a time: a radio caller during a Wi-Fi call gets BUSY.
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::frame::{valid_name, NAME_MAX};
-use crate::link::{Event, Link, State};
+use crate::link::{Event, Link, Role, State};
 use crate::radio::{Radio, RxInfo};
+use crate::settings::{parse_hostport, Forward, Settings, WireMode, MAX_FWD};
 use crate::tier::Tier;
+use crate::wire::{Call, Phase, Wire, WireReq};
 
 /// ATI line 1.
 pub const BANNER: &str = "LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM";
@@ -29,7 +41,10 @@ const GC1109_GAIN_DB: i32 = 12;
 const OUT_CAP: usize = 1024;
 /// Output space kept free of call data so result codes always fit.
 const OUT_RESERVE: usize = 96;
-const LINE_CAP: usize = 64;
+/// Longest command line: `AT+WSTA=` + 32 + `,` + 63 is 104 bytes.
+const LINE_CAP: usize = 128;
+/// Longest Wi-Fi status line kept for `AT+WIFI?`.
+pub const WIFI_STATUS_MAX: usize = 96;
 /// Longest crash note kept for ATI.
 pub const NOTE_MAX: usize = 64;
 const LIGHT_MS: u32 = 100;
@@ -43,11 +58,18 @@ pub struct Config {
 }
 
 impl Config {
+    /// No name: only for the constant `Modem::blank`, never for a live modem.
+    pub const BLANK: Config = Config {
+        name: [0; NAME_MAX],
+        name_len: 0,
+        sregs: SRegs::new(),
+    };
+
     /// Station name with default S registers. `None` unless the name is
     /// 1 to 16 printable ASCII characters (the same rule as a CallReq name),
     /// so a modem can never hold a name it could not dial or answer to.
     pub fn new(name: &str) -> Option<Config> {
-        if !valid_name(name) {
+        if !valid_name(name) || name.contains(':') {
             return None;
         }
         let mut c = Config {
@@ -68,6 +90,16 @@ fn put_tier(t: &mut Txt, tier: Tier) {
     t.put(tier.name().as_bytes())
         .put(b" ")
         .num(tier.air_bps(), 1);
+}
+
+/// `a.b.c.d`.
+fn put_ip(t: &mut Txt, ip: [u8; 4]) {
+    for (i, b) in ip.iter().enumerate() {
+        if i > 0 {
+            t.put(b".");
+        }
+        t.num(u32::from(*b), 1);
+    }
 }
 
 fn name_of(cfg: &Config) -> &str {
@@ -240,12 +272,59 @@ pub struct Modem {
     radio_diag: Option<(i8, u16)>,
     /// Metadata of the last frame handed to `radio_rx`.
     last_rx: Option<RxInfo>,
+    /// Hotspot, client network, forwards and publish setting. Its `sregs`,
+    /// `echo` and `verbose` mirror the live `cfg.sregs`, `echo` and
+    /// `verbose` (copied after every command line by `sync_set`).
+    set: Settings,
+    /// The profile `ATZ` restores: what was loaded or last saved.
+    saved: Settings,
+    /// `AT&W` was entered; the platform saves `settings()`.
+    save_req: bool,
+    /// Hotspot or client settings changed (AT+WAP, AT+WSTA, ATZ).
+    wifi_changed: bool,
+    /// Last line from `set_wifi_status`.
+    wifi: [u8; WIFI_STATUS_MAX],
+    wifi_len: usize,
+    /// Wi-Fi call state, wire request and close flags, the two wire rings
+    /// and the telnet filter.
+    wire: Wire,
+    /// Modem task stack headroom reported by the firmware, bytes.
+    stack_free: Option<u32>,
+    /// Lowest free heap since boot reported by the firmware, bytes.
+    heap_min: Option<u32>,
+    /// `AT+SIMNET`: the simulated radio's peer while it is on. Never saved.
+    simnet: Option<[u8; 4]>,
+    /// A switch the platform has not taken yet (see `take_simnet_request`).
+    simnet_req: Option<Option<[u8; 4]>>,
+    /// The platform could not open the SimNet UDP socket (AT&V `NET FAIL`).
+    simnet_fail: bool,
+}
+
+fn onoff(on: bool) -> &'static [u8] {
+    if on {
+        b"ON"
+    } else {
+        b"OFF"
+    }
 }
 
 impl Modem {
+    /// Builds a `Modem` by value (the host tests and the sim use this). It is
+    /// large (about 11 KB); the firmware does not call it: `lfd3k_init` starts
+    /// from the const `Modem::blank()` in a static slot and calls `reset`.
+    #[inline(never)]
     pub fn new(cfg: Config) -> Self {
+        let mut m = Self::blank();
+        m.reset(cfg);
+        m
+    }
+
+    /// A nameless modem in its initial state, as a constant: a static can
+    /// hold it, and `reset` then makes it a real one in place (the `Modem` is
+    /// over 11 KB, too big to build on a small task stack and move).
+    pub const fn blank() -> Self {
         Modem {
-            cfg,
+            cfg: Config::BLANK,
             link: Link::new(),
             mode: Mode::Command,
             out: OutRing {
@@ -270,6 +349,145 @@ impl Modem {
             note_len: 0,
             radio_diag: None,
             last_rx: None,
+            set: Settings::BLANK,
+            saved: Settings::BLANK,
+            save_req: false,
+            wifi_changed: false,
+            wifi: [0; WIFI_STATUS_MAX],
+            wifi_len: 0,
+            wire: Wire::new(),
+            stack_free: None,
+            heap_min: None,
+            simnet: None,
+            simnet_req: None,
+            simnet_fail: false,
+        }
+    }
+
+    /// Back to the state `Modem::new(cfg)` gives, assigning field by field in
+    /// place (the largest temporary is one field, never a whole `Modem`).
+    pub fn reset(&mut self, cfg: Config) {
+        // Until the platform calls `load_settings` there is no hotspot
+        // password and the hotspot is off.
+        self.set = Settings::defaults(name_of(&cfg), "");
+        self.set.ap_on = false;
+        self.saved.clone_from(&self.set);
+        self.cfg = cfg;
+        self.link = Link::new();
+        self.mode = Mode::Command;
+        self.out.head = 0;
+        self.out.len = 0;
+        self.line_len = 0;
+        self.line_over = false;
+        self.echo = true;
+        self.verbose = true;
+        self.esc = 0;
+        self.esc_last = 0;
+        self.esc_dead = false;
+        self.last_host = 0;
+        self.retrain_note = None;
+        self.retrains = [None; HISTORY];
+        self.closing = false;
+        self.fb_request = false;
+        self.note_len = 0;
+        self.radio_diag = None;
+        self.last_rx = None;
+        self.save_req = false;
+        self.wifi_changed = false;
+        self.wifi_len = 0;
+        self.wire.reset_all();
+        self.stack_free = None;
+        self.heap_min = None;
+        self.simnet = None;
+        self.simnet_req = None;
+        self.simnet_fail = false;
+    }
+
+    /// The platform's live Wi-Fi status line for `AT+WIFI?`
+    /// (`WIFI AP <ssid> <n> CLIENTS STA <ssid|OFF> <ip|NO IP>`). Up to
+    /// `WIFI_STATUS_MAX` bytes are kept; non-printable bytes become `?`.
+    pub fn set_wifi_status(&mut self, line: &str) {
+        self.wifi_len = 0;
+        for (d, c) in self.wifi.iter_mut().zip(line.bytes()) {
+            *d = if (0x20..0x7F).contains(&c) { c } else { b'?' };
+            self.wifi_len += 1;
+        }
+    }
+
+    /// Ask the platform to save `settings()` (as `AT&W` does). First boot
+    /// uses it after loading the defaults.
+    pub fn request_save(&mut self) {
+        self.save_req = true;
+    }
+
+    /// The firmware's modem task stack high-water mark (bytes still free),
+    /// shown by `AT&V` as `STACK FREE <n>`.
+    pub fn set_stack_free(&mut self, bytes: u32) {
+        self.stack_free = Some(bytes);
+    }
+
+    /// The firmware's lowest free heap since boot (bytes), shown by `AT&V`
+    /// as `HEAP MIN <n>`.
+    pub fn set_heap_min(&mut self, bytes: u32) {
+        self.heap_min = Some(bytes);
+    }
+
+    /// True once after `AT&W` was entered (clears the flag). The platform
+    /// then stores `settings()`.
+    pub fn take_save_request(&mut self) -> bool {
+        core::mem::take(&mut self.save_req)
+    }
+
+    /// True once after AT+WAP, AT+WSTA (any form that took effect) or ATZ
+    /// (clears the flag): the platform re-reads `settings()` and re-applies Wi-Fi.
+    pub fn take_wifi_changed(&mut self) -> bool {
+        core::mem::take(&mut self.wifi_changed)
+    }
+
+    /// The current settings, live S registers, E and V included.
+    pub fn settings(&self) -> &Settings {
+        &self.set
+    }
+
+    /// The saved profile (what `AT&W` last stored, what `ATZ` restores). This
+    /// is what the platform writes to flash, never the live settings.
+    pub fn saved_settings(&self) -> &Settings {
+        &self.saved
+    }
+
+    fn sync_set(&mut self) {
+        self.set.sregs = self.cfg.sregs;
+        self.set.echo = self.echo;
+        self.set.verbose = self.verbose;
+    }
+
+    /// Boot: make `s` (from `Settings::from_blob`) the current settings and
+    /// the profile `ATZ` restores. Registers, echo and verbose apply now.
+    pub fn load_settings(&mut self, s: Settings) {
+        self.cfg.sregs = s.sregs;
+        self.echo = s.echo;
+        self.verbose = s.verbose;
+        self.saved.clone_from(&s);
+        self.set = s;
+        self.wifi_changed = true;
+    }
+
+    /// True while the generated hotspot password may be shown on the OLED:
+    /// until a device joins the hotspot (`note_ap_client_joined`) or `AT&W`
+    /// saved with a client network set. Kept in the saved blob.
+    pub fn show_ap_pass(&self) -> bool {
+        self.set.show_ap_pass
+    }
+
+    /// The platform saw a device join the hotspot: stop showing the password.
+    /// Only the cleared flag is saved (the save is built from the saved
+    /// profile, so other unsaved settings stay unsaved), and a save is asked
+    /// for only when the saved flag was still 1.
+    pub fn note_ap_client_joined(&mut self) {
+        self.set.show_ap_pass = false;
+        if self.saved.show_ap_pass {
+            self.saved.show_ap_pass = false;
+            self.save_req = true;
         }
     }
 
@@ -295,6 +513,32 @@ impl Modem {
         core::mem::take(&mut self.fb_request)
     }
 
+    /// Taken once after `AT+SIMNET` switched radios: `Some(Some(ip))` use the
+    /// simulated radio with that peer, `Some(None)` back to the SX1262. Only
+    /// accepted while no call exists. The platform swaps the radio and then
+    /// calls `radio_changed`.
+    pub fn take_simnet_request(&mut self) -> Option<Option<[u8; 4]>> {
+        self.simnet_req.take()
+    }
+
+    /// The simulated radio's peer while `AT+SIMNET` has it on.
+    pub fn simnet(&self) -> Option<[u8; 4]> {
+        self.simnet
+    }
+
+    /// The platform's SimNet socket state: `true` when it could not be
+    /// opened (socket or bind failed). AT&V then shows `NET FAIL` after the
+    /// `RADIO SIMNET <ip>` line's address; the modem stays on SimNet and
+    /// `AT+SIMNET=0` (or `AT+SIMNET=<ip>` again, a retry) recovers.
+    pub fn set_simnet_net_fail(&mut self, fail: bool) {
+        self.simnet_fail = fail;
+    }
+
+    /// The radio was swapped: listen again on the next pump.
+    pub fn radio_changed(&mut self) {
+        self.link.radio_changed();
+    }
+
     /// Metadata of the last received frame, if any.
     pub fn last_rx(&self) -> Option<RxInfo> {
         self.last_rx
@@ -307,7 +551,14 @@ impl Modem {
 
     /// Call state for the status light panel: 0 idle, 1 dialing, 2 ringing,
     /// 3 training, 4 online (data mode), 5 command-online.
+    /// A Wi-Fi call shows as 1 while dialing and 4 or 5 once online; a
+    /// bridged radio call shows its radio state.
     pub fn call_state(&self) -> u8 {
+        match self.wire.call {
+            Call::Wire(Phase::Dialing { .. }) => return 1,
+            Call::Wire(_) => return if self.mode == Mode::Data { 4 } else { 5 },
+            _ => {}
+        }
         match self.link.state() {
             State::Idle => 0,
             State::Dialing | State::AwaitTrain => 1,
@@ -323,8 +574,137 @@ impl Modem {
         }
     }
 
+    /// A radio call or an online Wi-Fi call exists.
     pub fn is_connected(&self) -> bool {
-        self.link.is_connected()
+        self.link.is_connected() || self.wire_online()
+    }
+
+    fn wire_online(&self) -> bool {
+        matches!(
+            self.wire.call,
+            Call::Wire(Phase::Online | Phase::Ending { .. })
+        )
+    }
+
+    /// Wire state for the status field: 0 none, 1 dialing, 2 online,
+    /// 3 bridging (a radio call bridged to the published forward).
+    pub fn wire_state(&self) -> u8 {
+        match self.wire.call {
+            Call::None => 0,
+            Call::Wire(Phase::Dialing { .. }) => 1,
+            Call::Wire(_) => 2,
+            Call::Bridge(_) => 3,
+        }
+    }
+
+    /// A Wi-Fi call or a bridge is in progress (any phase).
+    pub fn wire_active(&self) -> bool {
+        self.wire.call != Call::None
+    }
+
+    /// The platform should open a TCP connection to this host and port
+    /// (taken once). Take `take_wire_close` first.
+    pub fn take_wire_request(&mut self) -> Option<WireReq> {
+        self.wire.req.take()
+    }
+
+    /// True once when the core wants the socket closed (ATH, ATZ, S7
+    /// timeout, the bridged radio call ended). Drain `wire_output` first.
+    pub fn take_wire_close(&mut self) -> bool {
+        core::mem::take(&mut self.wire.close)
+    }
+
+    /// The requested connection is up.
+    pub fn wire_connected(&mut self, now_ms: u32) {
+        match self.wire.call {
+            Call::Wire(Phase::Dialing { .. }) => {
+                self.wire.call = Call::Wire(Phase::Online);
+                self.fresh_call();
+                self.mode = Mode::Data;
+                self.esc = 0;
+                self.esc_dead = false;
+                self.last_host = now_ms;
+                self.result(ResultCode::ConnectWifi);
+            }
+            Call::Bridge(Phase::Dialing { .. }) => {
+                self.wire.call = Call::Bridge(Phase::Online);
+                if self.verbose {
+                    let mut t = Txt::new();
+                    t.put(b"BRIDGE ").put(self.wire.name());
+                    self.info(t.bytes());
+                }
+            }
+            // Nothing asked for this connection (any more): close it.
+            Call::None => self.wire.close = true,
+            // A repeated report for a live connection: nothing to do.
+            _ => {}
+        }
+        self.wire_pump(now_ms);
+    }
+
+    /// The connection could not be made (refused, DNS failure, platform
+    /// timeout) or broke.
+    pub fn wire_failed(&mut self, now_ms: u32) {
+        self.wire_gone(now_ms);
+    }
+
+    /// The far end closed or reset the connection.
+    pub fn wire_closed(&mut self, now_ms: u32) {
+        self.wire_gone(now_ms);
+    }
+
+    fn wire_gone(&mut self, now: u32) {
+        match self.wire.call {
+            Call::Wire(Phase::Dialing { .. }) => {
+                self.end_wire(true);
+                self.mode = Mode::Command;
+                self.result(ResultCode::NoCarrier);
+            }
+            Call::Wire(Phase::Online) => {
+                self.wire.call = Call::Wire(Phase::Ending { since: now });
+            }
+            Call::Bridge(Phase::Dialing { .. }) => self.end_bridge(true, now),
+            Call::Bridge(Phase::Online) => {
+                self.wire.call = Call::Bridge(Phase::Ending { since: now });
+            }
+            _ => {}
+        }
+        self.wire_pump(now);
+    }
+
+    /// Bytes received from the socket. Returns the bytes taken; offer the
+    /// rest again later. Bytes for no call are taken and dropped.
+    pub fn wire_input(&mut self, bytes: &[u8], now_ms: u32) -> usize {
+        match self.wire.call {
+            Call::Wire(Phase::Online) | Call::Bridge(Phase::Online) => {}
+            Call::Wire(Phase::Dialing { .. }) | Call::Bridge(Phase::Dialing { .. }) => return 0,
+            _ => return bytes.len(),
+        }
+        let mut used = 0;
+        for &b in bytes {
+            if self.wire.rx.free() == 0 || !self.wire.tn.can_take() {
+                break;
+            }
+            if let Some(d) = self.wire.tn.input(b) {
+                self.wire.rx.push(&[d]);
+            }
+            used += 1;
+        }
+        if used > 0 {
+            self.wire.last_rx = Some(now_ms);
+        }
+        self.wire_pump(now_ms);
+        used
+    }
+
+    /// Bytes for the socket (telnet replies first). Returns bytes written.
+    pub fn wire_output(&mut self, out: &mut [u8]) -> usize {
+        match self.wire.call {
+            Call::Wire(Phase::Online) | Call::Bridge(Phase::Online) | Call::None => {
+                self.wire.output(out)
+            }
+            _ => 0,
+        }
     }
 
     /// True while host bytes are call data (online, not escaped by `+++`).
@@ -358,6 +738,9 @@ impl Modem {
 
     pub fn radio_rx<R: Radio>(&mut self, frame: &[u8], info: RxInfo, radio: &mut R, now_ms: u32) {
         self.last_rx = Some(info);
+        // A radio caller during a Wi-Fi call gets BUSY.
+        self.link
+            .set_engaged(matches!(self.wire.call, Call::Wire(_)));
         self.link
             .on_frame(frame, info, name_of(&self.cfg), &self.cfg.sregs, now_ms);
         self.after(radio, now_ms);
@@ -376,7 +759,7 @@ impl Modem {
             return;
         }
         if self.esc_dead {
-            self.flush_esc();
+            self.flush_esc(now_ms);
         } else if now_ms.wrapping_sub(self.esc_last) >= self.guard() {
             if self.esc == 3 {
                 self.esc = 0;
@@ -387,7 +770,7 @@ impl Modem {
                     self.result(ResultCode::Retrain(t));
                 }
             } else {
-                self.flush_esc();
+                self.flush_esc(now_ms);
             }
         }
     }
@@ -404,6 +787,21 @@ impl Modem {
 
     pub fn lights(&self, now_ms: u32) -> Lights {
         let recent = |t: Option<u32>| t.is_some_and(|t| now_ms.wrapping_sub(t) < LIGHT_MS);
+        if let Call::Wire(ph) = self.wire.call {
+            // Wi-Fi call: OH and CD as on radio, SD and RD on wire
+            // traffic, no radio tier (HS and EC off).
+            let up = !matches!(ph, Phase::Dialing { .. });
+            return Lights {
+                oh: true,
+                cd: up,
+                sd: up && recent(self.wire.last_tx),
+                rd: up && recent(self.wire.last_rx),
+                hs: false,
+                ec: false,
+                aa: self.cfg.sregs.get(0).unwrap_or(0) > 0,
+                tier: None,
+            };
+        }
         let cd = self.link.is_connected();
         let tier = if cd { self.link.tier() } else { None };
         Lights {
@@ -427,20 +825,18 @@ impl Modem {
     }
 
     /// Push held escape characters as data. True when none are left.
-    fn flush_esc(&mut self) -> bool {
-        let done = self.flush_held();
+    fn flush_esc(&mut self, now: u32) -> bool {
+        let done = self.flush_held(now);
         if done {
             self.esc_dead = false;
         }
         done
     }
 
-    fn flush_held(&mut self) -> bool {
+    fn flush_held(&mut self, now: u32) -> bool {
         let c = self.esc_char();
         let held = [c; 3];
-        let n = self
-            .link
-            .push_data(held.get(..self.esc as usize).unwrap_or(&[]));
+        let n = self.call_push(held.get(..self.esc as usize).unwrap_or(&[]), now);
         self.esc = self.esc.saturating_sub(n.min(3) as u8);
         self.esc == 0
     }
@@ -469,7 +865,7 @@ impl Modem {
                     || now.wrapping_sub(self.esc_last) >= guard)
             {
                 self.esc_dead = true;
-                if !self.flush_esc() {
+                if !self.flush_esc(now) {
                     break;
                 }
             }
@@ -477,7 +873,7 @@ impl Modem {
             if b == c && (start || self.esc > 0) {
                 self.esc += 1;
                 self.esc_last = now;
-            } else if self.link.push_data(&[b]) == 0 {
+            } else if self.call_push(&[b], now) == 0 {
                 break;
             }
             used += 1;
@@ -523,6 +919,7 @@ impl Modem {
             Some(Ok(cmd)) if !self.line_over => self.exec(cmd, radio, now),
             _ => self.result(ResultCode::Error),
         }
+        self.sync_set();
     }
 
     fn exec<R: Radio>(&mut self, cmd: AtCmd<'_>, radio: &mut R, now: u32) {
@@ -531,7 +928,34 @@ impl Modem {
             AtCmd::Attention => self.result(ResultCode::Ok),
             AtCmd::Dial(name) => {
                 self.fresh_call();
-                if self.mode != Mode::Command || !self.link.dial(name_of(&self.cfg), name, now) {
+                let fwd = self.set.forward(name).copied();
+                let hp = if fwd.is_none() {
+                    parse_hostport(name)
+                } else {
+                    None
+                };
+                if self.mode == Mode::Command && (fwd.is_some() || hp.is_some()) {
+                    // Wi-Fi dial: one call at a time.
+                    // A close still pending: the old socket is not released yet.
+                    let free = self.link.is_idle() && !self.wire_active() && !self.wire.close;
+                    let ok = free
+                        && match (&fwd, hp) {
+                            (Some(f), _) => self.start_wire(f.host(), f.port(), f.mode(), b"", now),
+                            (None, Some((h, p))) => {
+                                self.start_wire(h, p, WireMode::default_for(p), b"", now)
+                            }
+                            _ => false,
+                        };
+                    if !ok {
+                        self.result(ResultCode::Error);
+                    } else if self.verbose {
+                        self.info(Txt::new().put(b"DIALING ").put(name.as_bytes()).bytes());
+                    }
+                } else if self.mode != Mode::Command
+                    || name.contains(':')
+                    || self.wire_active()
+                    || !self.link.dial(name_of(&self.cfg), name, now)
+                {
                     self.result(ResultCode::Error);
                 } else if self.verbose {
                     self.info(Txt::new().put(b"DIALING ").put(name.as_bytes()).bytes());
@@ -540,7 +964,7 @@ impl Modem {
             AtCmd::Answer => {
                 // Already in a call (online command mode): nothing to
                 // answer, and the call stays up.
-                if self.mode != Mode::Command || self.link.is_connected() {
+                if self.mode != Mode::Command || self.link.is_connected() || self.wire_active() {
                     self.result(ResultCode::Error);
                     return;
                 }
@@ -550,15 +974,31 @@ impl Modem {
                 }
             }
             AtCmd::Hangup => {
-                if self.link.hangup(now) {
+                if self.wire_active() {
+                    // Like a radio call: NO CARRIER, also while dialing.
+                    self.link.hangup(now);
+                    self.end_wire(false);
+                    self.mode = Mode::Command;
+                    self.result(ResultCode::NoCarrier);
+                } else if self.link.hangup(now) {
                     self.mode = Mode::Command;
                     self.result(ResultCode::NoCarrier);
                 } else {
                     self.result(ResultCode::Ok);
                 }
             }
-            AtCmd::Online => match self.link.tier() {
-                Some(t) if self.link.is_connected() => {
+            AtCmd::Online => match (self.wire.call, self.link.tier()) {
+                (Call::Wire(Phase::Online), _) => {
+                    self.mode = Mode::Data;
+                    self.esc = 0;
+                    self.esc_dead = false;
+                    self.last_host = now;
+                    self.result(ResultCode::ConnectWifi);
+                }
+                // A bridge keeps the host out of the call; a Wi-Fi dial
+                // still in progress has nothing to return to.
+                (Call::Wire(_) | Call::Bridge(_), _) => self.result(ResultCode::Error),
+                (Call::None, Some(t)) if self.link.is_connected() => {
                     self.mode = Mode::Data;
                     self.esc = 0;
                     self.esc_dead = false;
@@ -634,7 +1074,15 @@ impl Modem {
                     .int(i32::from(dbm) + GC1109_GAIN_DB)
                     .put(b" dBm out");
                 self.info(t.bytes());
-                if let Some((code, errs)) = self.radio_diag {
+                if let Some(ip) = self.simnet {
+                    let mut t = Txt::new();
+                    t.put(b"RADIO SIMNET ");
+                    put_ip(&mut t, ip);
+                    if self.simnet_fail {
+                        t.put(b" NET FAIL");
+                    }
+                    self.info(t.bytes());
+                } else if let Some((code, errs)) = self.radio_diag {
                     let mut t = Txt::new();
                     if code == 0 {
                         t.put(b"RADIO OK");
@@ -642,6 +1090,39 @@ impl Modem {
                         t.put(b"RADIO FAIL ").int(i32::from(code));
                         t.put(b" ERR 0x").hex16(errs);
                     }
+                    self.info(t.bytes());
+                }
+                let mut t = Txt::new();
+                t.put(b"WIFI AP ").put(onoff(self.set.ap_on));
+                t.put(b" ").put(self.set.ap_ssid().as_bytes());
+                t.put(b"  STA ");
+                match self.set.sta_ssid() {
+                    "" => t.put(b"OFF"),
+                    ssid => t.put(ssid.as_bytes()),
+                };
+                self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"PWSHOW ")
+                    .put(if self.set.show_ap_pass { b"1" } else { b"0" });
+                self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"PUB ");
+                match self.set.published() {
+                    Some(f) => t.put(f.name().as_bytes()),
+                    None => t.put(b"NONE"),
+                };
+                self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"FWD ").num(self.set.fwd_count() as u32, 1);
+                self.info(t.bytes());
+                if let Some(n) = self.stack_free {
+                    let mut t = Txt::new();
+                    t.put(b"STACK FREE ").num(n, 1);
+                    self.info(t.bytes());
+                }
+                if let Some(n) = self.heap_min {
+                    let mut t = Txt::new();
+                    t.put(b"HEAP MIN ").num(n, 1);
                     self.info(t.bytes());
                 }
                 let mut t = Txt::new();
@@ -668,13 +1149,169 @@ impl Modem {
             AtCmd::Reset => {
                 self.fresh_call();
                 self.link.hangup(now);
+                if self.wire_active() {
+                    self.end_wire(false);
+                }
                 self.mode = Mode::Command;
-                self.cfg.sregs = SRegs::new();
-                self.echo = true;
-                self.verbose = true;
+                // Back to the saved profile (power-on defaults if none was
+                // loaded). A password that was hidden stays hidden.
+                self.cfg.sregs = self.saved.sregs;
+                self.echo = self.saved.echo;
+                self.verbose = self.saved.verbose;
+                let shown = self.set.show_ap_pass && self.saved.show_ap_pass;
+                self.set.clone_from(&self.saved);
+                self.set.show_ap_pass = shown;
+                self.wifi_changed = true;
                 self.result(ResultCode::Ok);
             }
+            AtCmd::Save => {
+                if !self.set.sta_ssid().is_empty() {
+                    self.set.show_ap_pass = false;
+                }
+                self.saved.clone_from(&self.set);
+                self.saved.sregs = self.cfg.sregs;
+                self.saved.echo = self.echo;
+                self.saved.verbose = self.verbose;
+                self.save_req = true;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WapQuery => {
+                let mut t = Txt::new();
+                t.put(b"WAP ").put(onoff(self.set.ap_on));
+                t.put(b" ").put(self.set.ap_ssid().as_bytes());
+                t.put(b" ").put(self.set.ap_pass().as_bytes());
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WapPower(on) => {
+                self.set.ap_on = on;
+                self.wifi_changed = true;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WapSet { ssid, pass } => {
+                let ok = self.set.set_ap(ssid, pass);
+                if ok {
+                    // A password the user chose is not shown: only the
+                    // generated first-boot one is.
+                    self.set.show_ap_pass = false;
+                }
+                self.wifi_changed |= ok;
+                self.ok_or_error(ok);
+            }
+            AtCmd::WstaQuery => {
+                let mut t = Txt::new();
+                match self.set.sta_ssid() {
+                    "" => t.put(b"WSTA OFF"),
+                    ssid => t.put(b"WSTA ").put(ssid.as_bytes()).put(b" ********"),
+                };
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WstaForget => {
+                self.set.clear_sta();
+                self.wifi_changed = true;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::WstaSet { ssid, pass } => {
+                let ok = self.set.set_sta(ssid, pass);
+                self.wifi_changed |= ok;
+                self.ok_or_error(ok);
+            }
+            AtCmd::WifiQuery => {
+                if self.wifi_len == 0 {
+                    self.info(b"WIFI OFF");
+                } else {
+                    let mut t = Txt::new();
+                    t.put(self.wifi.get(..self.wifi_len).unwrap_or(&[]));
+                    self.info(t.bytes());
+                }
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::FwdList => {
+                for i in 0..MAX_FWD {
+                    let mut t = Txt::new();
+                    if let Some(Some(f)) = self.set.fwd.get(i) {
+                        t.put(b"FWD ").put(f.name().as_bytes()).put(b" ");
+                        t.put(f.host().as_bytes()).put(b":");
+                        t.num(u32::from(f.port()), 1);
+                        t.put(if f.mode() == WireMode::Telnet {
+                            b" T"
+                        } else {
+                            b" R"
+                        });
+                    }
+                    if t.n > 0 {
+                        self.info(t.bytes());
+                    }
+                }
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::FwdDelete(name) => {
+                let ok = self.set.remove_forward(name);
+                self.ok_or_error(ok);
+            }
+            AtCmd::FwdSet {
+                name,
+                host,
+                port,
+                mode,
+            } => {
+                let ok =
+                    Forward::new(name, host, port, mode).is_some_and(|f| self.set.set_forward(f));
+                self.ok_or_error(ok);
+            }
+            AtCmd::PubQuery => {
+                let mut t = Txt::new();
+                t.put(b"PUB ");
+                match self.set.published() {
+                    Some(f) => t.put(f.name().as_bytes()),
+                    None => t.put(b"NONE"),
+                };
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::PubNone => {
+                self.set.publish = None;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::Pub(name) => {
+                let ok = self.set.set_publish(name);
+                self.ok_or_error(ok);
+            }
+            AtCmd::SimNetQuery => {
+                let mut t = Txt::new();
+                t.put(b"SIMNET ");
+                match self.simnet {
+                    Some(ip) => put_ip(&mut t, ip),
+                    None => {
+                        t.put(b"OFF");
+                    }
+                }
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::SimNet(ip) => {
+                // Only with no call at all: the radio is swapped under the link.
+                let idle = self.mode == Mode::Command
+                    && self.link.is_idle()
+                    && !self.wire_active()
+                    && !self.wire.close;
+                if idle {
+                    self.simnet = ip;
+                    self.simnet_req = Some(ip);
+                    self.simnet_fail = false;
+                }
+                self.ok_or_error(idle);
+            }
         }
+    }
+
+    fn ok_or_error(&mut self, ok: bool) {
+        self.result(if ok {
+            ResultCode::Ok
+        } else {
+            ResultCode::Error
+        });
     }
 
     fn result(&mut self, code: ResultCode) {
@@ -713,13 +1350,30 @@ impl Modem {
                         self.info(t.bytes());
                     }
                 }
+                // The link connects once per call; never restart a bridge.
+                Event::Connect(_) if matches!(self.wire.call, Call::Bridge(_)) => {}
                 Event::Connect(t) => {
                     self.fresh_call();
-                    self.mode = Mode::Data;
-                    self.esc = 0;
-                    self.esc_dead = false;
-                    self.last_host = now;
-                    self.result(ResultCode::Connect(t));
+                    // Access policy: an answered call goes to the published
+                    // forward only, never anywhere else.
+                    let publ = if self.link.role() == Role::Answerer && !self.wire_active() {
+                        self.set.published().copied()
+                    } else {
+                        None
+                    };
+                    let bridged = match publ {
+                        Some(f) => {
+                            self.start_wire(f.host(), f.port(), f.mode(), f.name().as_bytes(), now)
+                        }
+                        None => false,
+                    };
+                    if !bridged {
+                        self.mode = Mode::Data;
+                        self.esc = 0;
+                        self.esc_dead = false;
+                        self.last_host = now;
+                        self.result(ResultCode::Connect(t));
+                    }
                 }
                 Event::Retrain(t) => {
                     self.retrains.rotate_left(1);
@@ -731,6 +1385,13 @@ impl Modem {
                     } else {
                         self.result(ResultCode::Retrain(t));
                     }
+                }
+                Event::NoCarrier if matches!(self.wire.call, Call::Bridge(_)) => {
+                    // The radio caller is gone: close the wire.
+                    self.end_wire(false);
+                    self.mode = Mode::Command;
+                    self.retrain_note = None;
+                    self.result(ResultCode::NoCarrier);
                 }
                 Event::NoCarrier => {
                     // Deliver what fits, then NO CARRIER at once (the
@@ -744,10 +1405,197 @@ impl Modem {
                 Event::NoAnswer => self.result(ResultCode::NoAnswer),
             }
         }
-        if self.mode == Mode::Data {
+        if self.mode == Mode::Data && self.wire.call == Call::None {
             self.drain();
         }
+        self.wire_pump(now);
         self.link.pump(radio, now);
+    }
+
+    /// Host data in data mode: into the Wi-Fi call or the radio link.
+    /// Returns bytes taken.
+    fn call_push(&mut self, data: &[u8], now: u32) -> usize {
+        match self.wire.call {
+            Call::Wire(Phase::Online) => {
+                let n = self.wire.tx.push(data);
+                if n > 0 {
+                    self.wire.last_tx = Some(now);
+                }
+                n
+            }
+            // The far end has closed: what the host still types is dropped.
+            Call::Wire(_) => data.len(),
+            _ => self.link.push_data(data),
+        }
+    }
+
+    /// Start a Wi-Fi call (`name` empty) or a bridge to forward `name`.
+    fn start_wire(&mut self, host: &str, port: u16, mode: WireMode, name: &[u8], now: u32) -> bool {
+        let Some(req) = WireReq::new(host, port) else {
+            return false;
+        };
+        let w = &mut self.wire;
+        w.req = Some(req);
+        w.rx.clear();
+        w.tx.clear();
+        w.pend = None;
+        w.tn.reset(mode);
+        w.last_tx = None;
+        w.last_rx = None;
+        w.cr_flush = false;
+        w.name_len = 0;
+        for (d, &c) in w.name.iter_mut().zip(name.iter()) {
+            *d = c;
+            w.name_len += 1;
+        }
+        let ph = Phase::Dialing { since: now };
+        w.call = if name.is_empty() {
+            Call::Wire(ph)
+        } else {
+            Call::Bridge(ph)
+        };
+        true
+    }
+
+    /// Forget the wire call. `gone`: the platform reported the socket
+    /// failed or closed. Otherwise a close is asked for whenever a socket
+    /// may exist (request taken while dialing, or online).
+    fn end_wire(&mut self, gone: bool) {
+        let taken = self.wire.req.take().is_none();
+        let open = !gone
+            && match self.wire.call {
+                Call::Wire(Phase::Dialing { .. }) | Call::Bridge(Phase::Dialing { .. }) => taken,
+                Call::Wire(Phase::Online) | Call::Bridge(Phase::Online) => true,
+                _ => false,
+            };
+        self.wire.close |= open;
+        self.wire.call = Call::None;
+        self.wire.rx.clear();
+        if !open {
+            // No socket to drain into.
+            self.wire.tx.clear();
+            self.wire.pend = None;
+        }
+    }
+
+    /// End a bridge: hang up the radio call (the caller sees NO CARRIER
+    /// through the link's Hangup) and tell the host.
+    fn end_bridge(&mut self, gone: bool, now: u32) {
+        self.link.hangup(now);
+        self.end_wire(gone);
+        self.mode = Mode::Command;
+        self.retrain_note = None;
+        self.result(ResultCode::NoCarrier);
+    }
+
+    fn s7_ms(&self) -> u32 {
+        u32::from(self.cfg.sregs.get(7).unwrap_or(30)).saturating_mul(1000)
+    }
+
+    /// Move wire data along and run the wire timers (S7 for a dial or a
+    /// bridge waiting for its connection, and for the drain after a close).
+    fn wire_pump(&mut self, now: u32) {
+        let s7 = self.s7_ms();
+        match self.wire.call {
+            Call::None => {}
+            Call::Wire(Phase::Dialing { since }) => {
+                if now.wrapping_sub(since) >= s7 {
+                    self.end_wire(false);
+                    self.mode = Mode::Command;
+                    self.result(ResultCode::NoCarrier);
+                }
+            }
+            Call::Wire(Phase::Online) => {
+                if self.mode == Mode::Data {
+                    self.drain_wire();
+                }
+                self.wire.cr_timer(now);
+            }
+            Call::Wire(Phase::Ending { since }) => {
+                // In data mode everything the far end sent is shown first;
+                // in online command mode only what fits, as on radio.
+                self.drain_wire();
+                if self.mode != Mode::Data
+                    || self.wire.rx.is_empty()
+                    || now.wrapping_sub(since) >= s7
+                {
+                    self.end_wire(true);
+                    self.mode = Mode::Command;
+                    self.result(ResultCode::NoCarrier);
+                }
+            }
+            Call::Bridge(Phase::Dialing { since }) => {
+                self.link_to_wire(now);
+                if now.wrapping_sub(since) >= s7 {
+                    self.end_bridge(false, now);
+                }
+            }
+            Call::Bridge(Phase::Online) => {
+                self.link_to_wire(now);
+                self.wire_to_link();
+                self.wire.cr_timer(now);
+            }
+            Call::Bridge(Phase::Ending { since }) => {
+                // Hand the caller what the far end sent before it closed.
+                self.wire_to_link();
+                let done = self.wire.rx.is_empty() && self.link.tx_idle();
+                if done || !self.link.is_connected() || now.wrapping_sub(since) >= s7 {
+                    self.end_bridge(true, now);
+                }
+            }
+        }
+    }
+
+    /// Wire bytes to the host, keeping OUT_RESERVE free.
+    fn drain_wire(&mut self) {
+        let mut tmp = [0u8; 256];
+        loop {
+            let room = self.out.free().saturating_sub(OUT_RESERVE).min(tmp.len());
+            let n = if room == 0 {
+                0
+            } else {
+                self.wire.rx.pop(tmp.get_mut(..room).unwrap_or(&mut []))
+            };
+            if n == 0 {
+                break;
+            }
+            self.out.push(tmp.get(..n).unwrap_or(&[]));
+        }
+    }
+
+    /// Bridge: radio caller's bytes into the wire ring, as far as it has
+    /// room (the rest waits in the link, whose window then holds the caller).
+    fn link_to_wire(&mut self, now: u32) {
+        let mut tmp = [0u8; 256];
+        loop {
+            let room = self.wire.tx.free().min(tmp.len());
+            let n = if room == 0 {
+                0
+            } else {
+                self.link.read_data(tmp.get_mut(..room).unwrap_or(&mut []))
+            };
+            if n == 0 {
+                break;
+            }
+            self.wire.tx.push(tmp.get(..n).unwrap_or(&[]));
+            self.wire.last_tx = Some(now);
+        }
+    }
+
+    /// Bridge: wire bytes into the radio link, as many as it takes.
+    fn wire_to_link(&mut self) {
+        let mut tmp = [0u8; 256];
+        loop {
+            let n = self.wire.rx.peek(&mut tmp);
+            if n == 0 {
+                break;
+            }
+            let k = self.link.push_data(tmp.get(..n).unwrap_or(&[]));
+            self.wire.rx.skip(k);
+            if k < n {
+                break;
+            }
+        }
     }
 
     /// Move received call data to the host, keeping OUT_RESERVE free. When

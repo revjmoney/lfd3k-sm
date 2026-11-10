@@ -216,6 +216,9 @@ pub struct Link {
     ev: [Event; EVLEN],
     ev_head: usize,
     ev_len: usize,
+    /// The modem is busy with a Wi-Fi call: an incoming CallReq is
+    /// rejected (the caller sees BUSY) even while the link is idle.
+    engaged: bool,
 }
 
 impl Default for Link {
@@ -225,7 +228,7 @@ impl Default for Link {
 }
 
 impl Link {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Link {
             state: State::Idle,
             role: Role::Caller,
@@ -281,7 +284,23 @@ impl Link {
             ev: [Event::Ring; EVLEN],
             ev_head: 0,
             ev_len: 0,
+            engaged: false,
         }
+    }
+
+    /// While true, an idle link answers every CallReq with CallReject.
+    pub fn set_engaged(&mut self, on: bool) {
+        self.engaged = on;
+    }
+
+    /// Who started the current (or last) call.
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// True when no sent data waits for an acknowledgement.
+    pub fn tx_idle(&self) -> bool {
+        self.tx.idle()
     }
 
     pub fn state(&self) -> State {
@@ -291,6 +310,13 @@ impl Link {
     /// Connected or resyncing: the call exists.
     pub fn is_connected(&self) -> bool {
         matches!(self.state, State::Connected | State::Resync)
+    }
+
+    /// The radio under the link was swapped (or put to standby and back):
+    /// the next pump calls `listen` again whatever it last asked for.
+    pub fn radio_changed(&mut self) {
+        self.need_listen = true;
+        self.listening = None;
     }
 
     pub fn is_idle(&self) -> bool {
