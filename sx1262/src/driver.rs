@@ -180,6 +180,9 @@ impl<B: Bus> Sx1262<B> {
         // Errata 15.2: better resistance to antenna mismatch.
         let clamp = self.read_register(cmd::REG_TX_CLAMP)?;
         self.write(&cmd::write_register(cmd::REG_TX_CLAMP, clamp | 0x1E))?;
+        // Boosted receive gain: a few dB more sensitivity for a little more current.
+        // Written after Calibrate (which would not touch it) and kept until reset.
+        self.write(&cmd::write_register(cmd::REG_RX_GAIN, cmd::RX_GAIN_BOOSTED))?;
         self.write(&cmd::clear_irq_status(cmd::IRQ_ALL))?;
 
         let status = self.get_status()?;

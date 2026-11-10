@@ -63,6 +63,9 @@ pub const REG_SYNC_WORD_LSB: u16 = 0x0741;
 pub const REG_SENSITIVITY: u16 = 0x0889; // errata 15.1
 pub const REG_TX_CLAMP: u16 = 0x08D8; // errata 15.2
 pub const REG_OCP: u16 = 0x08E7;
+pub const REG_RX_GAIN: u16 = 0x08AC;
+/// RxGain: 0x94 power saving (reset value), 0x96 boosted (best sensitivity).
+pub const RX_GAIN_BOOSTED: u8 = 0x96;
 
 // Parameter values.
 pub const STDBY_RC: u8 = 0x00;
