@@ -207,3 +207,21 @@ The bench terminal only opens the port once it has checked the USB identity. It 
 - ATDT TEST: DIALING, RINGING, NO ANSWER after the 30 s S7 timeout; RADIO OK afterwards.
 - Log: docs/phase2-bench/bench-2026-11-10b.log, screenshot oled-idle-b.png.
 - Safe mode itself is not exercised on hardware (it needs two quick panics); its logic is in hal_radio.c boot_check().
+
+## SDR radio test, 2026-11-10 (NESDR SMArt v5, serial 54066557, SDRangel 8.0.0)
+
+Setup: RTL-SDR 2.048 MS/s, decimation 2 (1.024 MS/s), gain 10 dB, about a few feet from the V4. Waterfall reads from SDRangel's MCP server.
+
+- On air: every `ATDT TEST` makes bursts at 918.5 MHz, one per `RINGING`, each about 0.3 s long (matches the SF12 CallReq airtime). Screenshot `docs/phase2-bench/sdr-waterfall-bursts.png`.
+- Frequency and bandwidth: with the SDR centred on 918.5 MHz the bursts span about 918.245 to 918.755 MHz (2 kHz bins), so about 510 kHz wide and centred on 918.50 MHz with no offset visible at 2 kHz resolution. Screenshot `docs/phase2-bench/sdr-waterfall-918500.png`.
+- Power steps (`ATS30`, peak level at the SDR, same bins and gain):
+
+  | S30 (chip dBm) | SDR peak | Step |
+  |---|---|---|
+  | -9 | -55.1 dB | |
+  | 2 | -43.3 dB | +11.8 dB for +11 |
+  | 10 | -32.8 dB | +10.5 dB for +8 |
+
+  The power setting works and tracks within about 2 dB per step (the SDR is not a calibrated meter). S30 put back to 2 after the test.
+- LoRa decode: SDRangel's ChirpChat decoder (SF12, BW 500 kHz, CR 4/5, explicit header, CRC, DE 0) did not lock on the preamble. Its own readme says it only decodes reliably with distance enhancement on (DE 2), which our BW500 tiers do not use, so this is a decoder limit, not proof of a bad frame. A frame level check needs a second SX1262 (second V4, or the V3 as a plain receiver).
+- SDRangel restored afterwards: test channel removed, RTL-SDR back to 144.36 MHz, 1.024 MS/s, decimation 8, gain 49.6 dB (the APRS setup).
