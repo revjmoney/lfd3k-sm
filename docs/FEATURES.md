@@ -28,6 +28,7 @@
 | Phase 3 task 2, wire call path: ATDT to a forward or host:port opens a TCP stream through the platform (`take_wire_request`, `wire_connected`, `wire_failed`, `wire_closed`, `wire_input`, `wire_output`, `take_wire_close`), prints DIALING, then CONNECT WIFI TCP, data mode with escape, ATO and ATH as on radio, NO CARRIER on refuse, close or S7 timeout; answered radio calls bridged to the AT+PUB forward (BRIDGE <name> on the host); telnet client filter for T mode (answers the AXIS negotiation, strips commands, doubles 0xFF, CR NUL without BINARY); two 2 KB wire rings with back pressure both ways; BUSY to radio callers during a Wi-Fi call; `wire_state()`; FakeWire server in the simulator | done | 2026-11-10 |
 | Phase 3 task 4, firmware Wi-Fi, NVS and TCP: settings blob saved in NVS (namespace lfd3k, key settings; first boot generates a 12 character hotspot password with the hardware RNG and saves it; a save asked during a call waits until the call ends); WPA2 hotspot on channel 6 (max 4 clients, only when on) and client mode with 1, 2, 4 up to 30 s retry backoff, driver storage in RAM so the client password is never kept by the Wi-Fi driver; live `WIFI AP .. CLIENTS .. STA ..` status line once a second; one TCP client task (DNS, 15 s non-blocking connect, NODELAY, 2 KB stream buffers each way) joined to the wire call path with a socket generation counter; STACK FREE reported once a second | done (flashed, build 549746d on the V4 since 2026-11-10) | 2026-11-10 |
 | Phase 3 task 4c, SimNet test mode (call the V4 from the PC over Wi-Fi with a simulated radio): `AT+SIMNET=<pc ip>` puts the SX1262 in standby and runs the radio over UDP port 4210 (`SimNetRadio` in core/src/simnet.rs, datagram `'L' 'S' 1 tier snr_x4 rssi` plus the frame, sender busy for the frame's airtime, receiver holds each frame for its airtime), `AT+SIMNET=0` back to the SX1262, never saved (every boot is on the real radio), AT&V `RADIO SIMNET <ip>`, OLED shows `SI` in place of `HS`; firmware UDP task (udp_link.c); PC far modem `cargo run -p lfd3k-sim --bin lfd3k-pcmodem` (real core, line mode terminal, `--snr`, `--profile dip`, `--fwd`, real TCP for Wi-Fi calls and bridges, `--script` mode). See docs/simnet.md | done (flashed, build 549746d on the V4 since 2026-11-10) | 2026-11-10 |
+| Phase 4 task 1, discovery: Beacon (12), ScanReq (13) and ScanResp (14) frames on SF12 with call id 0; beacons every 300 s plus 0 to 60 s (about 0.4 s on air, never during a call, first one a full interval after start and again after each call); AT+SCAN (one ScanReq, 4 s of answers, `SCAN <name> SNR <x.x> dB <tier>` lines, OK); scan answers in one of 11 slots of 250 ms with listen before talk; at most one discovery frame per 10 s; a 32 entry directory (heard stations and pinned names, oldest unpinned replaced when full, never our own name) with AT+DIR and a 1 KB blob (magic LFD1) for the platform; privacy modes AT+BEACON=ON, QUIET, HIDDEN (HIDDEN drops callers not in the directory without a sound); settings blob v2 (900 bytes, beacon mode) loads v1 blobs too | done (core only; NVS and the OLED come in task 4) | 2026-11-10 |
 | Phase 3 task 5, Wi-Fi on the front panel: idle name row rotates every 3 s between the board name, `AP <ssid>`, `PW <pass>` (only while `PWSHOW 1`) and `IP <a.b.c.d>` (only with a client address); wire call screens `WIFI TCP` and `BRIDGE`; AT&V `PWSHOW <0|1>`; bench terminal redacts passwords and takes safe screenshots; docs/phase3-bench.md | done (flashed, build 549746d on the V4 since 2026-11-10) | 2026-11-10 |
 
 ## Settings
@@ -47,6 +48,7 @@
 | Client network (AT+WSTA=ssid,pass) | none | same limits; AT+WSTA=0 forgets it |
 | Forwards (AT+FWD) | none | 8 slots; name 1 to 16 printable without `:` or `,` (and not `0`), host 1 to 63 of `A-Za-z0-9.-`, port 1 to 65535, mode T or R (default T for port 23, else R) |
 | Published forward (AT+PUB) | none | one forward name |
+| Privacy mode (AT+BEACON), saved by AT&W | ON | ON (beacons, answers scans), QUIET (answers scans, no beacons), HIDDEN (sends nothing except answering callers already in the directory) |
 
 ## AT commands
 
@@ -82,6 +84,13 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | AT+SIMNET=<a.b.c.d> | Test mode: use the simulated radio over UDP with that peer (the PC running lfd3k-pcmodem) instead of the SX1262. ERROR during any call. Not saved by AT&W |
 | AT+SIMNET=0 | Back to the SX1262 (ERROR during any call) |
 | AT+SIMNET? | Print `SIMNET <ip>` or `SIMNET OFF` |
+| AT+BEACON=ON, AT+BEACON=QUIET, AT+BEACON=HIDDEN | Set the privacy mode (any case; AT&W saves it, ATZ restores the saved one) |
+| AT+BEACON? | Print `BEACON <ON|QUIET|HIDDEN>` |
+| AT+SCAN | Ask who is out there: one ScanReq on SF12, then 4 s of answers, each printed as it arrives as `SCAN <name> SNR <x.x> dB <tier name>`, then OK. With ATV0 only the number of answers, then 0. ERROR during any call, in HIDDEN mode, or while a scan runs |
+| AT+DIR? | List the directory, one `DIR <name> <tier name or NONE> <seconds since heard or -> [PIN]` line per entry, then OK |
+| AT+DIR=+<name> | Add a name to the directory and pin it (never replaced, always saved). ERROR for our own name, a bad name, or when all 32 entries are pinned |
+| AT+DIR=-<name> | Remove a name, pinned or not (ERROR if absent) |
+| AT+DIR=0 | Remove every unpinned entry |
 | ATZ | Reset |
 
 Result codes: OK 0, CONNECT 1, RING 2, NO CARRIER 3, ERROR 4, BUSY 7, NO ANSWER 8.
@@ -116,6 +125,15 @@ Notes:
 - Secrets at rest: both the hotspot and the client password are stored unencrypted in the V4's flash (NVS and flash encryption are off). `AT+WSTA=0` then `AT&W` removes the client one from the saved settings, but NVS may keep the old bytes in flash until that page is reused.
 - AT&V adds `HEAP MIN <bytes>` (the lowest free heap since boot, `lfd3k_set_heap_min`, reported once a second like STACK FREE, omitted until reported), right after STACK FREE.
 - The wire socket has TCP keepalive (idle 30 s, interval 5 s, 4 probes), so a host that vanished ends the call with NO CARRIER.
+- Discovery air manners: beacons, scans and scan answers go out only while no call exists (radio or Wi-Fi, including dialing and ringing) and never more than once per 10 s per modem. A beacon is due 300 s plus a random 0 to 60 s after start, after the last beacon, or after the last call ended; it waits while a scan collects answers or the channel is busy. A modem answers a ScanReq once, in a random slot of 0 to 10 times 250 ms; if the channel is busy at its slot it tries the next slot, and gives up after slot 10 or when it sent any discovery frame in the last 10 s. Random numbers come from an xorshift seeded with the station name and the start time.
+- AT+SCAN waits for the 10 s spacing before sending (so a second scan right after the first starts up to 10 s later) and gives ERROR if its ScanReq cannot go out within 14 s. A call starting while a scan runs (ATDT, or a caller ringing) ends it with ERROR. ATZ ends it silently. Commands typed during the 4 s window run as usual.
+- The SNR in a SCAN line is the worse of the two directions (how we heard the answer and how the other modem heard our ScanReq); the tier is the fastest one that SNR allows with the S20 margin.
+- Directory: up to 32 entries, names compare case-insensitively, our own name is never added (also when two modems share a name or our own frames come back). Filled from beacons, scan answers, ScanReqs (except in HIDDEN mode, where a ScanReq only refreshes a name already known), a caller's CallReq to us, and the CallAck or Train of the station we dialed. When full, the least recently heard unpinned entry is replaced; pinned entries never are. The blob (for the platform's NVS) keeps every pinned entry and the 8 most recently heard others, with name, services and best tier; SNR and age start fresh after a boot (age shows `-` until heard again).
+- `Modem::take_dir_save()` is true once after AT&W, or after a directory change once 60 s have passed since the last save (an entry added, replaced or removed, a pin, or new services or best tier; a beacon that only refreshes SNR asks for nothing). The platform writes `Modem::directory().to_blob()` and at boot hands `Directory::from_blob` to `Modem::load_directory`.
+- HIDDEN mode: a CallReq to us from a name not in the directory is dropped before the call logic sees it, so nothing at all is sent (no RING on our side, no CallReject; the caller sees NO ANSWER). Callers in the directory ring and connect as usual. No beacons, no scan answers, and AT+SCAN is ERROR (a ScanReq carries our name). Dialing out still works.
+- Beacon services byte: bit 0 auto-answer on (S0 above 0), bit 1 a forward is published, bit 2 the hotspot is on. A beacon also carries how many stations this modem heard in the last 15 minutes.
+- AT&V adds `BEACON <mode>` and `DIR <entries>` after the FWD line.
+- Settings blob v2 is 900 bytes (the beacon mode byte at 897, CRC at 898). A v1 blob (899 bytes) from phase 3 still loads, with the mode ON, and the next save writes v2.
 
 ## Front panel (OLED)
 
@@ -134,6 +152,8 @@ Notes:
 - Own hand-made 5x7 ASCII font (font5x7.h), no library fonts.
 
 ## Change log
+
+- 2026-11-10: Phase 4 task 1, discovery in the core (core/src/discovery.rs, core/src/directory.rs): Beacon, ScanReq and ScanResp frames (types 12 to 14), the beacon and scan scheduler in `tick`, AT+SCAN, AT+DIR, AT+BEACON with the ON, QUIET and HIDDEN privacy modes, the directory with its blob and save hook, settings blob v2 with v1 migration, AT&V BEACON and DIR lines. No new tests (task 6); the existing 150 pass, with expectations moved only where the change requires it (type 12 now decodes as Beacon, the settings blob is 900 bytes and version 2 is valid). phase1-demo.txt regenerated (two new AT&V lines). `Modem` grows from 11,512 to 12,768 bytes (host build).
 
 - 2026-11-10: Phase 3 final review fix wave (not yet flashed; the V4 runs 549746d): a hotspot join saves only the password shown flag; `AT+WAP=<ssid>,<pass>` hides the password; Wi-Fi apply skips an identical config and waits for calls to end; TCP keepalive on the wire socket; AT&V `HEAP MIN`; bench terminal redaction of spaced forms and no FB hex in the log; bench sheet and SimNet notes; `lfd3k_wifi_cfg_t` Debug masks passwords. Tests: core 3, ffi 3, Python 2.
 - 2026-11-10: Phase 3 task 6, tests: 72 new Rust tests (core integration 27 in `core/tests/telnet.rs` and `settings.rs`, sim 35 in `wire.rs`, `simnet.rs`, `phase3_props.rs`, ffi host 10 in `host_api.rs`) and 25 Python tests (`python -m unittest tools/test_lfd3k_term.py`, fakes only). They cover the telnet filter and CR rule, settings blob and AT commands, wire calls and the radio to forward bridge, SimNet alone and two modems over loopback UDP, the C ABI for settings, wire, SimNet and the channel trace, and the bench terminal redaction and PWSHOW gate. phase1-demo.txt regenerated (AT&V Wi-Fi lines).

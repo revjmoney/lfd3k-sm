@@ -3,8 +3,10 @@
 //! One command per line in v0.1. Parsing is case-insensitive, tolerates
 //! surrounding whitespace, and never panics.
 
+use crate::discovery::valid_station;
 use crate::settings::{
-    parse_hostport, parse_port, valid_fwd_name, valid_host, valid_pass, valid_ssid, WireMode,
+    parse_hostport, parse_port, valid_fwd_name, valid_host, valid_pass, valid_ssid, BeaconMode,
+    WireMode,
 };
 use crate::tier::Tier;
 
@@ -70,6 +72,20 @@ pub enum AtCmd<'a> {
     SimNetQuery,
     /// `AT+SIMNET=<a.b.c.d>` (Some) or `AT+SIMNET=0` (None).
     SimNet(Option<[u8; 4]>),
+    /// `AT+BEACON?`
+    BeaconQuery,
+    /// `AT+BEACON=ON|QUIET|HIDDEN`
+    Beacon(BeaconMode),
+    /// `AT+SCAN`
+    Scan,
+    /// `AT+DIR?`
+    DirList,
+    /// `AT+DIR=+<name>`: add or pin.
+    DirPin(&'a str),
+    /// `AT+DIR=-<name>`: remove.
+    DirRemove(&'a str),
+    /// `AT+DIR=0`: remove every unpinned entry.
+    DirClear,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -148,8 +164,8 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET` (`arg` is
-/// after the `+`).
+/// `+FB`, `+SCAN`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
+/// `+BEACON`, `+DIR` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
 /// one, nor may a password). SSID and password are taken as typed (inner
@@ -159,13 +175,20 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
     let Some(i) = arg.find(['=', '?']) else {
         return if arg.eq_ignore_ascii_case("FB") {
             Ok(AtCmd::FrameBuffer)
+        } else if arg.eq_ignore_ascii_case("SCAN") {
+            Ok(AtCmd::Scan)
         } else {
             Err(AtError::Unknown)
         };
     };
     let name = arg.get(..i).ok_or(AtError::Unknown)?.trim_end();
     let rest = arg.get(i..).ok_or(AtError::Unknown)?;
-    let known = ["WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET"];
+    if name.eq_ignore_ascii_case("SCAN") {
+        return Err(AtError::BadArg);
+    }
+    let known = [
+        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR",
+    ];
     if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
         return Err(AtError::Unknown);
     }
@@ -187,9 +210,45 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         parse_fwd(form)
     } else if name.eq_ignore_ascii_case("SIMNET") {
         parse_simnet(form)
+    } else if name.eq_ignore_ascii_case("BEACON") {
+        match form {
+            Form::Query => Ok(AtCmd::BeaconQuery),
+            Form::Set(v) => BeaconMode::parse(v.trim())
+                .map(AtCmd::Beacon)
+                .ok_or(AtError::BadArg),
+        }
+    } else if name.eq_ignore_ascii_case("DIR") {
+        parse_dir(form)
     } else {
         parse_pub(form)
     }
+}
+
+/// `AT+DIR?`, `AT+DIR=0`, `AT+DIR=+<name>`, `AT+DIR=-<name>` (the name is
+/// trimmed and must be a valid station name).
+fn parse_dir(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    let v = match form {
+        Form::Query => return Ok(AtCmd::DirList),
+        Form::Set(v) => v.trim(),
+    };
+    if v == "0" {
+        return Ok(AtCmd::DirClear);
+    }
+    let (pin, name) = if let Some(n) = v.strip_prefix('+') {
+        (true, n.trim())
+    } else if let Some(n) = v.strip_prefix('-') {
+        (false, n.trim())
+    } else {
+        return Err(AtError::BadArg);
+    };
+    if !valid_station(name) {
+        return Err(AtError::BadArg);
+    }
+    Ok(if pin {
+        AtCmd::DirPin(name)
+    } else {
+        AtCmd::DirRemove(name)
+    })
 }
 
 /// `<ssid>,<pass>`, both valid.

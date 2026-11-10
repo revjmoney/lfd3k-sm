@@ -109,6 +109,15 @@ fn since(now: u32, t: u32) -> u32 {
     now.wrapping_sub(t)
 }
 
+/// One xorshift32 step (13, 17, 5). A nonzero state never reaches zero.
+/// Shared by the link's retry jitter and the discovery scheduler.
+pub(crate) fn xorshift32(mut x: u32) -> u32 {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    x
+}
+
 fn air_ms(t: Tier, len: usize) -> u32 {
     (t.airtime_us(len) / 1000).saturating_add(1)
 }
@@ -323,6 +332,24 @@ impl Link {
         self.state == State::Idle
     }
 
+    /// Call id of the current call or call attempt (0 while idle).
+    pub fn call_id(&self) -> u8 {
+        self.call_id
+    }
+
+    /// Queue one discovery frame (Beacon, ScanReq, ScanResp, already
+    /// encoded, call id 0) on SF12. Taken only while the link is idle with
+    /// nothing else queued, so it never delays a Hangup or CallReject and
+    /// never goes out during a call; the next pump sends it and listens
+    /// again afterwards. False when refused.
+    pub fn send_discovery(&mut self, frame: &[u8]) -> bool {
+        if self.state != State::Idle || self.q_len > 0 || frame.len() > QBUF {
+            return false;
+        }
+        self.enq_raw(Tier::ROBUST, frame);
+        self.q_len > 0
+    }
+
     /// Current tier while a call is up or training.
     pub fn tier(&self) -> Option<Tier> {
         match self.state {
@@ -456,10 +483,7 @@ impl Link {
     /// Deterministic jitter in 0..=max ms. The seed mixes call id and role,
     /// so the two ends of a call never draw the same sequence.
     fn jitter(&mut self, max: u32) -> u32 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
+        let x = xorshift32(self.rng);
         self.rng = x;
         x % max.saturating_add(1)
     }

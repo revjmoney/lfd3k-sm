@@ -1,6 +1,10 @@
 //! Wire frame format. Header is 5 bytes: byte0 = AIR_ID, byte1 = type << 4 | flags,
 //! byte2 = call_id, byte3 = seq, byte4 = ack. A frame whose byte0 is not
 //! AIR_ID is somebody else's traffic and decodes as `Foreign`.
+//!
+//! Types 1 to 11 are call frames; 12 to 14 (Beacon, ScanReq, ScanResp) are
+//! discovery frames with call id 0 and payloads laid out in `discovery.rs`.
+//! Older builds drop 12 to 14 as `BadType`.
 
 use crate::tier::Tier;
 
@@ -25,6 +29,12 @@ pub enum FrameType {
     TierAck = 9,
     Hangup = 10,
     Keepalive = 11,
+    /// Discovery: "here I am" (see `discovery.rs`). Call id 0.
+    Beacon = 12,
+    /// Discovery: "who is out there?". Call id 0.
+    ScanReq = 13,
+    /// Discovery: the answer to a ScanReq. Call id 0.
+    ScanResp = 14,
 }
 
 impl FrameType {
@@ -41,6 +51,9 @@ impl FrameType {
             9 => FrameType::TierAck,
             10 => FrameType::Hangup,
             11 => FrameType::Keepalive,
+            12 => FrameType::Beacon,
+            13 => FrameType::ScanReq,
+            14 => FrameType::ScanResp,
             _ => return None,
         })
     }
@@ -109,6 +122,9 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
             matches!(payload, [t] if Tier::from_index(*t).is_some())
         }
         FrameType::Ack => payload.len() == 1,
+        FrameType::Beacon => crate::discovery::parse_beacon(payload).is_some(),
+        FrameType::ScanReq => crate::discovery::parse_scan_req(payload).is_some(),
+        FrameType::ScanResp => crate::discovery::parse_scan_resp(payload).is_some(),
         _ => true,
     };
     if !shape_ok {
@@ -267,10 +283,11 @@ mod tests {
         assert_eq!(decode(&[0xD1, 0x60, 1, 2]), Err(FrameError::TooShort));
         assert_eq!(decode(&[0xD1, 0x00, 1, 2, 3]), Err(FrameError::BadType));
         assert_eq!(decode(&[0xD1, 0xF0, 1, 2, 3]), Err(FrameError::BadType));
-        assert_eq!(decode(&[0xD1, 0xC0, 1, 2, 3]), Err(FrameError::BadType));
+        // Type 12 is Beacon since phase 4: a bare header is a bad payload.
+        assert_eq!(decode(&[0xD1, 0xC0, 1, 2, 3]), Err(FrameError::BadPayload));
         assert_eq!(decode(&[0x60; MAX_FRAME + 1]), Err(FrameError::TooLong));
         assert_eq!(FrameType::from_u8(0), None);
-        assert_eq!(FrameType::from_u8(12), None);
+        assert_eq!(FrameType::from_u8(12), Some(FrameType::Beacon));
         assert_eq!(FrameType::from_u8(15), None);
         // Wrong payload shapes for the types that have one.
         assert_eq!(decode(&[0xD1, 0x80, 1, 2, 3]), Err(FrameError::BadPayload));

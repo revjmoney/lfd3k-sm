@@ -3,6 +3,8 @@
 
 pub mod arq;
 pub mod at;
+pub mod directory;
+pub mod discovery;
 pub mod frame;
 pub mod link;
 pub mod modem;
@@ -15,9 +17,11 @@ pub mod wire;
 
 pub use arq::{ArqRx, ArqTx};
 pub use at::{format_result, parse_line, AtCmd, AtError, ResultCode, SRegs};
+pub use directory::{DirEntry, Directory, DIR_BLOB_LEN, DIR_MAX};
 pub use link::{Event, Link};
 pub use modem::{Config, Lights, Modem};
 pub use radio::{Radio, RxInfo};
+pub use settings::BeaconMode;
 pub use settings::{Forward, Settings, WireMode, BLOB_LEN, MAX_FWD};
 pub use simnet::{DatagramPort, SimNetRadio};
 pub use tier::{best_tier, Tier};

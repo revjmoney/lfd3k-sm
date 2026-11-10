@@ -19,13 +19,27 @@
 //! forward: the host stays in command mode and sees only `BRIDGE <name>`
 //! (verbose) when the wire connects and NO CARRIER when the bridge ends.
 //! One call at a time: a radio caller during a Wi-Fi call gets BUSY.
+//!
+//! Discovery (see `discovery.rs` and `directory.rs`): `tick` runs the beacon
+//! timer, the scan answer slots and `AT+SCAN`, all only while no call
+//! exists (radio or Wi-Fi). Beacon, ScanReq and ScanResp frames are handled
+//! here and never reach the link. Heard stations (beacons, scan answers, a
+//! caller's CallReq to us, the answerer's CallAck or Train on our dial) go
+//! into the directory, never our own name. In HIDDEN mode a CallReq to us
+//! from a name not in the directory is dropped before the link sees it, so
+//! nothing at all is sent (no RING, no CallReject).
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
-use crate::frame::{valid_name, NAME_MAX};
+use crate::directory::{Directory, DIR_MAX};
+use crate::discovery::{
+    self, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, DISC_MAX, HEARD_WINDOW_MS,
+    SCAN_SEND_LIMIT_MS, SCAN_WINDOW_MS, SLOTS, SLOT_MS, SVC_ACCEPTS, SVC_FORWARD, SVC_HOTSPOT,
+};
+use crate::frame::{valid_name, FrameType, Header, HEADER_LEN, NAME_MAX};
 use crate::link::{Event, Link, Role, State};
 use crate::radio::{Radio, RxInfo};
-use crate::settings::{parse_hostport, Forward, Settings, WireMode, MAX_FWD};
-use crate::tier::Tier;
+use crate::settings::{parse_hostport, BeaconMode, Forward, Settings, WireMode, MAX_FWD};
+use crate::tier::{best_tier, Tier};
 use crate::wire::{Call, Phase, Wire, WireReq};
 
 /// ATI line 1.
@@ -50,6 +64,8 @@ pub const NOTE_MAX: usize = 64;
 const LIGHT_MS: u32 = 100;
 /// Retrains remembered for AT&V.
 const HISTORY: usize = 4;
+/// Least time between two directory saves asked by changes (flash wear).
+const DIR_SAVE_GAP_MS: u32 = 60_000;
 
 pub struct Config {
     pub name: [u8; 16],
@@ -100,6 +116,14 @@ fn put_ip(t: &mut Txt, ip: [u8; 4]) {
         }
         t.num(u32::from(*b), 1);
     }
+}
+
+/// SNR in dB x4 as `<x.x>`: tenths rounded, a minus sign when negative.
+fn put_snr(t: &mut Txt, snr_x4: i16) {
+    let s = i32::from(snr_x4);
+    let tenths = (s.unsigned_abs() * 10 + 2) / 4;
+    t.put(if s < 0 { b"-" } else { b"" });
+    t.num(tenths / 10, 1).put(b".").num(tenths % 10, 1);
 }
 
 fn name_of(cfg: &Config) -> &str {
@@ -298,6 +322,23 @@ pub struct Modem {
     simnet_req: Option<Option<[u8; 4]>>,
     /// The platform could not open the SimNet UDP socket (AT&V `NET FAIL`).
     simnet_fail: bool,
+    /// Stations heard or pinned (AT+DIR). Saved by the platform on its own
+    /// schedule (`take_dir_save`), not part of the settings profile.
+    dir: Directory,
+    /// Beacon timer, scan answer slot, AT+SCAN state.
+    disc: Discovery,
+    /// The directory changed since the last save.
+    dir_dirty: bool,
+    /// A directory save is wanted (taken by `take_dir_save`).
+    dir_save: bool,
+    /// When the directory was last saved (or the modem started).
+    dir_saved_at: u32,
+    /// `AT+DIR?` listing in progress: next slot to print and the time the
+    /// command was typed (ages are as of then).
+    dir_list: Option<(u8, u32)>,
+    /// The name of the current radio dial, credited when it answers.
+    dial_name: [u8; NAME_MAX],
+    dial_len: u8,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -361,6 +402,14 @@ impl Modem {
             simnet: None,
             simnet_req: None,
             simnet_fail: false,
+            dir: Directory::new(),
+            disc: Discovery::new(),
+            dir_dirty: false,
+            dir_save: false,
+            dir_saved_at: 0,
+            dir_list: None,
+            dial_name: [0; NAME_MAX],
+            dial_len: 0,
         }
     }
 
@@ -401,6 +450,52 @@ impl Modem {
         self.simnet = None;
         self.simnet_req = None;
         self.simnet_fail = false;
+        self.dir = Directory::new();
+        self.disc = Discovery::new();
+        self.dir_dirty = false;
+        self.dir_save = false;
+        self.dir_saved_at = 0;
+        self.dir_list = None;
+        self.dial_len = 0;
+    }
+
+    /// True once when the platform should save the directory
+    /// (`directory().to_blob`): after `AT&W`, or after a change once 60 s
+    /// have passed since the last save (flash wear). Changes are entries
+    /// added, replaced or removed, pins, services and best tiers; a beacon
+    /// that only refreshes SNR or time asks for nothing.
+    pub fn take_dir_save(&mut self) -> bool {
+        core::mem::take(&mut self.dir_save)
+    }
+
+    /// The directory, for the platform's blob and the menu.
+    pub fn directory(&self) -> &Directory {
+        &self.dir
+    }
+
+    /// Boot: the directory loaded from the platform's blob
+    /// (`Directory::from_blob`). An entry with this modem's own name is
+    /// dropped (and a save asked for later).
+    pub fn load_directory(&mut self, d: Directory) {
+        self.dir = d;
+        let dropped = self.dir.remove(name_of(&self.cfg));
+        self.dir.take_changed();
+        self.dir_dirty = dropped;
+    }
+
+    /// The privacy mode in force (AT+BEACON).
+    pub fn beacon_mode(&self) -> BeaconMode {
+        self.set.beacon
+    }
+
+    /// An AT+SCAN is in progress (waiting to send or collecting answers).
+    pub fn scanning(&self) -> bool {
+        self.disc.scan.is_some()
+    }
+
+    /// Answers counted by the scan in progress (0 when none).
+    pub fn scan_hits(&self) -> u8 {
+        self.disc.scan.map_or(0, |s| s.hits)
     }
 
     /// The platform's live Wi-Fi status line for `AT+WIFI?`
@@ -738,18 +833,375 @@ impl Modem {
 
     pub fn radio_rx<R: Radio>(&mut self, frame: &[u8], info: RxInfo, radio: &mut R, now_ms: u32) {
         self.last_rx = Some(info);
-        // A radio caller during a Wi-Fi call gets BUSY.
-        self.link
-            .set_engaged(matches!(self.wire.call, Call::Wire(_)));
-        self.link
-            .on_frame(frame, info, name_of(&self.cfg), &self.cfg.sregs, now_ms);
+        self.disc_start(now_ms);
+        if self.screen(frame, info, now_ms) {
+            // A radio caller during a Wi-Fi call gets BUSY.
+            self.link
+                .set_engaged(matches!(self.wire.call, Call::Wire(_)));
+            self.link
+                .on_frame(frame, info, name_of(&self.cfg), &self.cfg.sregs, now_ms);
+        }
         self.after(radio, now_ms);
     }
 
     pub fn tick<R: Radio>(&mut self, radio: &mut R, now_ms: u32) {
         self.escape_timer(now_ms);
+        self.disc_tick(radio, now_ms);
+        self.dir_save_timer(now_ms);
+        // A discovery frame queued above goes out in this pump.
         self.link.tick(radio, &self.cfg.sregs, now_ms);
         self.after(radio, now_ms);
+    }
+
+    /// No call of any kind: the radio link is idle and no Wi-Fi call or
+    /// bridge exists. Discovery only transmits then.
+    fn air_idle(&self) -> bool {
+        self.link.is_idle() && self.wire.call == Call::None
+    }
+
+    /// S20 as the tier margin (dB x4).
+    fn margin(&self) -> i16 {
+        i16::try_from(self.cfg.sregs.get(20).unwrap_or(20)).unwrap_or(20)
+    }
+
+    /// First tick or frame: seed the discovery random numbers from the
+    /// name and the time, and start the directory save clock.
+    fn disc_start(&mut self, now: u32) {
+        if !self.disc.started {
+            self.dir_saved_at = now;
+            self.disc.start(name_of(&self.cfg), now);
+        }
+    }
+
+    /// A station was heard: into the directory with the S20 margin, unless
+    /// it carries our own name.
+    fn dir_heard(&mut self, name: &str, services: Option<u8>, info: RxInfo, now: u32) {
+        if name.eq_ignore_ascii_case(name_of(&self.cfg)) {
+            return;
+        }
+        let m = self.margin();
+        self.dir.heard_with_margin(name, services, info, now, m);
+    }
+
+    /// Look at a received frame before the link does. Discovery frames are
+    /// handled here and never reach the link; a CallReq to us feeds the
+    /// directory, or in HIDDEN mode is dropped when the caller is not in
+    /// it; the answerer of our dial is credited on its CallAck or Train.
+    /// False when the link must not see the frame.
+    fn screen(&mut self, buf: &[u8], info: RxInfo, now: u32) -> bool {
+        let Ok(f) = crate::frame::decode(buf) else {
+            return true;
+        };
+        let h = f.header;
+        match h.ftype {
+            FrameType::Beacon => {
+                if let Some(b) = discovery::parse_beacon(f.payload) {
+                    self.dir_heard(b.name, Some(b.services), info, now);
+                }
+                false
+            }
+            FrameType::ScanReq => {
+                self.on_scan_req(f.payload, info, now);
+                false
+            }
+            FrameType::ScanResp => {
+                self.on_scan_resp(f.payload, info, now);
+                false
+            }
+            FrameType::CallReq => self.screen_call_req(f.payload, info, now),
+            FrameType::CallAck | FrameType::Train => {
+                let dialing = matches!(self.link.state(), State::Dialing | State::AwaitTrain);
+                if dialing && h.call_id != 0 && h.call_id == self.link.call_id() {
+                    let mut n = [0u8; NAME_MAX];
+                    let len = usize::from(self.dial_len).min(NAME_MAX);
+                    if let (Some(d), Some(s)) = (n.get_mut(..len), self.dial_name.get(..len)) {
+                        d.copy_from_slice(s);
+                    }
+                    if let Ok(name) = core::str::from_utf8(n.get(..len).unwrap_or(&[])) {
+                        self.dir_heard(name, None, info, now);
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn screen_call_req(&mut self, p: &[u8], info: RxInfo, now: u32) -> bool {
+        let Ok((caller, callee)) = crate::frame::parse_call_req(p) else {
+            return true;
+        };
+        if !callee.eq_ignore_ascii_case(name_of(&self.cfg)) {
+            return true;
+        }
+        if self.set.beacon == BeaconMode::Hidden && self.dir.get(caller).is_none() {
+            // A stranger: drop it whole, so nothing is sent.
+            return false;
+        }
+        self.dir_heard(caller, None, info, now);
+        true
+    }
+
+    fn on_scan_req(&mut self, p: &[u8], info: RxInfo, now: u32) {
+        let Some(r) = discovery::parse_scan_req(p) else {
+            return;
+        };
+        if r.name.eq_ignore_ascii_case(name_of(&self.cfg)) {
+            return; // our own scan echoed back
+        }
+        let hidden = self.set.beacon == BeaconMode::Hidden;
+        // HIDDEN: a scan never vouches for a stranger (it would let any
+        // scanner call us next), it only refreshes a name already known.
+        if !hidden || self.dir.get(r.name).is_some() {
+            self.dir_heard(r.name, None, info, now);
+        }
+        if hidden || !self.air_idle() || self.disc.answer.is_some() {
+            return;
+        }
+        let slot = self.disc.rand(u32::from(SLOTS - 1)) as u8;
+        self.disc.answer = Some(Answer {
+            at: now,
+            slot,
+            snr_x4: info.snr_x4,
+            scan_id: r.scan_id,
+        });
+    }
+
+    fn on_scan_resp(&mut self, p: &[u8], info: RxInfo, now: u32) {
+        let Some(r) = discovery::parse_scan_resp(p) else {
+            return;
+        };
+        if r.name.eq_ignore_ascii_case(name_of(&self.cfg)) {
+            return;
+        }
+        // The worse of the two directions decides the tier.
+        let snr = info.snr_x4.min(r.snr_x4);
+        let both = RxInfo {
+            snr_x4: snr,
+            ..info
+        };
+        self.dir_heard(r.name, Some(r.services), both, now);
+        let print = self.verbose && self.mode != Mode::Data;
+        let Some(scan) = self.disc.scan.as_mut() else {
+            return;
+        };
+        let live = scan.id == r.scan_id
+            && scan
+                .sent
+                .is_some_and(|t| now.wrapping_sub(t) < SCAN_WINDOW_MS);
+        if !live {
+            return;
+        }
+        scan.hits = scan.hits.saturating_add(1);
+        if print {
+            let tier = best_tier(snr, self.margin());
+            let mut t = Txt::new();
+            t.put(b"SCAN ").put(r.name.as_bytes()).put(b" SNR ");
+            put_snr(&mut t, snr);
+            t.put(b" dB ").put(tier.name().as_bytes());
+            self.info(t.bytes());
+        }
+    }
+
+    /// Services byte for our beacon and scan answers.
+    fn services(&self) -> u8 {
+        let mut s = 0;
+        if self.cfg.sregs.get(0).unwrap_or(0) > 0 {
+            s |= SVC_ACCEPTS;
+        }
+        if self.set.published().is_some() {
+            s |= SVC_FORWARD;
+        }
+        if self.set.ap_on {
+            s |= SVC_HOTSPOT;
+        }
+        s
+    }
+
+    /// Hand one discovery frame (call id 0) to the idle link.
+    fn send_disc(&mut self, ft: FrameType, payload: &[u8]) -> bool {
+        let h = Header {
+            ftype: ft,
+            flags: 0,
+            call_id: 0,
+            seq: 0,
+            ack: 0,
+        };
+        let mut b = [0u8; HEADER_LEN + DISC_MAX];
+        match crate::frame::encode(&h, payload, &mut b) {
+            Ok(n) => self.link.send_discovery(b.get(..n).unwrap_or(&[])),
+            Err(_) => false,
+        }
+    }
+
+    /// The discovery scheduler (from `tick`): beacon timer, scan answer
+    /// slot with listen before talk, AT+SCAN. At most one discovery frame
+    /// per call and per 10 s, only on an idle radio with no call.
+    fn disc_tick<R: Radio>(&mut self, radio: &R, now: u32) {
+        self.disc_start(now);
+        if !self.air_idle() {
+            // A call holds all discovery; the beacon timer restarts after it.
+            self.disc.in_call = true;
+            self.disc.answer = None;
+            if self.disc.scan.take().is_some() && self.mode != Mode::Data {
+                self.result(ResultCode::Error);
+            }
+            return;
+        }
+        if core::mem::take(&mut self.disc.in_call) && self.disc.beacon.is_some() {
+            self.disc.arm_beacon(now);
+        }
+        match self.set.beacon {
+            BeaconMode::On => {
+                if self.disc.beacon.is_none() {
+                    self.disc.arm_beacon(now);
+                }
+            }
+            BeaconMode::Quiet => self.disc.beacon = None,
+            BeaconMode::Hidden => {
+                self.disc.beacon = None;
+                self.disc.answer = None;
+            }
+        }
+        // Scan window over, or a ScanReq that never found air.
+        if let Some(s) = self.disc.scan {
+            match s.sent {
+                Some(t) if now.wrapping_sub(t) >= SCAN_WINDOW_MS => {
+                    self.disc.scan = None;
+                    if !self.verbose {
+                        let mut t = Txt::new();
+                        t.num(u32::from(s.hits), 1);
+                        self.info(t.bytes());
+                    }
+                    self.result(ResultCode::Ok);
+                }
+                None if now.wrapping_sub(s.asked) >= SCAN_SEND_LIMIT_MS => {
+                    self.disc.scan = None;
+                    self.result(ResultCode::Error);
+                }
+                _ => {}
+            }
+        }
+        // A scan answer whose slot has come.
+        if let Some(mut a) = self.disc.answer {
+            if now.wrapping_sub(a.at) < u32::from(a.slot) * SLOT_MS {
+                return;
+            }
+            if !self.disc.gap_ok(now) {
+                self.disc.answer = None;
+                return;
+            }
+            let mut sent = false;
+            if !radio.busy() {
+                let mut p = [0u8; DISC_MAX];
+                let r = ScanResp {
+                    name: name_of(&self.cfg),
+                    services: self.services(),
+                    snr_x4: a.snr_x4,
+                    scan_id: a.scan_id,
+                };
+                let n = discovery::scan_resp_payload(&r, &mut p).unwrap_or(0);
+                sent = n > 0 && self.send_disc(FrameType::ScanResp, p.get(..n).unwrap_or(&[]));
+            }
+            if sent {
+                self.disc.last_tx = Some(now);
+                self.disc.answer = None;
+            } else if a.slot + 1 < SLOTS {
+                // Channel busy: listen before talk, try a later slot.
+                a.slot += 1;
+                self.disc.answer = Some(a);
+            } else {
+                self.disc.answer = None;
+            }
+            return;
+        }
+        if radio.busy() || !self.disc.gap_ok(now) {
+            return;
+        }
+        // The ScanReq of an AT+SCAN.
+        if let Some(mut s) = self.disc.scan.filter(|s| s.sent.is_none()) {
+            let mut p = [0u8; DISC_MAX];
+            let r = ScanReq {
+                name: name_of(&self.cfg),
+                scan_id: s.id,
+            };
+            let n = discovery::scan_req_payload(&r, &mut p).unwrap_or(0);
+            if n > 0 && self.send_disc(FrameType::ScanReq, p.get(..n).unwrap_or(&[])) {
+                s.sent = Some(now);
+                self.disc.scan = Some(s);
+                self.disc.last_tx = Some(now);
+            }
+            return;
+        }
+        // The beacon, never while a scan collects answers.
+        if let Some((from, wait)) = self.disc.beacon {
+            if now.wrapping_sub(from) < wait || self.disc.scan.is_some() {
+                return;
+            }
+            let mut p = [0u8; DISC_MAX];
+            let heard = self.dir.heard_count(now, HEARD_WINDOW_MS).min(255) as u8;
+            let b = Beacon {
+                name: name_of(&self.cfg),
+                services: self.services(),
+                heard,
+                time_quality: 0,
+            };
+            let n = discovery::beacon_payload(&b, &mut p).unwrap_or(0);
+            if n > 0 && self.send_disc(FrameType::Beacon, p.get(..n).unwrap_or(&[])) {
+                self.disc.last_tx = Some(now);
+                self.disc.arm_beacon(now);
+            }
+        }
+    }
+
+    /// Ask for a directory save once it changed and 60 s have passed since
+    /// the last one.
+    fn dir_save_timer(&mut self, now: u32) {
+        if self.dir.take_changed() {
+            self.dir_dirty = true;
+        }
+        if self.dir_dirty && now.wrapping_sub(self.dir_saved_at) >= DIR_SAVE_GAP_MS {
+            self.dir_dirty = false;
+            self.dir_save = true;
+            self.dir_saved_at = now;
+        }
+    }
+
+    /// Print `AT+DIR?` lines while the host output has room, then OK.
+    fn pump_list(&mut self) {
+        while let Some((next, at)) = self.dir_list {
+            let mut i = usize::from(next);
+            while i < DIR_MAX && self.dir.slot(i).is_none() {
+                i += 1;
+            }
+            let Some(e) = self.dir.slot(i) else {
+                if self.out.free() >= 16 {
+                    self.dir_list = None;
+                    self.result(ResultCode::Ok);
+                }
+                return;
+            };
+            let mut t = Txt::new();
+            t.put(b"DIR ").put(e.name().as_bytes()).put(b" ");
+            match e.best_tier {
+                Some(tier) => t.put(tier.name().as_bytes()),
+                None => t.put(b"NONE"),
+            };
+            t.put(b" ");
+            if e.heard_since_boot() {
+                t.num(at.wrapping_sub(e.heard_ms) / 1000, 1);
+            } else {
+                t.put(b"-");
+            }
+            if e.pinned {
+                t.put(b" PIN");
+            }
+            if self.out.free() < t.n + 4 + OUT_RESERVE {
+                return;
+            }
+            self.info(t.bytes());
+            self.dir_list = Some(((i + 1).min(DIR_MAX) as u8, at));
+        }
     }
 
     /// Held escape characters: release dead ones as data; once the closing
@@ -776,7 +1228,12 @@ impl Modem {
     }
 
     pub fn host_output(&mut self, out: &mut [u8]) -> usize {
-        self.out.pop(out)
+        let n = self.out.pop(out);
+        // A long AT+DIR? listing continues as the host takes the text.
+        if self.dir_list.is_some() {
+            self.pump_list();
+        }
+        n
     }
 
     /// S30: SX1262 chip output power in dBm (-9 to 22).
@@ -957,8 +1414,16 @@ impl Modem {
                     || !self.link.dial(name_of(&self.cfg), name, now)
                 {
                     self.result(ResultCode::Error);
-                } else if self.verbose {
-                    self.info(Txt::new().put(b"DIALING ").put(name.as_bytes()).bytes());
+                } else {
+                    // Remember who we dialed: its CallAck feeds the directory.
+                    self.dial_len = 0;
+                    for (d, &c) in self.dial_name.iter_mut().zip(name.as_bytes()) {
+                        *d = c;
+                        self.dial_len += 1;
+                    }
+                    if self.verbose {
+                        self.info(Txt::new().put(b"DIALING ").put(name.as_bytes()).bytes());
+                    }
                 }
             }
             AtCmd::Answer => {
@@ -1115,6 +1580,12 @@ impl Modem {
                 let mut t = Txt::new();
                 t.put(b"FWD ").num(self.set.fwd_count() as u32, 1);
                 self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"BEACON ").put(self.set.beacon.name().as_bytes());
+                self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"DIR ").num(self.dir.len() as u32, 1);
+                self.info(t.bytes());
                 if let Some(n) = self.stack_free {
                     let mut t = Txt::new();
                     t.put(b"STACK FREE ").num(n, 1);
@@ -1162,9 +1633,17 @@ impl Modem {
                 self.set.clone_from(&self.saved);
                 self.set.show_ap_pass = shown;
                 self.wifi_changed = true;
+                // A scan or a listing in progress ends silently.
+                self.disc.scan = None;
+                self.dir_list = None;
                 self.result(ResultCode::Ok);
             }
             AtCmd::Save => {
+                // The directory is saved with the settings.
+                self.dir.take_changed();
+                self.dir_dirty = false;
+                self.dir_save = true;
+                self.dir_saved_at = now;
                 if !self.set.sta_ssid().is_empty() {
                     self.set.show_ap_pass = false;
                 }
@@ -1303,6 +1782,50 @@ impl Modem {
                 }
                 self.ok_or_error(idle);
             }
+            AtCmd::BeaconQuery => {
+                let mut t = Txt::new();
+                t.put(b"BEACON ").put(self.set.beacon.name().as_bytes());
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::Beacon(m) => {
+                self.set.beacon = m;
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::Scan => {
+                // Only with no call at all, never in HIDDEN (a ScanReq
+                // carries our name), one scan at a time.
+                let ok = self.mode == Mode::Command
+                    && self.air_idle()
+                    && self.set.beacon != BeaconMode::Hidden
+                    && self.disc.scan.is_none();
+                if ok {
+                    self.disc_start(now);
+                    let id = self.disc.rand(255) as u8;
+                    self.disc.scan = Some(Scan {
+                        id,
+                        asked: now,
+                        sent: None,
+                        hits: 0,
+                    });
+                } else {
+                    self.result(ResultCode::Error);
+                }
+            }
+            AtCmd::DirList => self.dir_list = Some((0, now)),
+            AtCmd::DirPin(name) => {
+                let ok =
+                    !name.eq_ignore_ascii_case(name_of(&self.cfg)) && self.dir.add_pinned(name);
+                self.ok_or_error(ok);
+            }
+            AtCmd::DirRemove(name) => {
+                let ok = self.dir.remove(name);
+                self.ok_or_error(ok);
+            }
+            AtCmd::DirClear => {
+                self.dir.clear_unpinned();
+                self.result(ResultCode::Ok);
+            }
         }
     }
 
@@ -1339,14 +1862,10 @@ impl Modem {
                 }
                 Event::Training(snr) => {
                     if self.verbose {
-                        let s = i32::from(snr);
-                        let tenths = (s.unsigned_abs() * 10 + 2) / 4;
                         let mut t = Txt::new();
-                        t.put(b"TRAINING SNR ").put(if s < 0 { b"-" } else { b"" });
-                        t.num(tenths / 10, 1)
-                            .put(b".")
-                            .num(tenths % 10, 1)
-                            .put(b" dB");
+                        t.put(b"TRAINING SNR ");
+                        put_snr(&mut t, snr);
+                        t.put(b" dB");
                         self.info(t.bytes());
                     }
                 }
@@ -1410,6 +1929,9 @@ impl Modem {
         }
         self.wire_pump(now);
         self.link.pump(radio, now);
+        if self.dir_list.is_some() {
+            self.pump_list();
+        }
     }
 
     /// Host data in data mode: into the Wi-Fi call or the radio link.
