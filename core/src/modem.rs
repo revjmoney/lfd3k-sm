@@ -11,7 +11,7 @@
 //! buffer (the call never leaves NO CARRIER pending).
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs};
-use crate::frame::NAME_MAX;
+use crate::frame::{valid_name, NAME_MAX};
 use crate::link::{Event, Link};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::Tier;
@@ -38,22 +38,23 @@ pub struct Config {
 }
 
 impl Config {
-    /// Station name (truncated to 16 bytes) with default S registers.
-    pub fn new(name: &str) -> Config {
+    /// Station name with default S registers. `None` unless the name is
+    /// 1 to 16 printable ASCII characters (the same rule as a CallReq name),
+    /// so a modem can never hold a name it could not dial or answer to.
+    pub fn new(name: &str) -> Option<Config> {
+        if !valid_name(name) {
+            return None;
+        }
         let mut c = Config {
             name: [0; NAME_MAX],
             name_len: 0,
             sregs: SRegs::new(),
         };
-        let mut n = name.len().min(NAME_MAX);
-        while !name.is_char_boundary(n) {
-            n -= 1;
-        }
-        if let (Some(d), Some(s)) = (c.name.get_mut(..n), name.as_bytes().get(..n)) {
-            d.copy_from_slice(s);
-            c.name_len = n as u8;
-        }
-        c
+        let n = name.len();
+        let (d, s) = (c.name.get_mut(..n)?, name.as_bytes().get(..n)?);
+        d.copy_from_slice(s);
+        c.name_len = n as u8;
+        Some(c)
     }
 }
 
@@ -229,6 +230,11 @@ impl Modem {
     /// Bytes from the host. Command modes always take every byte; data
     /// mode returns only the bytes the call could queue.
     pub fn host_input<R: Radio>(&mut self, bytes: &[u8], radio: &mut R, now_ms: u32) -> usize {
+        // A completed escape whose closing guard has run out is an escape
+        // even if no tick ran since: the bytes after it are commands.
+        if !bytes.is_empty() {
+            self.escape_timer(now_ms);
+        }
         let mut used = 0;
         while used < bytes.len() {
             let rest = bytes.get(used..).unwrap_or(&[]);
@@ -252,12 +258,20 @@ impl Modem {
     }
 
     pub fn tick<R: Radio>(&mut self, radio: &mut R, now_ms: u32) {
-        if self.mode == Mode::Data && self.esc > 0 && self.esc_dead {
+        self.escape_timer(now_ms);
+        self.link.tick(radio, &self.cfg.sregs, now_ms);
+        self.after(radio, now_ms);
+    }
+
+    /// Held escape characters: release dead ones as data; once the closing
+    /// guard has passed, three are the escape (OK) and fewer are data.
+    fn escape_timer(&mut self, now_ms: u32) {
+        if self.mode != Mode::Data || self.esc == 0 {
+            return;
+        }
+        if self.esc_dead {
             self.flush_esc();
-        } else if self.mode == Mode::Data
-            && self.esc > 0
-            && now_ms.wrapping_sub(self.esc_last) >= self.guard()
-        {
+        } else if now_ms.wrapping_sub(self.esc_last) >= self.guard() {
             if self.esc == 3 {
                 self.esc = 0;
                 self.esc_dead = false;
@@ -270,8 +284,6 @@ impl Modem {
                 self.flush_esc();
             }
         }
-        self.link.tick(radio, &self.cfg.sregs, now_ms);
-        self.after(radio, now_ms);
     }
 
     pub fn host_output(&mut self, out: &mut [u8]) -> usize {
@@ -322,7 +334,8 @@ impl Modem {
     }
 
     /// Escape rule: S12 guard of silence, three S2 characters each less than
-    /// S12 apart, then S12 of silence (checked in tick). Otherwise data.
+    /// S12 apart, then S12 of silence (checked by `escape_timer`, from tick
+    /// and at the start of the next host input). Otherwise data.
     ///
     /// Any non-empty offer counts as host activity for the guard, even if
     /// the call refuses the bytes (send window full). Held S2 characters
@@ -413,6 +426,12 @@ impl Modem {
                 }
             }
             AtCmd::Answer => {
+                // Already in a call (online command mode): nothing to
+                // answer, and the call stays up.
+                if self.mode != Mode::Command || self.link.is_connected() {
+                    self.result(ResultCode::Error);
+                    return;
+                }
                 self.fresh_call();
                 if !self.link.answer(&self.cfg.sregs, now) {
                     self.result(ResultCode::NoCarrier);
@@ -624,6 +643,10 @@ impl Modem {
     fn fresh_call(&mut self) {
         self.closing = false;
         self.retrain_note = None;
+        // A partial command line typed before the call (during RING or
+        // while dialing) must not be glued onto the first command after it.
+        self.line_len = 0;
+        self.line_over = false;
     }
 }
 
@@ -657,7 +680,7 @@ mod tests {
 
     #[test]
     fn ati_banner() {
-        let mut m = Modem::new(Config::new("CALLER"));
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
         let mut r = NullRadio;
         assert_eq!(m.host_input(b"ATI\r", &mut r, 0), 4);
         assert_eq!(
@@ -684,5 +707,28 @@ mod tests {
             ]
         );
         assert!(!text.contains('\u{2014}') && !text.contains("--"));
+    }
+
+    #[test]
+    fn config_name_is_checked() {
+        // Valid: 1 to 16 printable ASCII characters, kept as given.
+        for name in ["A", "AXIS", "CALLER", "sixteen chars 16", " ~!", "a b"] {
+            let c = Config::new(name).expect(name);
+            assert_eq!(name_of(&c), name);
+            assert_eq!(c.sregs, SRegs::new());
+        }
+        // Invalid: empty, too long, control characters, non-ASCII. No
+        // truncation, no panic.
+        for name in [
+            "",
+            "seventeen chars 17",
+            "AXIS\r",
+            "TAB\tNAME",
+            "\u{7f}",
+            "caf\u{e9}",
+            "\u{1F4FB}",
+        ] {
+            assert!(Config::new(name).is_none(), "{name:?} accepted");
+        }
     }
 }

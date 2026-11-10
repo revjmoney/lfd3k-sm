@@ -53,6 +53,13 @@
 //! still split correctly (the last one is used), and data containing
 //! `\r\nOK\r\n` is only misread if a tick's data output ends with it while an
 //! escape is pending.
+//!
+//! Limit: the split only looks for the escape's OK in tick output. The core
+//! also fires a completed escape at the start of `host_input` when its guard
+//! ran out before a tick did (the host typed again within 10 ms of the guard
+//! end); then that side's segment stays open and its `received_*` would count
+//! the OK and later command output as data. Tests that read `received_*` on
+//! the escaping side wait past a tick after the guard (as `escape_a` does).
 
 pub mod rng;
 
@@ -338,7 +345,7 @@ impl Host {
 
     /// The escape's OK in the output from `from`: the last `\r\nOK\r\n`,
     /// followed by nothing or by one `\r\nRETRAIN ...\r\n` line up to the end
-    /// (what Modem::tick prints when the escape fires). Bytes before it in
+    /// (what Modem::tick prints when it fires the escape). Bytes before it in
     /// the same output are still data.
     fn escape_ok(&self, from: usize) -> Option<usize> {
         let at = rfind(&self.screen, OK_PAT, from)?;
@@ -396,8 +403,8 @@ pub struct Harness {
 impl Harness {
     /// CALLER and AXIS with default settings, AXIS with S0=1.
     pub fn new(chan: SimChannel) -> Harness {
-        let a = Config::new("CALLER");
-        let mut b = Config::new("AXIS");
+        let a = Config::new("CALLER").expect("valid name");
+        let mut b = Config::new("AXIS").expect("valid name");
         b.sregs.set(0, 1);
         Harness::with_configs(chan, a, b)
     }

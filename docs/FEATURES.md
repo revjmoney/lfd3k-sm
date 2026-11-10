@@ -11,7 +11,7 @@
 | Call setup and training: ATDT by name on SF12 (DIALING, RINGING), RING and auto-answer (S0), CallAck plus Train with measured SNR, tier pick with S20 margin and S21 cap, TierSet and TierAck, Keepalive probe with step-down to SF12, CONNECT | done | 2026-11-09 |
 | Half duplex air manners: MORE flag bursts of up to 4 frames, turn handover, acks at burst end, keepalives on quiet calls | done | 2026-11-09 |
 | Auto retrain: SNR average (1/8), step down on low margin or 4 RTOs of silence, step up after 10 s of good margin, RETRAIN in verbose mode, data survives tier changes | done | 2026-11-09 |
-| Resync: 8 RTOs of silence drops both ends to SF12, caller pings, then jumps back up to the best tier; NO CARRIER after S22 seconds of silence | done | 2026-11-09 |
+| Resync: 8 RTOs of silence drops both ends to SF12, caller pings, then climbs back to the best tier the SNR allows, capped one tier below the tier that died; NO CARRIER after S22 seconds of silence | done | 2026-11-09 |
 | Escape and online command mode: guard time S12, three S2 characters, guard time, OK; ATO back online; ATH hangs up (Hangup sent twice) | done | 2026-11-09 |
 | ATI banner: name, version with release name, release tagline | done | 2026-11-09 |
 | PC simulator: seeded half duplex LoRa channel (SNR profiles, loss by margin, collisions, drop hook, frame trace) and a two modem harness (CALLER and AXIS) | done | 2026-11-10 |
@@ -58,6 +58,9 @@ Notes:
 - Data mode is 8-bit clean: a RETRAIN during data mode is held and printed after the OK of the escape (verbose mode). AT&V shows the current tier and the last 4 retrains. ATO prints CONNECT with the current tier. NO CARRIER prints right after the received data that fits in the host buffer, never later.
 - A tier above a modem's S21 cap is never used: asked for one, the modem acks its cap instead, and the asker stops asking above it.
 - ATH during a call prints NO CARRIER; with no call it prints OK. ATZ resets the S registers, echo and verbose, and hangs up silently.
+- ATA with nothing ringing prints NO CARRIER; ATA in online command mode (a call is up) prints ERROR and the call stays up.
+- A partial command line typed before a call connects (during RING or while dialing) is dropped at CONNECT.
+- The station name is 1 to 16 printable ASCII characters (Config::new refuses anything else).
 - ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
 
 ## Change log
@@ -70,3 +73,4 @@ Notes:
 - 2026-11-10: Training probe retried once on the same tier (with up to 50 ms jitter) before stepping one tier slower, so one lost probe no longer costs a tier at connect.
 - 2026-11-10: Phase 1 test suite: 14 core unit tests (tiers, frames, AT parser and result codes, S registers, ARQ, ATI banner), 12 two modem scenario tests on the simulator (connects at SF5 and SF12, data both ways, retrain down and up, link loss, hang-up, flow control, unguarded +++, +++ under flow control, lost TierAck, NO ANSWER, stray frames) and 4 proptest fuzz tests with a fixed seed (frames into idle modems including ring and auto-answer, 10,000 cases; decode, 10,000; AT lines, 10,000; frames into a fresh connected call per case, 3,000). 30 tests, all passing, none ignored.
 - 2026-11-10: +++ under backpressure stays data: any data the host offers (even bytes the full send window refuses) counts against the escape guard time, and held + characters followed by more input are sent as data.
+- 2026-11-10: Final review wave. ATA in online command mode prints ERROR and keeps the call (was NO CARRIER). A partial command line from before CONNECT is dropped. Config::new checks the station name (1 to 16 printable ASCII) and returns None otherwise. Escape timing fix found by the new fuzz test: a completed +++ whose closing guard has run out now escapes when the host's next byte arrives, even before the next tick (the byte was sent as data with the +++ before). New tests: S21 tier cap held against the answerer's up retrain, answerer cap lower than caller's, manual ATA with S0=0, BUSY for a third caller while in a call, numeric result codes, ATZ in a call, ATA online, partial line before CONNECT, Config name check, and a data mode escape fuzz (600 cases, fresh call each, S12 from 0 to 50, random gaps around the guard). 40 tests (15 core unit, 20 scenario, 5 fuzz), all passing, none ignored.

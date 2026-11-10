@@ -118,7 +118,8 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
     })
 }
 
-fn valid_name(n: &str) -> bool {
+/// A station name: 1 to 16 printable ASCII characters.
+pub(crate) fn valid_name(n: &str) -> bool {
     (1..=NAME_MAX).contains(&n.len()) && n.bytes().all(|b| (0x20..=0x7E).contains(&b))
 }
 
