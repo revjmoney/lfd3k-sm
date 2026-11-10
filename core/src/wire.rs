@@ -14,11 +14,17 @@
 //! - On close: read `wire_output` until it returns 0, then close the socket
 //!   (and abort a connect still in progress). Events for a socket after its
 //!   close are not reported.
+//! - While a close is pending (not yet taken), a new Wi-Fi dial (ATDT to a
+//!   forward or `host:port`) answers ERROR, so the old socket's last bytes
+//!   are never thrown away by the next call.
 //! - `wire_input` takes only what fits; keep the rest and offer it again.
 //!   Deliver every received byte before reporting `wire_closed`.
 
-use crate::settings::HOST_MAX;
+use crate::settings::{FWD_NAME, HOST_MAX};
 use crate::telnet::Telnet;
+
+/// A lone CR at the end of the data waits this long for an LF.
+pub const CR_HOLD_MS: u32 = 50;
 
 /// Size of each wire ring.
 pub const RING_CAP: usize = 2048;
@@ -81,6 +87,10 @@ impl Ring {
         RING_CAP - self.len
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -100,16 +110,6 @@ impl Ring {
             }
         }
         n
-    }
-
-    pub(crate) fn pop1(&mut self) -> Option<u8> {
-        if self.len == 0 {
-            return None;
-        }
-        let b = self.buf.get(self.head).copied();
-        self.head = (self.head + 1) % RING_CAP;
-        self.len -= 1;
-        b
     }
 
     /// Copy up to `out.len()` bytes from the front without taking them.
@@ -177,10 +177,12 @@ pub(crate) struct Wire {
     /// Second byte of an `IAC IAC` or CR NUL pair that did not fit.
     pub(crate) pend: Option<u8>,
     /// Bridge forward name for the `BRIDGE` line.
-    pub(crate) name: [u8; 16],
+    pub(crate) name: [u8; FWD_NAME],
     pub(crate) name_len: u8,
     pub(crate) last_tx: Option<u32>,
     pub(crate) last_rx: Option<u32>,
+    /// A held CR has waited `CR_HOLD_MS`: send it (as CR NUL) now.
+    pub(crate) cr_flush: bool,
 }
 
 impl Wire {
@@ -193,10 +195,11 @@ impl Wire {
             tx: Ring::new(),
             tn: Telnet::new(),
             pend: None,
-            name: [0; 16],
+            name: [0; FWD_NAME],
             name_len: 0,
             last_tx: None,
             last_rx: None,
+            cr_flush: false,
         }
     }
 
@@ -219,9 +222,32 @@ impl Wire {
             }
         }
         n += self.tn.pop_replies(out.get_mut(n..).unwrap_or(&mut []));
+        // Closing (no call): nothing more will follow, so a CR is not held.
+        let live = matches!(
+            self.call,
+            Call::Wire(Phase::Online) | Call::Bridge(Phase::Online)
+        );
         while n < out.len() {
-            let Some(b) = self.tx.pop1() else { break };
-            let (first, second) = self.tn.encode(b);
+            let mut two = [0u8; 2];
+            let k = self.tx.peek(&mut two);
+            let Some(&b) = two.first().filter(|_| k > 0) else {
+                break;
+            };
+            let next = two.get(1).copied().filter(|_| k > 1);
+            if b == b'\r' && self.tn.cr_rule() && next.is_none() {
+                if live && !self.cr_flush {
+                    // Wait for the next byte: CR LF or CR NUL.
+                    break;
+                }
+                self.cr_flush = false;
+            }
+            self.tx.skip(1);
+            let (first, mut second) = self.tn.encode(b, next);
+            if b == b'\r' && self.tn.cr_rule() && next == Some(b'\n') {
+                // CR LF goes out as one pair, so no reply lands inside it.
+                self.tx.skip(1);
+                second = next;
+            }
             if let Some(d) = out.get_mut(n) {
                 *d = first;
                 n += 1;
@@ -240,5 +266,20 @@ impl Wire {
             }
         }
         n
+    }
+
+    /// Tick: a CR alone at the end of `tx` since the last push
+    /// `CR_HOLD_MS` ago goes out as CR NUL at the next `output`.
+    pub(crate) fn cr_timer(&mut self, now: u32) {
+        let mut one = [0u8; 1];
+        let lone_cr = self.tx.len() == 1 && self.tx.peek(&mut one) == 1 && &one == b"\r";
+        if lone_cr
+            && self.tn.cr_rule()
+            && self
+                .last_tx
+                .is_none_or(|t| now.wrapping_sub(t) >= CR_HOLD_MS)
+        {
+            self.cr_flush = true;
+        }
     }
 }

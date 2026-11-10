@@ -11,17 +11,21 @@
 //!
 //! Each option is answered once while its state does not change, so two
 //! sides can never loop. Nothing is ever sent unprompted (the server speaks
-//! first). Subnegotiations are dropped; one longer than `SB_MAX` bytes ends
-//! the subnegotiation and the filter goes back to data.
+//! first). Subnegotiations are dropped whole, however long, up to `IAC SE`
+//! (nothing is buffered: no option we parse has a subnegotiation).
+//! While the server does not send BINARY (no `WILL BINARY` from it), an
+//! incoming CR NUL is the NVT bare CR and becomes CR.
 //!
 //! Replies wait in a small queue that goes out ahead of user data. The
 //! caller only feeds a byte while `can_take` is true (room for the largest
 //! reply), so no reply is ever lost.
 //!
-//! Outgoing (caller to wire): 0xFF is sent as `IAC IAC`; CR is sent as CR NUL
-//! unless BINARY is on both ways (our `WILL BINARY` accepted by the server's
-//! `DO BINARY`, and the server's `WILL BINARY`). `encode` returns the pair so
-//! the caller never splits it with a reply.
+//! Outgoing (caller to wire): 0xFF is sent as `IAC IAC`. While our sending
+//! direction is not BINARY (the server has not said `DO BINARY` to our
+//! `WILL BINARY`), CR LF goes out as CR LF and any other CR as CR NUL
+//! (RFC 854). `encode` returns the pair so the caller never splits it with a
+//! reply; the caller decides what follows a CR (see `Wire::output`, which
+//! holds a CR at the end of the data until the next byte or 50 ms).
 //!
 //! Raw mode passes both directions untouched.
 
@@ -46,8 +50,6 @@ const NAWS_REPLY: [u8; 12] = [
 ];
 /// Largest reply one incoming command can cause.
 pub const REPLY_MAX: usize = NAWS_REPLY.len();
-/// Longest subnegotiation body kept track of before giving up on it.
-pub const SB_MAX: u8 = 64;
 const RQ_CAP: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,10 +58,10 @@ enum In {
     Iac,
     /// After `IAC WILL|WONT|DO|DONT`, waiting for the option byte.
     Verb(u8),
-    /// Inside `IAC SB`, with the body length so far.
-    Sb(u8),
+    /// Inside `IAC SB`: everything is dropped until `IAC SE`.
+    Sb,
     /// `IAC` seen inside a subnegotiation.
-    SbIac(u8),
+    SbIac,
 }
 
 /// Option state: what the server does (`him`) and what we do (`us`).
@@ -80,6 +82,8 @@ pub struct Telnet {
     rq: [u8; RQ_CAP],
     rq_head: usize,
     rq_len: usize,
+    /// Last data byte was a CR from a server not sending BINARY.
+    cr_seen: bool,
 }
 
 impl Default for Telnet {
@@ -97,6 +101,7 @@ impl Telnet {
             rq: [0; RQ_CAP],
             rq_head: 0,
             rq_len: 0,
+            cr_seen: false,
         }
     }
 
@@ -110,9 +115,15 @@ impl Telnet {
         self.on
     }
 
-    /// BINARY agreed both ways: CR goes out bare.
+    /// BINARY agreed both ways.
     pub fn binary(&self) -> bool {
         self.o.us_binary && self.o.him_binary
+    }
+
+    /// Outgoing CR follows the NVT rule (CR LF or CR NUL): telnet mode and
+    /// our sending direction is not BINARY.
+    pub fn cr_rule(&self) -> bool {
+        self.on && !self.o.us_binary
     }
 
     /// Room for the largest reply: the next incoming byte may be fed.
@@ -133,10 +144,15 @@ impl Telnet {
         }
         match self.st {
             In::Data => {
+                let after_cr = core::mem::take(&mut self.cr_seen);
                 if b == IAC {
                     self.st = In::Iac;
                     None
+                } else if after_cr && b == 0 && !self.o.him_binary {
+                    // NVT CR NUL is a bare CR.
+                    None
                 } else {
+                    self.cr_seen = b == b'\r' && !self.o.him_binary;
                     Some(b)
                 }
             }
@@ -145,7 +161,7 @@ impl Telnet {
                 match b {
                     IAC => return Some(IAC),
                     WILL | WONT | DO | DONT => self.st = In::Verb(b),
-                    SB => self.st = In::Sb(0),
+                    SB => self.st = In::Sb,
                     // NOP, GA, a stray SE and every other command: dropped.
                     _ => {}
                 }
@@ -156,22 +172,15 @@ impl Telnet {
                 self.negotiate(v, b);
                 None
             }
-            In::Sb(n) => {
-                self.st = if b == IAC {
-                    In::SbIac(n)
-                } else if n >= SB_MAX {
-                    In::Data
-                } else {
-                    In::Sb(n + 1)
-                };
+            In::Sb => {
+                if b == IAC {
+                    self.st = In::SbIac;
+                }
                 None
             }
-            In::SbIac(n) => {
-                self.st = match b {
-                    SE => In::Data,
-                    IAC if n < SB_MAX => In::Sb(n + 1),
-                    _ => In::Data,
-                };
+            In::SbIac => {
+                // IAC SE ends it; IAC IAC (or anything malformed) stays inside.
+                self.st = if b == SE { In::Data } else { In::Sb };
                 None
             }
         }
@@ -275,13 +284,14 @@ impl Telnet {
     }
 
     /// One byte for the wire: the first byte to send and, if it expands,
-    /// the second one (`IAC IAC`, CR NUL).
-    pub fn encode(&self, b: u8) -> (u8, Option<u8>) {
+    /// the second one (`IAC IAC`, CR NUL). `next` is the byte after it, if
+    /// known: a CR followed by LF stays bare.
+    pub fn encode(&self, b: u8, next: Option<u8>) -> (u8, Option<u8>) {
         if !self.on {
             (b, None)
         } else if b == IAC {
             (IAC, Some(IAC))
-        } else if b == b'\r' && !self.binary() {
+        } else if b == b'\r' && self.cr_rule() && next != Some(b'\n') {
             (b'\r', Some(0))
         } else {
             (b, None)

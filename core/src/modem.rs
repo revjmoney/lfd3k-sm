@@ -802,7 +802,8 @@ impl Modem {
                 };
                 if self.mode == Mode::Command && (fwd.is_some() || hp.is_some()) {
                     // Wi-Fi dial: one call at a time.
-                    let free = self.link.is_idle() && !self.wire_active();
+                    // A close still pending: the old socket is not released yet.
+                    let free = self.link.is_idle() && !self.wire_active() && !self.wire.close;
                     let ok = free
                         && match (&fwd, hp) {
                             (Some(f), _) => self.start_wire(f.host(), f.port(), f.mode(), b"", now),
@@ -1255,6 +1256,7 @@ impl Modem {
         w.tn.reset(mode);
         w.last_tx = None;
         w.last_rx = None;
+        w.cr_flush = false;
         w.name_len = 0;
         for (d, &c) in w.name.iter_mut().zip(name.iter()) {
             *d = c;
@@ -1321,6 +1323,7 @@ impl Modem {
                 if self.mode == Mode::Data {
                     self.drain_wire();
                 }
+                self.wire.cr_timer(now);
             }
             Call::Wire(Phase::Ending { since }) => {
                 // In data mode everything the far end sent is shown first;
@@ -1344,6 +1347,7 @@ impl Modem {
             Call::Bridge(Phase::Online) => {
                 self.link_to_wire(now);
                 self.wire_to_link();
+                self.wire.cr_timer(now);
             }
             Call::Bridge(Phase::Ending { since }) => {
                 // Hand the caller what the far end sent before it closed.
