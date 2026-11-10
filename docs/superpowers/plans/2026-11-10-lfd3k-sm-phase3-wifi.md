@@ -159,6 +159,10 @@ Rev has one V4 and no second LoRa radio. This test mode lets the PC be the far m
 - [ ] Firmware: a UDP socket task (same pattern as the TCP one; no Rust calls off the modem task).
 - [ ] Commit `feat: call the V4 from the PC over Wi-Fi with a simulated radio`.
 
+### After phase 3 (Rev, 2026-11-10): AXIS side, its own plan in the AXIS repo
+
+Not part of this plan; recorded here so it is not lost. Built in `F:\axis-bbs` (GPL, separate program): (1) the AXIS build option that finds its modem by itself and sets the forward and publish, (2) radio callers and link stats on sysop screens, (3) plain menus for slow radio tiers, (4) Sysop Net and User Net with their own bases and menus, (5) later the ANSI world map. Start once phase 3 is on the V4 and the PC to AXIS test call works.
+
 ### Task 5: OLED and docs
 
 - [ ] OLED idle screen bottom area alternates every 3 s between the name row and a Wi-Fi row: `AP <ssid>`, plus `PW <pass>` only under the Secrets rule in Global Constraints (the core exposes a `show_ap_pass` flag); with a client IP: `IP <a.b.c.d>`. `tools/lfd3k_term.py` redacts `WAP` and `PW` lines and refuses `--shot` while the password is on screen unless `--allow-secret` is given, and never into the repo. Online wire call: middle shows `WIFI TCP` and `ONLINE`; bridging: `BRIDGE` plus the forward name. Keep `panel_render` pure (add the Wi-Fi strings to its inputs). Re-run `tools/panel_check.ps1` (new mockups).
