@@ -199,3 +199,11 @@ The bench terminal only opens the port once it has checked the USB identity. It 
 - OLED screenshots: `docs/phase2-bench/oled-idle.png`, `oled-dialing.png`, `oled-after.png`. Orientation correct, font and lights as in the mockups.
 - Not done: SDR decode (NESDR availability not confirmed). Two-radio call waits for the second V4.
 - Noticed: `AT` typed while dialing answered `OK` and the dial carried on; a classic Hayes modem aborts a dial on any key. Decide later.
+
+## Bench rerun, 2026-11-10 (startup hardening, commit 2566ee5)
+
+- Reflashed on COM11 (MAC 88:56:A6:96:16:FC matched), all parts hash-verified, no erase.
+- ATI banner, AT&V RADIO OK with the new reset order and 1 ms settle; safe mode did not trip.
+- ATDT TEST: DIALING, RINGING, NO ANSWER after the 30 s S7 timeout; RADIO OK afterwards.
+- Log: docs/phase2-bench/bench-2026-11-10b.log, screenshot oled-idle-b.png.
+- Safe mode itself is not exercised on hardware (it needs two quick panics); its logic is in hal_radio.c boot_check().
