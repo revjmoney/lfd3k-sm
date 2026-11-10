@@ -140,6 +140,25 @@ bool   lfd3k_take_wire_close(void);
 - [ ] **Step 4:** Modem loop additions: drain events, push socket RX into `lfd3k_wire_in` keeping leftovers, pull `lfd3k_wire_out` into the socket TX buffer only as space allows, poll `lfd3k_take_wire_request`/`lfd3k_take_wire_close`/`lfd3k_take_save`/`lfd3k_take_wifi_changed`. Never block.
 - [ ] **Step 5:** `pio run` succeeds, record RAM and flash (Wi-Fi adds a few hundred KB; must stay under the 1.5 MB slot). Commit `feat(firmware): Wi-Fi hotspot and client, NVS settings, TCP wire`.
 
+### Task 4b: Live channel trace for the idle scope (Rev, 2026-11-10)
+
+The renderer side is done (`panel_render_set_trace`, `rf_trace_t` in `firmware/src/panel_render.h`, idle scope and live idle meters). This task feeds it real data.
+- [ ] `sx1262`: `pub fn rssi_inst(&mut self) -> Option<i16>` (GetRssiInst 0x15: status byte then RssiInst; dBm = -RssiInst/2). Only valid while listening; returns None in Tx or when failed.
+- [ ] `ffi`: a 64-sample ring sampled every 50 ms from `lfd3k_poll` while listening (each sample an `int8` dBm clamped to -128..0, plus a tx flag for samples taken while transmitting); C entry `size_t lfd3k_rf_trace(int8_t *dbm, uint8_t *tx, size_t cap)` copies oldest first and returns the count.
+- [ ] Firmware: the modem task copies the trace once per loop alongside `lfd3k_status` and passes both to the panel task (same lock as `panel_publish`); the panel task calls `panel_render_set_trace` before `panel_render`.
+- [ ] Commit `feat: live channel trace for the idle scope`.
+
+### Task 4c: Call the V4 from the PC over Wi-Fi (simulated radio, Rev, 2026-11-10)
+
+Rev has one V4 and no second LoRa radio. This test mode lets the PC be the far modem over Wi-Fi, running the real core, so a whole call (dial, ring, training, CONNECT, data, retrain, `+++`, hang-up, and the `AT+PUB` bridge to AXIS) runs on the real V4 with only the RF simulated.
+- **Datagram format (UDP port 4210 both ends):** `'L' 'S' ver=1 tier_index snr_x4(i16 LE) rssi(i16 LE)` then the frame bytes. The sender fills tier and the SNR/RSSI the receiver should "hear" (the PC chooses it from a profile so retrains happen; the V4 reports what it heard of the PC as a fixed +8 dB unless told otherwise).
+- **Timing:** the simulated radio stays `busy()` for `Tier::airtime_us(len)` after `send` and only then puts the datagram on the wire, and a received datagram is delivered to the core only when its airtime has elapsed since arrival of the first byte (it arrives whole; the receiver holds it for the frame's airtime, during which `busy()` is true like a preamble-detected receive). This keeps the link timers honest.
+- [ ] Core or ffi: a `SimNetRadio` implementing `Radio` behind a small trait for "datagram out / datagram in" so the same code runs in `sim` (std UDP) and in `ffi` (C HAL `lfd3k_hal_udp_send(const uint8_t*, size_t)` plus `lfd3k_udp_in(const uint8_t*, size_t, uint32_t now_ms)`).
+- [ ] `AT+SIMNET=<pc ip>` switches the V4 to the simulated radio (the SX1262 is put to standby, nothing transmits on RF); `AT+SIMNET=0` back to the SX1262. Not saved by `AT&W` (always boots on the real radio). `AT&V` shows `RADIO SIMNET <ip>`; the OLED shows `SIM` in place of the HS light label while it is on.
+- [ ] PC tool: `cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --peer <v4 ip> [--name PCMODEM] [--snr <dB>|--profile dip]`: a real `Modem` with the std UDP `SimNetRadio`, raw terminal (stdin to `host_input`, `host_output` to stdout), so Rev types `ATDT AXISMODEM-16FC` on the PC. `--script` mode for unattended tests (send lines, wait for strings, log).
+- [ ] Firmware: a UDP socket task (same pattern as the TCP one; no Rust calls off the modem task).
+- [ ] Commit `feat: call the V4 from the PC over Wi-Fi with a simulated radio`.
+
 ### Task 5: OLED and docs
 
 - [ ] OLED idle screen bottom area alternates every 3 s between the name row and a Wi-Fi row: `AP <ssid>`, plus `PW <pass>` only under the Secrets rule in Global Constraints (the core exposes a `show_ap_pass` flag); with a client IP: `IP <a.b.c.d>`. `tools/lfd3k_term.py` redacts `WAP` and `PW` lines and refuses `--shot` while the password is on screen unless `--allow-secret` is given, and never into the repo. Online wire call: middle shows `WIFI TCP` and `ONLINE`; bridging: `BRIDGE` plus the forward name. Keep `panel_render` pure (add the Wi-Fi strings to its inputs). Re-run `tools/panel_check.ps1` (new mockups).
