@@ -6,6 +6,8 @@
  *  y 39..43   tier ladder, 8 cells 14 wide at x = 16*i (training, online)
  *  y 46..52   board name (up to 16 chars) at x 0; LFD3K-SM when none given
  *  y 55..60   RSSI text x 0, RSSI bar x 44..61, SNR text x 66, SNR bar x 110..127
+ *             (last decoded frame; while idle with a channel trace: the live channel
+ *             level and its rise above the noise floor)
  */
 #include <stdio.h>
 #include <string.h>
@@ -214,6 +216,31 @@ void panel_render_set_trace(const rf_trace_t *t)
 #define LINE_Y   34
 #define LINE_AMP 6
 
+/* Noise floor of the trace: the second lowest received sample (one dropout must not
+ * set it). *newest_rx gets the newest received (not transmit) sample, or 0 if none. */
+static int trace_floor(int *newest_rx)
+{
+    int lo1 = 0, lo2 = 0, nrx = 0, newest = 0;
+    for (int i = 0; i < s_trace.count; i++) {
+        if (s_trace.tx[i]) {
+            continue;
+        }
+        int v = s_trace.dbm[i];
+        newest = v;
+        if (nrx == 0 || v < lo1) {
+            lo2 = lo1;
+            lo1 = v;
+        } else if (nrx == 1 || v < lo2) {
+            lo2 = v;
+        }
+        nrx++;
+    }
+    if (newest_rx) {
+        *newest_rx = nrx ? newest : 0;
+    }
+    return nrx >= 2 ? lo2 : lo1;
+}
+
 static void idle_line(uint8_t *fb, uint32_t now_ms)
 {
     int t = (int)(now_ms % 2000);
@@ -226,22 +253,7 @@ static void idle_line(uint8_t *fb, uint32_t now_ms)
         return;
     }
 
-    /* noise floor: the second lowest received sample (one dropout must not set it) */
-    int lo1 = 0, lo2 = 0, nrx = 0;
-    for (int i = 0; i < s_trace.count; i++) {
-        if (s_trace.tx[i]) {
-            continue;
-        }
-        int v = s_trace.dbm[i];
-        if (nrx == 0 || v < lo1) {
-            lo2 = lo1;
-            lo1 = v;
-        } else if (nrx == 1 || v < lo2) {
-            lo2 = v;
-        }
-        nrx++;
-    }
-    int floor_dbm = nrx >= 2 ? lo2 : lo1;
+    int floor_dbm = trace_floor(NULL);
     int lift = 1024 + tri * 341 / 1000; /* breath: x1.0 .. x1.33 */
 
     for (int c = 0; c < w; c++) {
@@ -446,7 +458,26 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
     int heard = s->rssi != 0 || s->snr_x4 != 0;
     char rv[16], sv[16];
     int rs = 0, sn = 0;
-    if (heard) {
+    int live = 0, live_dbm = 0;
+    if (s->state == 0 && s->radio_ok && s_have_trace) {
+        int floor_dbm = trace_floor(&live_dbm);
+        live = live_dbm != 0;
+        if (live) {
+            /* idle: the channel right now. Left: its level. Right: how far the newest
+             * reading stands above the noise floor (not a packet SNR). */
+            int rise = live_dbm - floor_dbm;
+            if (rise < 0) {
+                rise = 0;
+            }
+            snprintf(rv, sizeof(rv), "%ddBm", live_dbm);
+            snprintf(sv, sizeof(sv), "+%ddB", rise);
+            rs = clampi((live_dbm + 130) * 16 / 100, 0, 16);
+            sn = clampi(rise * 16 / 30, 0, 16);
+        }
+    }
+    if (live) {
+        /* filled above */
+    } else if (heard) {
         snprintf(rv, sizeof(rv), "%ddBm", (int)s->rssi);
         int t10 = ((int)s->snr_x4 * 25 + ((int)s->snr_x4 < 0 ? -5 : 5)) / 10; /* tenths of a dB, rounded */
         int a10 = t10 < 0 ? -t10 : t10;
@@ -460,7 +491,7 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
     text(fb, 0, 55, rv, 1, 1);   /* up to 7 chars, ends by x 41 */
     bar(fb, 44, 55, 18, 6, rs);  /* RSSI -130..-30 dBm */
     text(fb, 66, 55, sv, 1, 1);  /* up to 7 chars, ends by x 107 */
-    bar(fb, 110, 55, 18, 6, sn); /* SNR -20..+10 dB */
+    bar(fb, 110, 55, 18, 6, sn); /* SNR -20..+10 dB; idle: rise above floor 0..30 dB */
 }
 
 void panel_render_splash(uint8_t fb[PANEL_FB_BYTES])
