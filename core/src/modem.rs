@@ -501,7 +501,9 @@ impl Modem {
                 }
             }
             // Nothing asked for this connection (any more): close it.
-            _ => self.wire.close = true,
+            Call::None => self.wire.close = true,
+            // A repeated report for a live connection: nothing to do.
+            _ => {}
         }
         self.wire_pump(now_ms);
     }
@@ -1161,6 +1163,8 @@ impl Modem {
                         self.info(t.bytes());
                     }
                 }
+                // The link connects once per call; never restart a bridge.
+                Event::Connect(_) if matches!(self.wire.call, Call::Bridge(_)) => {}
                 Event::Connect(t) => {
                     self.fresh_call();
                     // Access policy: an answered call goes to the published
