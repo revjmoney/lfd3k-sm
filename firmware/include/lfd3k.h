@@ -138,6 +138,8 @@ bool     lfd3k_show_ap_pass(void);
 void     lfd3k_note_ap_client_joined(void);
 /* Modem task stack high-water mark in bytes free; AT&V prints STACK FREE <n>. */
 void     lfd3k_set_stack_free(uint32_t bytes);
+/* Lowest free heap since boot in bytes; AT&V prints HEAP MIN <n>. */
+void     lfd3k_set_heap_min(uint32_t bytes);
 
 /* ---- The wire (a TCP connection for Wi-Fi calls and bridges). ---- */
 

@@ -179,6 +179,12 @@ static int connect_to(const char *host, uint16_t port, bool *aborted)
         if (ok && !*aborted) {
             int one = 1;
             setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            /* A host that vanished ends the call: probe after 30 s idle, every 5 s, 4 misses. */
+            int idle = 30, intvl = 5, cnt = 4;
+            setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
             fd = s;
         } else {
             close(s);

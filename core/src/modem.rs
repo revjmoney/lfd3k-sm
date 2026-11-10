@@ -290,6 +290,8 @@ pub struct Modem {
     wire: Wire,
     /// Modem task stack headroom reported by the firmware, bytes.
     stack_free: Option<u32>,
+    /// Lowest free heap since boot reported by the firmware, bytes.
+    heap_min: Option<u32>,
     /// `AT+SIMNET`: the simulated radio's peer while it is on. Never saved.
     simnet: Option<[u8; 4]>,
     /// A switch the platform has not taken yet (see `take_simnet_request`).
@@ -355,6 +357,7 @@ impl Modem {
             wifi_len: 0,
             wire: Wire::new(),
             stack_free: None,
+            heap_min: None,
             simnet: None,
             simnet_req: None,
             simnet_fail: false,
@@ -394,6 +397,7 @@ impl Modem {
         self.wifi_len = 0;
         self.wire.reset_all();
         self.stack_free = None;
+        self.heap_min = None;
         self.simnet = None;
         self.simnet_req = None;
         self.simnet_fail = false;
@@ -422,6 +426,12 @@ impl Modem {
         self.stack_free = Some(bytes);
     }
 
+    /// The firmware's lowest free heap since boot (bytes), shown by `AT&V`
+    /// as `HEAP MIN <n>`.
+    pub fn set_heap_min(&mut self, bytes: u32) {
+        self.heap_min = Some(bytes);
+    }
+
     /// True once after `AT&W` was entered (clears the flag). The platform
     /// then stores `settings()`.
     pub fn take_save_request(&mut self) -> bool {
@@ -437,6 +447,12 @@ impl Modem {
     /// The current settings, live S registers, E and V included.
     pub fn settings(&self) -> &Settings {
         &self.set
+    }
+
+    /// The saved profile (what `AT&W` last stored, what `ATZ` restores). This
+    /// is what the platform writes to flash, never the live settings.
+    pub fn saved_settings(&self) -> &Settings {
+        &self.saved
     }
 
     fn sync_set(&mut self) {
@@ -464,11 +480,15 @@ impl Modem {
     }
 
     /// The platform saw a device join the hotspot: stop showing the password.
-    /// The cleared flag is saved: this also asks for a save.
+    /// Only the cleared flag is saved (the save is built from the saved
+    /// profile, so other unsaved settings stay unsaved), and a save is asked
+    /// for only when the saved flag was still 1.
     pub fn note_ap_client_joined(&mut self) {
         self.set.show_ap_pass = false;
-        self.saved.show_ap_pass = false;
-        self.save_req = true;
+        if self.saved.show_ap_pass {
+            self.saved.show_ap_pass = false;
+            self.save_req = true;
+        }
     }
 
     /// Remember the previous boot's crash note for ATI. Only printable
@@ -1100,6 +1120,11 @@ impl Modem {
                     t.put(b"STACK FREE ").num(n, 1);
                     self.info(t.bytes());
                 }
+                if let Some(n) = self.heap_min {
+                    let mut t = Txt::new();
+                    t.put(b"HEAP MIN ").num(n, 1);
+                    self.info(t.bytes());
+                }
                 let mut t = Txt::new();
                 t.put(b"TIER ");
                 match self.link.tier().filter(|_| self.link.is_connected()) {
@@ -1165,6 +1190,11 @@ impl Modem {
             }
             AtCmd::WapSet { ssid, pass } => {
                 let ok = self.set.set_ap(ssid, pass);
+                if ok {
+                    // A password the user chose is not shown: only the
+                    // generated first-boot one is.
+                    self.set.show_ap_pass = false;
+                }
                 self.wifi_changed |= ok;
                 self.ok_or_error(ok);
             }

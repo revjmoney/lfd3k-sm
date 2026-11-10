@@ -608,7 +608,7 @@ pub unsafe extern "C" fn lfd3k_status(now_ms: u32, out: *mut lfd3k_status_t) {
 /// in `lfd3k.h`. All strings are NUL terminated.
 #[allow(non_camel_case_types)]
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct lfd3k_wifi_cfg_t {
     pub ap_on: u8,
     /// 1 when a client network is set.
@@ -617,6 +617,24 @@ pub struct lfd3k_wifi_cfg_t {
     pub ap_pass: [u8; PASS_MAX + 1],
     pub sta_ssid: [u8; SSID_MAX + 1],
     pub sta_pass: [u8; PASS_MAX + 1],
+}
+
+impl core::fmt::Debug for lfd3k_wifi_cfg_t {
+    /// Names and flags only; both passwords are masked.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        fn name(b: &[u8]) -> &str {
+            let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            core::str::from_utf8(b.get(..n).unwrap_or(&[])).unwrap_or("?")
+        }
+        f.debug_struct("lfd3k_wifi_cfg_t")
+            .field("ap_on", &self.ap_on)
+            .field("sta_set", &self.sta_set)
+            .field("ap_ssid", &name(&self.ap_ssid))
+            .field("ap_pass", &"********")
+            .field("sta_ssid", &name(&self.sta_ssid))
+            .field("sta_pass", &"********")
+            .finish()
+    }
 }
 
 /// Copies `s` into `dst` NUL terminated (cut to fit), zero filling the rest.
@@ -692,7 +710,7 @@ pub unsafe extern "C" fn lfd3k_take_save(blob: *mut u8, cap: usize, len: *mut us
             return false;
         }
         let mut tmp = [0u8; BLOB_LEN];
-        let n = d.modem.settings().to_blob(&mut tmp).min(BLOB_LEN);
+        let n = d.modem.saved_settings().to_blob(&mut tmp).min(BLOB_LEN);
         // SAFETY: `cap >= BLOB_LEN >= n`, so `blob` is valid for `n` bytes;
         // `len` is valid for one write; `tmp` is a distinct local.
         unsafe {
@@ -802,7 +820,8 @@ pub extern "C" fn lfd3k_show_ap_pass() -> bool {
     with_device(|d| d.modem.show_ap_pass()).unwrap_or(false)
 }
 
-/// A device joined the hotspot: stop showing the password (asks for a save).
+/// A device joined the hotspot: stop showing the password (asks for a save
+/// only when the saved profile still had it on; the save holds just that flag).
 #[no_mangle]
 pub extern "C" fn lfd3k_note_ap_client_joined() {
     with_device(|d| d.modem.note_ap_client_joined());
@@ -813,6 +832,12 @@ pub extern "C" fn lfd3k_note_ap_client_joined() {
 #[no_mangle]
 pub extern "C" fn lfd3k_set_stack_free(bytes: u32) {
     with_device(|d| d.modem.set_stack_free(bytes));
+}
+
+/// The lowest free heap since boot in bytes; AT&V prints `HEAP MIN <n>`.
+#[no_mangle]
+pub extern "C" fn lfd3k_set_heap_min(bytes: u32) {
+    with_device(|d| d.modem.set_heap_min(bytes));
 }
 
 /// True once when a Wi-Fi call wants a TCP connection: writes the NUL

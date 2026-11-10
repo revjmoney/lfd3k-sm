@@ -4,6 +4,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -223,6 +224,7 @@ static void modem_task(void *arg)
 
     uint8_t pend[IN_PENDING];
     size_t pend_len = 0;
+    bool wifi_apply_pending = false;
 
     for (;;) {
         esp_task_wdt_reset();
@@ -250,7 +252,16 @@ static void modem_task(void *arg)
         simnet_step();
         wire_pump(now_ms);
 
+        lfd3k_status_t st;
+        lfd3k_status(now_ms, &st);
+
+        /* A Wi-Fi change is a full stop and start, which would kill a live socket or SimNet
+         * link: hold it while any call is up (any wire state or radio call), apply it after. */
         if (lfd3k_take_wifi_changed()) {
+            wifi_apply_pending = true;
+        }
+        if (wifi_apply_pending && st.state == 0 && st.wire == 0) {
+            wifi_apply_pending = false;
             lfd3k_wifi_cfg_t wc;
             lfd3k_get_wifi_config(&wc);
             wifi_link_apply(&wc);
@@ -259,9 +270,6 @@ static void modem_task(void *arg)
         if (wifi_link_take_ap_joined()) {
             lfd3k_note_ap_client_joined();
         }
-
-        lfd3k_status_t st;
-        lfd3k_status(now_ms, &st);
         panel_publish(&st);
         {
             rf_trace_t tr;
@@ -284,6 +292,7 @@ static void modem_task(void *arg)
             lfd3k_set_wifi_status(line);
             publish_net();
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
+            lfd3k_set_heap_min(esp_get_minimum_free_heap_size());
         }
 
         /* Out to the host, never waiting. During a dump the core's own ring holds output. */

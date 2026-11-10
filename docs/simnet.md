@@ -17,6 +17,12 @@ SimNet is never saved: every boot starts on the real radio.
 - The PC on the same network.
 - The repo at `F:\lfd3k-sm` with Rust installed (the same setup as the demo).
 
+Trust: SimNet accepts datagrams by source IP address only (the port is not
+checked, and a source address is easy to fake on the same network). It is a
+test mode: use it on a network you trust, turn it off with `AT+SIMNET=0` when
+you are done, and do not leave `ATS0=1` with a published forward while it is
+on. It is never saved, so every boot starts with it off.
+
 The first time the PC tool opens UDP port 4210, Windows may ask whether to
 allow it through the firewall. Allow it, or the V4's datagrams never reach
 the PC. Nothing here changes firewall settings for you. Two things to know:

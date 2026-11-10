@@ -145,6 +145,13 @@ class Redaction(unittest.TestCase):
         self.assertEqual(T.redact_line("at+wsta=Home," + FAKE_PW), "at+wsta=Home,********")
         self.assertEqual(T.redact_line("ATE0 AT+WSTA=Home," + FAKE_PW), "ATE0 AT+WSTA=Home,********")
 
+    def test_spaced_and_mixed_case_command_forms_are_masked(self):
+        for cmd in ("AT +WSTA=Home,", "AT+ WSTA=Home,", "AT+WSTA =Home,", "at + wap =Home,",
+                    "At+WsTa=Home,", "AT  +  WSTA  =Home,"):
+            got = T.redact_line(cmd + FAKE_PW)
+            self.assertNotIn(FAKE_PW, got, cmd)
+            self.assertTrue(got.endswith(",********"), got)
+
     def test_harmless_lines_are_untouched(self):
         for line in ("OK", "PWSHOW 1", "PWSHOW 0", "WSTA Home ********", "WSTA OFF",
                      "PUB NONE", "FWD AXIS 192.168.1.164:23 T", "AT+WAP?", "AT+WSTA?",
@@ -373,6 +380,20 @@ class LiveRedaction(unittest.TestCase):
         self.assertIn(FAKE_PW, r.out)
         self.assertNotIn(FAKE_PW, logged)
         self.assertIn("WAP ON ********", logged)
+
+    def test_fb_hex_is_never_logged_even_with_allow_secret(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        log = os.path.join(tmp.name, "t.log")
+        png = os.path.join(tmp.name, "oled.png")
+        r = Run({b"AT+FB\r": FB_REPLY.encode()})
+        code = r.main(BASE + ["--log", log, "--allow-secret", "--shot", png])
+        self.assertEqual(code, 0, r.err)
+        with open(log, encoding="utf-8") as f:
+            logged = f.read()
+        self.assertNotIn("FB:", logged)
+        self.assertNotIn("0000", logged)
+        self.assertTrue(os.path.exists(png))
 
 
 if __name__ == "__main__":

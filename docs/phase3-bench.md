@@ -29,8 +29,15 @@ Open PowerShell for every command. Replace `COMn` with the V4 port from Device M
    `AT+WSTA=<your network>,<your password>`
 
    It answers `OK`.
+
+   Rules: the password is 8 to 63 characters. Neither the name nor the password may contain a comma. Spaces at the very start and end of the whole line are dropped. Open networks (no password) are not supported. A bare `ERROR` means one of these rules was broken.
+
+   To avoid the password being echoed back, type `ATE0` first (and `ATE1` after). Miniterm shows what you type either way, so do not capture the screen while you type it.
 2. Type `AT&W`. This saves it. The V4 keeps it across power cycles.
-3. Check what it saved: `AT+WSTA?`. It shows your network name and `********`. It never shows the password.
+
+   Both the client password and the hotspot password are stored unencrypted in the V4's flash. Anyone with the board and a USB cable can read them. `AT+WSTA=0` then `AT&W` removes the client one from the saved settings (the flash may keep the old bytes until that spot is reused).
+3. Setting the client network (and every `AT+WAP`, and `ATZ`) restarts Wi-Fi, so devices on the hotspot drop for a few seconds. Once the V4 joins your network, the hotspot moves to your home network's channel, so a phone on the hotspot may drop and reconnect. A change typed during a call waits until the call ends.
+4. Check what it saved: `AT+WSTA?`. It shows your network name and `********`. It never shows the password.
 
 ## b. Read the address
 
@@ -64,7 +71,8 @@ If you see `NO CARRIER` right away, check the address with `AT+WIFI?` and that t
    - `AT+WAP?`, which prints `WAP ON <name> <password>`. The line shows the password on purpose, so do this on your own screen only.
 3. On a phone, open Wi-Fi settings, pick the hotspot name, and type the password.
 4. Once a device joins, the OLED stops showing `PW`. `AT&V` then says `PWSHOW 0`.
-5. The hotspot reaches only the V4 itself. It does not give the phone internet and does not reach your home network.
+5. If you set your own hotspot name and password with `AT+WAP=<name>,<password>`, the OLED never shows that password (only the generated one is shown). When the V4 is on your home network, the hotspot runs on your home network's channel, so a device on it may drop and reconnect once.
+6. The hotspot reaches only the V4 itself. It does not give the phone internet and does not reach your home network.
 
 ## e. Call the V4 from the PC with a simulated radio
 
@@ -91,7 +99,7 @@ Follow `docs\simnet.md`, section "Plain call: PC dials the V4". In short:
 4. The V4 answers by itself and joins the call to AXIS. The PC prints `CONNECT`, then the AXIS welcome screen appears in the PC window.
 5. The V4 OLED shows `BRIDGE` and the radio tier. The V4 terminal shows `BRIDGE AXIS`.
 6. End with `+++` then `ATH` on the PC. Both sides print `NO CARRIER`. Then on the V4: `AT+SIMNET=0`.
-7. To stop bridging: `AT+PUB=0`.
+7. To stop bridging, type all three: `AT+PUB=0`, `ATS0=0`, then `AT&W`. Without `AT&W` the V4 goes back to answering and bridging every radio caller after the next power cycle. The published forward is the only thing a radio caller can reach.
 
 ## Screenshots without leaking the password
 
@@ -110,6 +118,6 @@ The bench terminal can take a picture of the OLED. It refuses when the password 
 
 ## If something looks wrong
 
-- `AT&V` shows `WIFI`, `PWSHOW`, `PUB`, `FWD` and `STACK FREE` lines. Copy those lines (they hold no password) to the controller.
+- `AT&V` shows `WIFI`, `PWSHOW`, `PUB`, `FWD`, `STACK FREE` and `HEAP MIN` lines. Copy those lines (they hold no password) to the controller.
 - A `NO CARRIER` after `ATDT` means the connect failed or timed out (S7 seconds).
 - No `IP` row on the OLED means the client side has no address yet.

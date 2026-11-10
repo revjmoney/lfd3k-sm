@@ -27,6 +27,20 @@ static volatile int64_t s_retry_at_us;       /* 0 = none */
 static volatile uint32_t s_backoff_s = 1;
 static lfd3k_wifi_cfg_t s_cfg;               /* the Wi-Fi task's copy, normalised */
 static bool s_started;
+static uint64_t s_applied_hash;              /* FNV-1a of the last applied config; never the passwords */
+static bool s_applied_valid;
+
+/* 64 bit FNV-1a over the whole config, so an identical one can be skipped without
+ * keeping a copy of the passwords. */
+static uint64_t cfg_hash(const lfd3k_wifi_cfg_t *c)
+{
+    const uint8_t *p = (const uint8_t *)c;
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < sizeof(*c); i++) {
+        h = (h ^ p[i]) * 1099511628211ULL;
+    }
+    return h;
+}
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -50,6 +64,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static void apply(const lfd3k_wifi_cfg_t *c)
 {
+    uint64_t h = cfg_hash(c);
+    if (s_applied_valid && h == s_applied_hash) {
+        ESP_LOGI(TAG, "Wi-Fi config unchanged, nothing to do");
+        return;
+    }
+    s_applied_valid = false; /* only a successful apply is remembered, so a retry runs */
     s_sta_wanted = false;
     s_retry_at_us = 0;
     s_backoff_s = 1;
@@ -68,6 +88,8 @@ static void apply(const lfd3k_wifi_cfg_t *c)
         ESP_LOGI(TAG, "Wi-Fi off");
         memset(s_cfg.ap_pass, 0, sizeof(s_cfg.ap_pass)); /* never keep passwords */
         memset(s_cfg.sta_pass, 0, sizeof(s_cfg.sta_pass));
+        s_applied_hash = h;
+        s_applied_valid = true;
         return;
     }
     wifi_config_t wc;
@@ -103,6 +125,8 @@ static void apply(const lfd3k_wifi_cfg_t *c)
         return;
     }
     s_started = true;
+    s_applied_hash = h;
+    s_applied_valid = true;
     /* Client-only mode defaults to modem sleep, which can hold inbound packets
      * for a beacon interval: too slow for SimNet frames and telnet echo. */
     esp_wifi_set_ps(WIFI_PS_NONE);

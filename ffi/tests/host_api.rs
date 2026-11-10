@@ -1,4 +1,4 @@
-//! Host tests of the C ABI against the fake HAL. The fake HAL and the static
+﻿//! Host tests of the C ABI against the fake HAL. The fake HAL and the static
 //! device are process globals, so every test takes `serial()` first.
 //!
 //! `Rig` wires the FFI modem to a second core modem ("PEER") by carrying
@@ -869,6 +869,57 @@ fn settings_load_save_roundtrip_c_abi() {
     assert_ne!(hidden, first, "the blob now says hidden");
     assert_eq!(load(&hidden), 0);
     assert!(!lfd3k_show_ap_pass());
+}
+
+#[test]
+fn heap_min_c_abi() {
+    let _g = serial();
+    assert_eq!(init("CALLER"), 0);
+    cmd("ATE0", 0);
+    assert!(!cmd("AT&V", 1).contains("HEAP MIN"));
+    lfd3k_set_heap_min(98_304);
+    assert!(cmd("AT&V", 2).contains("\r\nHEAP MIN 98304\r\n"));
+}
+
+#[test]
+fn wifi_cfg_debug_masks_passwords() {
+    let _g = serial();
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
+    take_save();
+    cmd("AT+WSTA=HomeNet,Rev-Home-Pass-1", 1);
+    let shown = format!("{:?}", wifi_cfg());
+    assert!(
+        shown.contains("HomeNet") && shown.contains("********"),
+        "{shown}"
+    );
+    assert!(!shown.contains("hotspotpw234") && !shown.contains("Rev-Home-Pass-1"));
+}
+
+#[test]
+fn hotspot_join_saves_only_flag_c_abi() {
+    let _g = serial();
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    cmd("ATE0", 0);
+    unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
+    let first = take_save().expect("first boot saves");
+    // Unsaved live changes, then a device joins the hotspot.
+    assert!(cmd("ATS0=1", 1).ends_with("OK\r\n"));
+    assert!(cmd("AT+WSTA=HomeNet,Rev-Home-Pass-1", 1).ends_with("OK\r\n"));
+    lfd3k_note_ap_client_joined();
+    let blob = take_save().expect("the join asks for a save");
+    assert_ne!(blob, first, "the flag changed");
+    assert_eq!(blob.len(), first.len());
+    // A power cycle with that blob: flag cleared, nothing else leaked in.
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    cmd("ATE0", 0);
+    assert_eq!(load(&blob), 0);
+    assert!(!lfd3k_show_ap_pass());
+    assert!(cmd("ATS0?", 2).ends_with("\r\n000\r\n\r\nOK\r\n"));
+    assert!(cmd("AT+WSTA?", 2).contains("WSTA OFF"));
+    // A second join asks for nothing.
+    lfd3k_note_ap_client_joined();
+    assert!(take_save().is_none());
 }
 
 #[test]

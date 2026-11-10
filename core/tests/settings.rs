@@ -632,6 +632,82 @@ fn note_ap_client_joined_requests_save() {
 }
 
 #[test]
+fn wap_user_set_hides_password() {
+    let mut m = modem();
+    assert!(m.show_ap_pass());
+    // A refused AT+WAP changes nothing.
+    error(&mut m, "AT+WAP=Net,short");
+    assert!(m.show_ap_pass());
+    // The on/off switch is not a password the user chose.
+    ok(&mut m, "AT+WAP=0");
+    assert!(m.show_ap_pass());
+    // A name and password the user typed are not shown on the OLED.
+    ok(&mut m, "AT+WAP=MyHotspot,my-own-pass-1");
+    assert!(!m.show_ap_pass());
+    assert!(run(&mut m, "AT&V", 0).contains("\r\nPWSHOW 0\r\n"));
+    // ATZ goes back to the saved generated password: it stays hidden.
+    ok(&mut m, "ATZ");
+    assert_eq!(m.settings().ap_pass(), AP_PASS);
+    assert!(!m.show_ap_pass());
+    // A later AT&W saves the hidden flag with the user's password.
+    ok(&mut m, "AT+WAP=MyHotspot,my-own-pass-1");
+    ok(&mut m, "AT&W");
+    let s = Settings::from_blob(&blob_of(m.saved_settings())).unwrap();
+    assert!(!s.show_ap_pass);
+    assert_eq!(s.ap_pass(), "my-own-pass-1");
+}
+
+#[test]
+fn hotspot_join_saves_only_flag() {
+    let mut m = modem();
+    // Unsaved live changes: a trial auto-answer, a client network, a publish.
+    ok(&mut m, "ATS0=1");
+    ok(&mut m, &format!("AT+WSTA=HomeNet,{STA_PASS}"));
+    ok(&mut m, "AT+FWD=a,h.example,23");
+    ok(&mut m, "AT+PUB=a");
+    assert!(!m.take_save_request());
+    m.note_ap_client_joined();
+    assert!(m.take_save_request(), "the cleared flag is persisted");
+    // What gets written is the saved profile with only the flag changed.
+    let s = Settings::from_blob(&blob_of(m.saved_settings())).unwrap();
+    assert!(!s.show_ap_pass);
+    assert_eq!(s.sregs.get(0), Some(0), "S0 was never saved");
+    assert_eq!(s.sta_ssid(), "");
+    assert_eq!(s.fwd_count(), 0);
+    assert!(s.published().is_none());
+    assert_eq!(s.ap_pass(), AP_PASS);
+    // The live settings keep the unsaved work, and the live flag agrees.
+    assert_eq!(m.settings().sregs.get(0), Some(1));
+    assert_eq!(m.settings().sta_ssid(), "HomeNet");
+    assert!(!m.show_ap_pass());
+    // The flag was already 0: a second join asks for nothing.
+    m.note_ap_client_joined();
+    assert!(!m.take_save_request());
+    // ATZ restores the saved copy and the password stays hidden.
+    ok(&mut m, "ATZ");
+    assert_eq!(m.settings().sregs.get(0), Some(0));
+    assert!(!m.show_ap_pass());
+}
+
+#[test]
+fn heap_min_line_in_atv() {
+    let mut m = modem();
+    assert!(
+        !run(&mut m, "AT&V", 0).contains("HEAP MIN"),
+        "nothing until the platform reports"
+    );
+    m.set_heap_min(123_456);
+    let t = run(&mut m, "AT&V", 0);
+    assert!(t.contains("\r\nHEAP MIN 123456\r\n"), "{t:?}");
+    m.set_stack_free(7340);
+    let t = run(&mut m, "AT&V", 0);
+    let (s, h) = (t.find("STACK FREE").unwrap(), t.find("HEAP MIN").unwrap());
+    assert!(s < h, "HEAP MIN follows STACK FREE: {t:?}");
+    m.set_heap_min(0);
+    assert!(run(&mut m, "AT&V", 0).contains("\r\nHEAP MIN 0\r\n"));
+}
+
+#[test]
 fn wifi_changed_is_set_by_wap_wsta_atz_and_load() {
     let mut m = modem();
     assert!(!m.take_wifi_changed());

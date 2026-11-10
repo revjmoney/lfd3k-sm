@@ -10,12 +10,13 @@ touched again.
   python lfd3k_term.py --port COM11 --expect-mac AA:BB:CC:DD:EE:FF --send ATI
   python lfd3k_term.py --port COM11 --expect-mac AA:BB:CC:DD:EE:FF --shot-safe --shot oled.png
 
-Secrets: the hotspot password shows on the OLED and in AT+WAP? while AT&V says
-PWSHOW 1. This tool therefore
+Secrets: the hotspot password shows on the OLED while AT&V says PWSHOW 1, and AT+WAP?
+always prints it. This tool therefore
   * redacts what it prints and logs: the rest of a "WAP " line after ON or OFF,
     everything after "PW " on any line, and everything after the first comma of an
-    echoed AT+WAP= or AT+WSTA= line, all shown as ********. (--allow-secret turns
-    redaction off for the screen only; the log is always redacted.)
+    echoed AT+WAP= or AT+WSTA= line (spaces around + and =, and any case, included), all
+    shown as ********. (--allow-secret turns redaction off for the screen only; the log
+    is always redacted, and an AT+FB dump is never written to the log.)
   * refuses --shot unless --shot-safe is given (it reads AT&V first and only sends
     AT+FB when it sees PWSHOW 0) or --allow-secret is given.
   * refuses to write a --shot or --log file inside the repo's docs folder unless
@@ -32,19 +33,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 REFUSED = {"COM15", "COM9"}
 VID, PID = 0x303A, 0x1001
 MASK = "********"
+SECRET_CMD = re.compile(r"at\s*\+\s*(?:wap|wsta)\s*=", re.I)
 DOCS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
 
 
 def redact_line(line):
     """Hide passwords in one line of modem output (no line ending in it)."""
-    low = line.lower()
-    for cmd in ("at+wap=", "at+wsta="):
-        i = low.find(cmd)
-        if i >= 0:
-            j = line.find(",", i)
-            if j >= 0:
-                line = line[: j + 1] + MASK
-            low = line.lower()
+    # The core ignores spaces around "+" and "=" and the case, so this does too.
+    m = SECRET_CMD.search(line)
+    if m:
+        j = line.find(",", m.end())
+        if j >= 0:
+            line = line[: j + 1] + MASK
     if line.startswith("WAP "):
         # WAP <ON|OFF> <ssid> <password>: an ssid may hold spaces, so everything after
         # ON or OFF is masked (a leaked half password is worse than a hidden name).
@@ -209,7 +209,11 @@ def main(argv=None):
             drain(s, a.wait_ms, log, red=red, allow_secret=a.allow_secret)
         if a.shot:
             s.write(b"AT+FB\r")
-            text = drain(s, max(a.wait_ms, 2000), log, stop=fb_done, red=red, show=False)
+            # The framebuffer hex holds the PW row as pixels: it never goes to the log.
+            text = drain(s, max(a.wait_ms, 2000), None, stop=fb_done, red=red, show=False)
+            if log:
+                log.write("AT+FB dump omitted from the log\n")
+                log.flush()
             try:
                 png = fb2png.fb_to_png(fb2png.parse_fb(text))
             except ValueError as e:
