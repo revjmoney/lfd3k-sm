@@ -189,6 +189,83 @@ static void tiny_bit(uint8_t *fb, int x, int y, int one)
     }
 }
 
+/* ---- Idle line: breathing scope of the real channel ----
+ * The window still breathes (8..108 px wide, 2 s triangle, as before). Inside it the
+ * latest RF trace is drawn as a waveform mirrored around y 34: height grows with the
+ * signal above the noise floor (about 3 dB per pixel, up to 6 px), our own transmit
+ * samples are full height, and the breath lifts the height by up to a third. With no
+ * trace, or a quiet channel, it is the plain 3 px breathing bar. */
+static rf_trace_t s_trace;
+static int s_have_trace;
+
+void panel_render_set_trace(const rf_trace_t *t)
+{
+    if (t == NULL || t->count == 0) {
+        s_have_trace = 0;
+        return;
+    }
+    s_trace = *t;
+    if (s_trace.count > RF_TRACE_N) {
+        s_trace.count = RF_TRACE_N;
+    }
+    s_have_trace = 1;
+}
+
+#define LINE_Y   34
+#define LINE_AMP 6
+
+static void idle_line(uint8_t *fb, uint32_t now_ms)
+{
+    int t = (int)(now_ms % 2000);
+    int tri = t < 1000 ? t : 2000 - t; /* 0..1000 */
+    int w = 8 + tri * 100 / 1000;
+    int x0 = (W - w) / 2;
+
+    if (!s_have_trace) {
+        fill(fb, x0, LINE_Y - 1, w, 3, 1);
+        return;
+    }
+
+    /* noise floor: the second lowest received sample (one dropout must not set it) */
+    int lo1 = 0, lo2 = 0, nrx = 0;
+    for (int i = 0; i < s_trace.count; i++) {
+        if (s_trace.tx[i]) {
+            continue;
+        }
+        int v = s_trace.dbm[i];
+        if (nrx == 0 || v < lo1) {
+            lo2 = lo1;
+            lo1 = v;
+        } else if (nrx == 1 || v < lo2) {
+            lo2 = v;
+        }
+        nrx++;
+    }
+    int floor_dbm = nrx >= 2 ? lo2 : lo1;
+    int lift = 1024 + tri * 341 / 1000; /* breath: x1.0 .. x1.33 */
+
+    for (int c = 0; c < w; c++) {
+        /* newest sample at the right edge of the window */
+        int idx = s_trace.count - 1 - (w - 1 - c) * s_trace.count / (w > 1 ? w : 1);
+        idx = clampi(idx, 0, s_trace.count - 1);
+        int h;
+        if (s_trace.tx[idx]) {
+            h = LINE_AMP;
+        } else {
+            h = clampi((s_trace.dbm[idx] - floor_dbm) / 3, 0, LINE_AMP);
+        }
+        h = clampi(h * lift / 1024, 0, LINE_AMP);
+        int x = x0 + c;
+        /* the carrier: always a 1 px line, the signal grows it both ways */
+        for (int y = LINE_Y - h; y <= LINE_Y + h; y++) {
+            px(fb, x, y, 1);
+        }
+        if (h == 0 && (c % 2 == 0)) {
+            px(fb, x, LINE_Y - 1, 1); /* a little texture on a quiet channel */
+        }
+    }
+}
+
 static void idle_word(uint8_t *fb, uint32_t now_ms)
 {
     static const char word[] = "IDLE";
@@ -345,11 +422,7 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
             break;
         default: {
             idle_word(fb, now_ms);
-            /* carrier pulse: a bar that breathes, 2 s triangle */
-            int t = (int)(now_ms % 2000);
-            int tri = t < 1000 ? t : 2000 - t;
-            int w = 8 + tri * 100 / 1000;
-            fill(fb, (W - w) / 2, 33, w, 3, 1);
+            idle_line(fb, now_ms); /* breathing scope of the channel */
             break;
         }
         }
