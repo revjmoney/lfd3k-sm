@@ -186,10 +186,12 @@ static void wifi_task(void *arg)
             build_status();
         }
         /* mDNS: a client address, or the hotspot, is a network to talk on. */
+        char net[16];
         portENTER_CRITICAL(&s_mux);
         bool net_up = s_started && (s_ip[0] != 0 || s_cfg.ap_on);
+        strlcpy(net, s_ip, sizeof(net));
         portEXIT_CRITICAL(&s_mux);
-        mdns_link_step(net_up);
+        mdns_link_step(net_up, net);
     }
 }
 

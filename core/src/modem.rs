@@ -386,6 +386,17 @@ pub struct Modem {
     last_caller_len: u8,
     /// Retrains on the current (or last) radio call, for LFD3K-LINK.
     call_retrains: u32,
+    /// The caller of the call now ringing us (its CallReq), valid name or
+    /// empty; copied into `call_caller` when that call connects.
+    ring_caller: [u8; NAME_MAX],
+    ring_caller_len: u8,
+    /// The radio caller of the current answered call, set once at connect
+    /// (a later CallReq never renames it); empty sends `caller=-`.
+    call_caller: [u8; NAME_MAX],
+    call_caller_len: u8,
+    /// The last frame of the current call (its call id and metadata), for
+    /// the LFD3K-LINK SNR and RSSI; never another station's frame.
+    call_rx: Option<(u8, RxInfo)>,
     /// Telnet servers the platform's mDNS browse found (`set_found_hosts`).
     found: FoundList,
 }
@@ -469,6 +480,11 @@ impl Modem {
             last_caller: [0; NAME_MAX],
             last_caller_len: 0,
             call_retrains: 0,
+            ring_caller: [0; NAME_MAX],
+            ring_caller_len: 0,
+            call_caller: [0; NAME_MAX],
+            call_caller_len: 0,
+            call_rx: None,
             found: FoundList::new(),
         }
     }
@@ -527,6 +543,9 @@ impl Modem {
         self.last_caller = [0; NAME_MAX];
         self.last_caller_len = 0;
         self.call_retrains = 0;
+        self.ring_caller_len = 0;
+        self.call_caller_len = 0;
+        self.call_rx = None;
         self.found.clear();
     }
 
@@ -976,11 +995,21 @@ impl Modem {
             .link
             .tier()
             .filter(|_| radio && self.link.is_connected());
-        let rx = self.last_rx.filter(|_| radio);
+        // Only this call's own last frame (never a beacon or another caller).
+        let id = self.link.call_id();
+        let rx = self
+            .call_rx
+            .filter(|&(c, _)| radio && c != 0 && c == id)
+            .map(|(_, i)| i);
+        let caller = self
+            .call_caller
+            .get(..usize::from(self.call_caller_len))
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .unwrap_or("");
         let s = LinkStats {
             modem: name_of(&self.cfg),
             radio,
-            caller: if radio { self.last_caller() } else { "" },
+            caller: if radio { caller } else { "" },
             sf: tier.map(Tier::sf),
             bps: tier.map(Tier::air_bps),
             snr_x4: rx.map(|i| i.snr_x4),
@@ -1008,6 +1037,22 @@ impl Modem {
     /// is not a forward yet, and only Enter there adds it.
     pub fn set_found_hosts<I: IntoIterator<Item = Found>>(&mut self, hosts: I) {
         if self.found.set(hosts) && self.menu.open {
+            // The highlight stays on the host it was on, wherever that host
+            // moved in the new list; a host that left keeps its mark, so
+            // Enter refuses it instead of adding whatever row is there now.
+            let ui = &self.menu.ui;
+            if ui.screen == menu::Screen::Fwd {
+                if let Some((ip, port)) = ui.found_at {
+                    let at = self
+                        .found
+                        .iter()
+                        .filter(|h| !h.is_forward(&self.set))
+                        .position(|h| h.ip() == ip && h.port() == port);
+                    if let Some(j) = at {
+                        self.menu.ui.sel = MAX_FWD as u8 + j as u8;
+                    }
+                }
+            }
             self.menu.rd.refresh();
         }
     }
@@ -1064,6 +1109,14 @@ impl Modem {
 
     pub fn radio_rx<R: Radio>(&mut self, frame: &[u8], info: RxInfo, radio: &mut R, now_ms: u32) {
         self.last_rx = Some(info);
+        // A frame of the call in progress (its call id, a link that is not
+        // idle): the call's own signal for LFD3K-LINK.
+        if let Ok(f) = crate::frame::decode(frame) {
+            let id = f.header.call_id;
+            if id != 0 && !self.link.is_idle() && id == self.link.call_id() {
+                self.call_rx = Some((id, info));
+            }
+        }
         self.disc_start(now_ms);
         if self.screen(frame, info, now_ms) {
             // A radio caller during a Wi-Fi call gets BUSY.
@@ -1176,6 +1229,19 @@ impl Modem {
         // The link ignores call id 0; so does the directory.
         if call_id != 0 {
             self.dir_heard(caller, None, info, now);
+            // The call that may ring us: an idle link takes this CallReq;
+            // while ringing, only its own call's repeats count.
+            let ours = self.link.is_idle()
+                || (self.link.state() == State::Ringing && call_id == self.link.call_id());
+            if ours {
+                self.ring_caller_len = 0;
+                if valid_station(caller) {
+                    for (d, &c) in self.ring_caller.iter_mut().zip(caller.as_bytes()) {
+                        *d = c;
+                        self.ring_caller_len += 1;
+                    }
+                }
+            }
             if valid_station(caller) {
                 let n = caller.len().min(NAME_MAX);
                 if let (Some(d), Some(s)) =
@@ -2311,6 +2377,12 @@ impl Modem {
                 Event::Connect(t) => {
                     self.fresh_call();
                     self.call_retrains = 0;
+                    // The answered call's caller, fixed for the whole call.
+                    self.call_caller_len = 0;
+                    if self.link.role() == Role::Answerer {
+                        self.call_caller = self.ring_caller;
+                        self.call_caller_len = self.ring_caller_len;
+                    }
                     // Access policy: an answered call goes to the published
                     // forward only, never anywhere else.
                     let publ = if self.link.role() == Role::Answerer && !self.wire_active() {
@@ -2730,7 +2802,7 @@ impl Modem {
                 let ok = self.menu_run(radio, now);
                 self.menu.ui.ran(ok);
             }
-            Action::AddFound(i) => self.add_found(i, radio, now),
+            Action::AddFound { ip, port } => self.add_found(ip, port, radio, now),
         }
         if self.menu.open {
             self.menu.unsaved = !self.set.same_profile(&self.saved);
@@ -2738,16 +2810,34 @@ impl Modem {
         }
     }
 
-    /// The owner pressed Enter on found host `i` (the `i`th one that is not
-    /// a forward yet) on the Forwards screen: exactly
+    /// The menu's `Ui::track_found`, with a view of the modem (the Ui is
+    /// taken out for the call, as in `menu_key`).
+    fn menu_track_found(&mut self, now: u32) {
+        let mut ui = core::mem::take(&mut self.menu.ui);
+        ui.track_found(&self.view(now));
+        self.menu.ui = ui;
+    }
+
+    /// The owner pressed Enter on the found host at `ip`:`port` (the one
+    /// the highlight was on; refused with a message, nothing added, when it
+    /// is no longer in the list or became a forward) on the Forwards screen:
+    /// exactly
     /// `AT+FWD=<name>,<ip>,<port>,T`, then `AT+PUB=<name>` only when that
     /// said OK, both through the AT parser and dispatch like any menu edit.
     /// The name is the host's instance name when it is a valid forward
     /// name, else `AXIS`; a name that already belongs to another forward is
     /// refused (nothing is rewritten). The settings are then unsaved, so
     /// leaving asks to save.
-    fn add_found<R: Radio>(&mut self, i: u8, radio: &mut R, now: u32) {
-        let Some(h) = self.found.new_host(&self.set, i).copied() else {
+    fn add_found<R: Radio>(&mut self, ip: [u8; 4], port: u16, radio: &mut R, now: u32) {
+        let host = self
+            .found
+            .iter()
+            .find(|h| h.ip() == ip && h.port() == port && !h.is_forward(&self.set))
+            .copied();
+        let Some(h) = host else {
+            let mut ui = core::mem::take(&mut self.menu.ui);
+            ui.found_gone(&self.view(now));
+            self.menu.ui = ui;
             return;
         };
         let mut name = [0u8; crate::settings::FWD_NAME];
@@ -2778,6 +2868,8 @@ impl Modem {
         self.menu
             .ui
             .found_added(ok, core::str::from_utf8(name).unwrap_or(""));
+        // The added host is a forward now: the highlight is on another row.
+        self.menu_track_found(now);
     }
 
     /// Run the AT line the menu composed through the AT parser and the AT

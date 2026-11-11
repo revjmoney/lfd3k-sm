@@ -34,6 +34,9 @@ static char s_name[NAME_CAP];            /* name the service carries now */
 static mdns_search_once_t *s_search;
 static int64_t s_next_browse_us;
 static bool s_was_up;
+static char s_net[16];                   /* the network the list belongs to (client address) */
+static int64_t s_add_retry_us;           /* a failed service add waits until then */
+static uint32_t s_add_backoff_s = 1;     /* 1, 2, 4 ... 60 s */
 
 void mdns_link_init(void)
 {
@@ -56,8 +59,9 @@ static void host_name(const char *name, char *out, size_t cap)
     out[n] = 0;
 }
 
-/* Advertise _lfd3k._tcp under the modem's name, or rename it. */
-static void apply_name(const char *name, const char *ver)
+/* Advertise _lfd3k._tcp under the modem's name, or rename it. False when the
+ * service could not be added (the caller retries with a back off). */
+static bool apply_name(const char *name, const char *ver)
 {
     char host[NAME_CAP];
     host_name(name, host, sizeof(host));
@@ -70,8 +74,10 @@ static void apply_name(const char *name, const char *ver)
         };
         esp_err_t e = mdns_service_add(name, SERVICE, PROTO, SERVICE_PORT, txt, 2);
         if (e != ESP_OK) {
-            ESP_LOGW(TAG, "service add failed: %s", esp_err_to_name(e));
-            return;
+            /* One warning per back off step, never per loop turn. */
+            ESP_LOGW(TAG, "service add failed: %s, retry in %u s", esp_err_to_name(e),
+                     (unsigned)s_add_backoff_s);
+            return false;
         }
         s_service = true;
     } else {
@@ -81,6 +87,16 @@ static void apply_name(const char *name, const char *ver)
     }
     strlcpy(s_name, name, sizeof(s_name));
     ESP_LOGI(TAG, "advertising %s.%s.%s", name, SERVICE, PROTO);
+    return true;
+}
+
+/* The list is for a network the modem is no longer on: hand the core an empty one. */
+static void clear_found(void)
+{
+    portENTER_CRITICAL(&s_mux);
+    memset(s_found, 0, sizeof(s_found));
+    s_found_n = 0;
+    portEXIT_CRITICAL(&s_mux);
 }
 
 /* A finished browse: the first LFD3K_FOUND_MAX IPv4 hosts with a port. */
@@ -116,7 +132,7 @@ static void take_results(mdns_result_t *r)
     ESP_LOGI(TAG, "browse found %d telnet host(s)", n);
 }
 
-void mdns_link_step(bool net_up)
+void mdns_link_step(bool net_up, const char *net)
 {
     if (!s_ok) {
         return;
@@ -129,15 +145,32 @@ void mdns_link_step(bool net_up)
     memcpy(ver, s_want_ver, sizeof(ver));
     idle = s_idle;
     portEXIT_CRITICAL(&s_mux);
-    if (name[0] && strcmp(name, s_name) != 0) {
-        apply_name(name, ver);
+    int64_t now = esp_timer_get_time();
+    if (name[0] && strcmp(name, s_name) != 0 && now >= s_add_retry_us) {
+        if (apply_name(name, ver)) {
+            s_add_backoff_s = 1;
+            s_add_retry_us = 0;
+        } else {
+            s_add_retry_us = now + (int64_t)s_add_backoff_s * 1000000;
+            s_add_backoff_s = s_add_backoff_s * 2 > 60 ? 60 : s_add_backoff_s * 2;
+        }
     }
 
-    int64_t now = esp_timer_get_time();
-    if (net_up && !s_was_up) {
+    /* The network went down or changed: the hosts found are not reachable as
+     * they were, so the list is cleared (and a running browse dropped). */
+    bool changed = net_up && s_was_up && strcmp(net, s_net) != 0;
+    if ((s_was_up && !net_up) || changed) {
+        if (s_search) {
+            mdns_query_async_delete(s_search);
+            s_search = NULL;
+        }
+        clear_found();
+    }
+    if (net_up && (!s_was_up || changed)) {
         s_next_browse_us = now + FIRST_BROWSE_US; /* a first look soon after the network comes up */
     }
     s_was_up = net_up;
+    strlcpy(s_net, net_up ? net : "", sizeof(s_net));
 
     if (s_search) {
         mdns_result_t *res = NULL;

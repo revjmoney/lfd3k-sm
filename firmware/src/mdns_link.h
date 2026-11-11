@@ -8,11 +8,14 @@
 #include <stddef.h>
 #include "lfd3k.h"
 
-/* Wi-Fi task, once, after esp_netif and the default event loop exist. */
+/* Startup, once, from wifi_link_init (after esp_netif and the default event loop exist). */
 void mdns_link_init(void);
-/* Wi-Fi task, every turn of its loop: applies a new name, starts the browse
- * when due (net_up and the modem said idle), collects its results. Never blocks. */
-void mdns_link_step(bool net_up);
+/* Wi-Fi task, every turn of its loop: applies a new name (a failed service add
+ * is retried after 1, 2, 4 ... 60 s), starts the browse when due (net_up and the
+ * modem said idle), collects its results. net names the network (the client
+ * address, "" on the hotspot alone): when it goes down or changes the found list
+ * is cleared. Never blocks. */
+void mdns_link_step(bool net_up, const char *net);
 
 /* Modem task: the live station name and the core version (NUL terminated). */
 void mdns_link_set_name(const char *name, const char *version);

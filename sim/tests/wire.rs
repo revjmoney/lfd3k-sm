@@ -420,6 +420,7 @@ fn telnet_axis_opening_on_a_wire_call() {
     // 27 bytes of answers, then the LFD3K-LINK offer IAC WILL 90.
     assert_eq!(got.len(), 30, "{got:?}");
     assert_eq!(&got[..3], [255, 253, 1]);
+    assert_eq!(&got[27..30], [0xFF, 0xFB, 0x5A], "IAC WILL 90 last");
     h.send_a_data(b"hi\r");
     h.run_ms(200);
     assert_eq!(&h.wire_received_a()[30..], b"hi\r", "no NUL: BINARY agreed");
@@ -613,6 +614,11 @@ fn bridge_telnet_forward_is_clean_for_the_caller() {
         h.wire_received_b().len(),
         30,
         "the replies went to the server"
+    );
+    assert_eq!(
+        &h.wire_received_b()[27..30],
+        [0xFF, 0xFB, 0x5A],
+        "IAC WILL 90 last"
     );
     h.send_a_data(&[b'o', 0xFF, b'k']);
     h.run_ms(4_000);

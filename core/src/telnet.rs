@@ -415,7 +415,7 @@ impl Telnet {
 /// (the server then treats it as unknown).
 #[derive(Clone, Copy, Debug)]
 pub struct LinkStats<'a> {
-    /// This modem's station name.
+    /// This modem's station name; empty sends `modem=-`.
     pub modem: &'a str,
     /// A bridged radio call (`kind=radio`); false: a USB Wi-Fi call
     /// (`kind=wifi tier=WIFI`).
@@ -527,9 +527,14 @@ pub fn link_payload(s: &LinkStats<'_>, out: &mut [u8; LINK_PAYLOAD_MAX]) -> usiz
     };
     let mut t = [0u8; 24];
     p.field(b"v", b"1");
+    let modem = s.modem.as_bytes();
     p.field(
         b"modem",
-        s.modem.as_bytes().get(..24).unwrap_or(s.modem.as_bytes()),
+        if modem.is_empty() {
+            b"-"
+        } else {
+            modem.get(..24).unwrap_or(modem)
+        },
     );
     p.field(b"kind", if s.radio { b"radio" } else { b"wifi" });
     let caller = s.caller.as_bytes();

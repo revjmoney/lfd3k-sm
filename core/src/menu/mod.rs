@@ -321,10 +321,14 @@ pub enum Action {
     Scan,
     /// Run the composed AT line (`Ui::take_line`) and report with `Ui::ran`.
     Run,
-    /// Add the `n`th found host that is not a forward yet as a telnet
+    /// Add the highlighted found host (by its address and port, so a list
+    /// that changed meanwhile never swaps it for another) as a telnet
     /// forward and publish it (`AT+FWD=...,T` then `AT+PUB=...`), and report
-    /// with `Ui::found_added` or `Ui::found_taken`.
-    AddFound(u8),
+    /// with `Ui::found_added`, `Ui::found_taken` or `Ui::found_gone`.
+    AddFound {
+        ip: [u8; 4],
+        port: u16,
+    },
 }
 
 /// What a `Run` was, for its message.
@@ -416,6 +420,9 @@ pub struct Ui {
     ran: Ran,
     /// Forward slot being edited (its port and mode fill the fields).
     fwd_edit: Option<u8>,
+    /// The found host under the highlight (address, port), kept when the
+    /// list changes so Enter adds exactly that host.
+    pub found_at: Option<([u8; 4], u16)>,
 }
 
 impl Default for Ui {
@@ -484,7 +491,19 @@ impl Ui {
             line_len: 0,
             ran: Ran::Setting,
             fwd_edit: None,
+            found_at: None,
         }
+    }
+
+    /// Remember the found host now under the highlight (none on a forward
+    /// slot or off the Forwards screen).
+    pub fn track_found(&mut self, v: &View) {
+        self.found_at = match self.sel.checked_sub(MAX_FWD as u8) {
+            Some(i) if self.screen == Screen::Fwd => {
+                v.found.new_host(v.set, i).map(|h| (h.ip(), h.port()))
+            }
+            _ => None,
+        };
     }
 
     /// Text typed so far.
@@ -635,6 +654,16 @@ impl Ui {
                 self.msg_len += 1;
             }
         }
+    }
+
+    /// The highlighted found host left the list before Enter: nothing was
+    /// added. The highlight now tracks the row it is on.
+    pub fn found_gone(&mut self, v: &View) {
+        self.say(
+            true,
+            "That host left the list: nothing added. Check the row and try again.",
+        );
+        self.track_found(v);
     }
 
     /// A found host's forward name already belongs to another forward:
@@ -951,12 +980,26 @@ impl Ui {
         let found = self.sel.checked_sub(MAX_FWD as u8);
         let cur = v.set.fwd.get(usize::from(self.sel)).copied().flatten();
         match k {
-            Key::Up => self.sel = wrap_prev(self.sel, n),
-            Key::Down | Key::Tab => self.sel = wrap_next(self.sel, n),
+            Key::Up => {
+                self.sel = wrap_prev(self.sel, n);
+                self.track_found(v);
+            }
+            Key::Down | Key::Tab => {
+                self.sel = wrap_next(self.sel, n);
+                self.track_found(v);
+            }
             Key::Esc | Key::Left => self.screen = Screen::Main,
             Key::Enter => match (found, cur) {
-                // Only this key on a found row ever adds it.
-                (Some(i), _) => return Action::AddFound(i),
+                // Only this key on a found row ever adds it: the host the
+                // highlight was on (the modem refuses it if it is gone).
+                (Some(_), _) => {
+                    if self.found_at.is_none() {
+                        self.track_found(v);
+                    }
+                    if let Some((ip, port)) = self.found_at {
+                        return Action::AddFound { ip, port };
+                    }
+                }
                 (None, Some(f)) => self.fwd_begin_edit(self.sel, f.name(), f.host()),
                 (None, None) => self.fwd_begin_add(v),
             },
