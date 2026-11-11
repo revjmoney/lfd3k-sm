@@ -93,6 +93,66 @@ pub enum AtCmd<'a> {
     /// `AT+NAME=<name>`: the station name (trimmed, a valid station name);
     /// `AT+NAME=` (empty) goes back to the firmware's default name.
     Name(&'a str),
+    /// `AT+MODE?`: list the firmware modes on the multimode board.
+    ModeQuery,
+    /// `AT+MODE=MODEM|RADAR|RNODE|MESH|PICKER`: restart into that mode.
+    Mode(ModeTarget),
+}
+
+/// A firmware mode on the multimode board (`AT+MODE`), in the picker's
+/// menu order. `Picker` is the mode list itself, not a slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModeTarget {
+    /// LFD3K-SM, this modem (slot ota_1).
+    Modem = 0,
+    /// SIMIAN RADAR (ota_2).
+    Radar = 1,
+    /// RNODE (ota_3).
+    Rnode = 2,
+    /// MESH, Meshtastic (ota_0).
+    Mesh = 3,
+    /// The picker (factory): restart with no token, so the bootloader shows it.
+    Picker = 4,
+}
+
+impl ModeTarget {
+    /// The four modes with a slot, in menu order.
+    pub const SLOTS: [ModeTarget; 4] = [
+        ModeTarget::Modem,
+        ModeTarget::Radar,
+        ModeTarget::Rnode,
+        ModeTarget::Mesh,
+    ];
+
+    /// `MODEM`, `RADAR`, `RNODE`, `MESH` or `PICKER`, any case.
+    pub fn parse(s: &str) -> Option<ModeTarget> {
+        [
+            ("MODEM", ModeTarget::Modem),
+            ("RADAR", ModeTarget::Radar),
+            ("RNODE", ModeTarget::Rnode),
+            ("MESH", ModeTarget::Mesh),
+            ("PICKER", ModeTarget::Picker),
+        ]
+        .iter()
+        .find(|(k, _)| s.eq_ignore_ascii_case(k))
+        .map(|&(_, m)| m)
+    }
+
+    /// The name the picker shows.
+    pub fn name(self) -> &'static str {
+        match self {
+            ModeTarget::Modem => "LFD3K-SM",
+            ModeTarget::Radar => "SIMIAN RADAR",
+            ModeTarget::Rnode => "RNODE",
+            ModeTarget::Mesh => "MESH",
+            ModeTarget::Picker => "PICKER",
+        }
+    }
+
+    /// Index for the C ABI and the firmware's slot mask (bit `index`).
+    pub fn index(self) -> u8 {
+        self as u8
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,7 +232,7 @@ enum Form<'a> {
 }
 
 /// `+FB`, `+SCAN`, `+MENU`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
-/// `+BEACON`, `+DIR` (`arg` is after the `+`).
+/// `+BEACON`, `+DIR`, `+MODE` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
 /// one, nor may a password). SSID and password are taken as typed (inner
@@ -196,7 +256,7 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         return Err(AtError::BadArg);
     }
     let known = [
-        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR", "NAME",
+        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR", "NAME", "MODE",
     ];
     if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
         return Err(AtError::Unknown);
@@ -235,6 +295,13 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
                 Ok(AtCmd::Name(v.trim()))
             }
             Form::Set(_) => Err(AtError::BadArg),
+        }
+    } else if name.eq_ignore_ascii_case("MODE") {
+        match form {
+            Form::Query => Ok(AtCmd::ModeQuery),
+            Form::Set(v) => ModeTarget::parse(v.trim())
+                .map(AtCmd::Mode)
+                .ok_or(AtError::BadArg),
         }
     } else {
         parse_pub(form)

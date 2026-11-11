@@ -470,6 +470,32 @@ pub extern "C" fn lfd3k_take_fb_request() -> bool {
     with_device(|d| d.modem.take_fb_request()).unwrap_or(false)
 }
 
+/// Multimode board only, once at boot after `lfd3k_init`: bit i set when
+/// mode i's slot holds an app image (0 LFD3K-SM, 1 SIMIAN RADAR, 2 RNODE,
+/// 3 MESH). Without this call (the PC, or the single app layout) AT+MODE
+/// answers ERROR.
+#[no_mangle]
+pub extern "C" fn lfd3k_set_mode_slots(mask: u8) {
+    let _ = with_device(|d| d.modem.set_mode_slots(mask));
+}
+
+/// Taken once after an accepted `AT+MODE=`: -1 none, else the target
+/// (0 LFD3K-SM, 1 SIMIAN RADAR, 2 RNODE, 3 MESH, 4 the picker). The modem
+/// prints nothing for it until `lfd3k_mode_result`.
+#[no_mangle]
+pub extern "C" fn lfd3k_take_mode_request() -> c_int {
+    with_device(|d| d.modem.take_mode_request())
+        .flatten()
+        .map_or(-1, |m| c_int::from(m.index()))
+}
+
+/// The answer to a taken mode request: true prints OK (the firmware then
+/// restarts once it has left), false prints ERROR.
+#[no_mangle]
+pub extern "C" fn lfd3k_mode_result(ok: bool) {
+    let _ = with_device(|d| d.modem.mode_result(ok));
+}
+
 /// Taken once after AT+SIMNET switched radios: returns -1 when nothing
 /// changed, 0 when the SX1262 is back (close the UDP socket), 1 when the
 /// simulated radio is on (`ip` gets the peer, open the UDP socket to it on

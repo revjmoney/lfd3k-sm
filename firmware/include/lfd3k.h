@@ -85,6 +85,20 @@ void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
  * Either pointer may be NULL. Returns 0 before init. */
 size_t   lfd3k_rf_trace(int8_t *dbm, uint8_t *tx, size_t cap);
 
+/* ---- AT+MODE: firmware modes on the multimode board. ---- */
+
+/* Multimode board only, once at boot after lfd3k_init: bit i set when mode i's
+ * slot holds an app image (0 LFD3K-SM, 1 SIMIAN RADAR, 2 RNODE, 3 MESH). Without
+ * this call (the single app layout) AT+MODE answers ERROR. */
+void     lfd3k_set_mode_slots(uint8_t mask);
+/* Taken once after an accepted AT+MODE= (no call, slot has an image): -1 none,
+ * else 0 LFD3K-SM, 1 SIMIAN RADAR, 2 RNODE, 3 MESH, 4 the picker. The modem
+ * prints nothing for it until lfd3k_mode_result. */
+int      lfd3k_take_mode_request(void);
+/* Answer to a taken request: true prints OK (then send it out and restart),
+ * false prints ERROR. */
+void     lfd3k_mode_result(bool ok);
+
 /* ---- SimNet: the simulated radio over UDP (AT+SIMNET, test mode). ---- */
 
 #define LFD3K_SIMNET_PORT      4210

@@ -1,6 +1,11 @@
-idf_component_register(SRCS "main.c" "hal_radio.c" "usb_link.c" "panel.c" "panel_render.c" "idle_show.c" "ssd1306.c" "settings_store.c" "wifi_link.c" "tcp_link.c" "wire_pump.c" "udp_link.c"
-                       INCLUDE_DIRS "." "../include"
-                       REQUIRES driver esp_driver_i2c esp_driver_gpio esp_timer esp_system esp_hw_support esp_driver_usb_serial_jtag nvs_flash esp_partition esp_wifi esp_netif esp_event lwip esp_driver_tsens
+# The multimode launch token (struct, address, CRC) is shared with the
+# bootloader override and the picker: choose.c and choose.h by path, never copied.
+set(LFMP_BOOT_DIR "${CMAKE_CURRENT_LIST_DIR}/../../multimode/bootloader")
+
+idf_component_register(SRCS "main.c" "hal_radio.c" "usb_link.c" "panel.c" "panel_render.c" "idle_show.c" "ssd1306.c" "settings_store.c" "wifi_link.c" "tcp_link.c" "wire_pump.c" "udp_link.c" "mode_switch.c"
+                            "${LFMP_BOOT_DIR}/choose.c"
+                       INCLUDE_DIRS "." "../include" "${LFMP_BOOT_DIR}"
+                       REQUIRES driver esp_driver_i2c esp_driver_gpio esp_timer esp_system esp_hw_support esp_driver_usb_serial_jtag nvs_flash esp_partition app_update esp_wifi esp_netif esp_event lwip esp_driver_tsens
                        PRIV_REQUIRES bootloader_support)
 
 # Rust core, built by build_core.ps1 (cargo +esp, xtensa-esp32s3-none-elf).

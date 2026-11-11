@@ -39,7 +39,7 @@
 //! the screen and prints OK (then NO CARRIER and RING when they apply). A
 //! call that connects while it is open (auto-answer) closes it first.
 
-use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
+use crate::at::{format_result, parse_line, AtCmd, ModeTarget, ResultCode, SRegs, REG_TX_POWER};
 use crate::directory::{Directory, DIR_MAX};
 use crate::discovery::{
     self, valid_station, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, DISC_MAX,
@@ -338,6 +338,15 @@ pub struct Modem {
     stack_free: Option<u32>,
     /// Lowest free heap since boot reported by the firmware, bytes.
     heap_min: Option<u32>,
+    /// `AT+MODE`: which mode slots hold an image (bit `ModeTarget::index`),
+    /// reported once by the firmware on the multimode board. `None` (the PC,
+    /// or the single app layout): AT+MODE answers ERROR.
+    mode_slots: Option<u8>,
+    /// An accepted `AT+MODE=` the firmware has not taken yet.
+    mode_req: Option<ModeTarget>,
+    /// A taken mode request whose OK or ERROR the firmware still owes
+    /// (`mode_result`).
+    mode_wait: bool,
     /// `AT+SIMNET`: the simulated radio's peer while it is on. Never saved.
     simnet: Option<[u8; 4]>,
     /// A switch the platform has not taken yet (see `take_simnet_request`).
@@ -433,6 +442,9 @@ impl Modem {
             wire: Wire::new(),
             stack_free: None,
             heap_min: None,
+            mode_slots: None,
+            mode_req: None,
+            mode_wait: false,
             simnet: None,
             simnet_req: None,
             simnet_fail: false,
@@ -489,6 +501,9 @@ impl Modem {
         self.wire.reset_all();
         self.stack_free = None;
         self.heap_min = None;
+        self.mode_slots = None;
+        self.mode_req = None;
+        self.mode_wait = false;
         self.simnet = None;
         self.simnet_req = None;
         self.simnet_fail = false;
@@ -597,6 +612,34 @@ impl Modem {
     /// as `HEAP MIN <n>`.
     pub fn set_heap_min(&mut self, bytes: u32) {
         self.heap_min = Some(bytes);
+    }
+
+    /// Multimode board only, once at boot: bit `ModeTarget::index` set for
+    /// each mode slot that holds an app image (the running modem always).
+    /// Until this is called `AT+MODE` answers ERROR.
+    pub fn set_mode_slots(&mut self, mask: u8) {
+        self.mode_slots = Some(mask & 0x0F);
+    }
+
+    /// Taken once after an accepted `AT+MODE=` (no call, the slot has an
+    /// image). The modem prints nothing for it yet: the platform points
+    /// otadata at the slot, then reports with `mode_result`, and on success
+    /// sends the OK out and restarts.
+    pub fn take_mode_request(&mut self) -> Option<ModeTarget> {
+        let r = self.mode_req.take();
+        if r.is_some() {
+            self.mode_wait = true;
+        }
+        r
+    }
+
+    /// The platform's answer to a taken mode request: OK (it restarts once
+    /// the OK has left) or ERROR (nothing changed). Ignored when no request
+    /// is outstanding.
+    pub fn mode_result(&mut self, ok: bool) {
+        if core::mem::take(&mut self.mode_wait) {
+            self.ok_or_error(ok);
+        }
     }
 
     /// True once after `AT&W` was entered (clears the flag). The platform
@@ -1741,6 +1784,9 @@ impl Modem {
                 let mut t = Txt::new();
                 t.put(b"DIR ").num(self.dir.len() as u32, 1);
                 self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"MODE ").put(ModeTarget::Modem.name().as_bytes());
+                self.info(t.bytes());
                 if let Some(n) = self.stack_free {
                     let mut t = Txt::new();
                     t.put(b"STACK FREE ").num(n, 1);
@@ -1983,6 +2029,51 @@ impl Modem {
                     self.apply_name();
                 }
                 self.ok_or_error(ok);
+            }
+            AtCmd::ModeQuery => match self.mode_slots {
+                None => self.result(ResultCode::Error),
+                Some(mask) => {
+                    for m in ModeTarget::SLOTS {
+                        let mut t = Txt::new();
+                        t.put(b"MODE ").put(m.name().as_bytes());
+                        if m == ModeTarget::Modem {
+                            t.put(b" *");
+                        } else if mask & (1 << m.index()) == 0 {
+                            t.put(b" NO IMAGE");
+                        }
+                        self.info(t.bytes());
+                    }
+                    self.result(ResultCode::Ok);
+                }
+            },
+            AtCmd::Mode(m) => {
+                // Only with no call at all (radio or Wi-Fi, also dialing,
+                // ringing or a close still pending) and no scan running.
+                let idle = self.mode == Mode::Command
+                    && self.air_idle()
+                    && !self.wire.close
+                    && self.disc.scan.is_none()
+                    && !self.mode_wait;
+                let image = match self.mode_slots {
+                    None => false,
+                    Some(_) if m == ModeTarget::Picker => true,
+                    Some(mask) => mask & (1 << m.index()) != 0,
+                };
+                if idle && image {
+                    // A directory change not saved yet goes out before the
+                    // restart (the platform writes it while idle).
+                    if self.dir.take_changed() {
+                        self.dir_dirty = true;
+                    }
+                    if self.dir_dirty {
+                        self.dir_dirty = false;
+                        self.dir_save = true;
+                        self.dir_saved_at = now;
+                    }
+                    self.mode_req = Some(m);
+                } else {
+                    self.result(ResultCode::Error);
+                }
             }
             AtCmd::Menu => {
                 // Not while a call is being set up (dialing, training, a

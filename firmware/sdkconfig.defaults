@@ -22,3 +22,10 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=2
 # and the PHY calibrates at boot instead of storing its data in NVS.
 # CONFIG_ESP_WIFI_NVS_ENABLED is not set
 # CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE is not set
+
+# AT+MODE writes the multimode launch token at a fixed RTC FAST address
+# (multimode/README.md). Keep RTC FAST out of the heap so nothing in the modem
+# can own that address; mode_switch.c refuses to build otherwise.
+# CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP is not set
+# CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC is not set
+# CONFIG_ESP32S3_RTCDATA_IN_FAST_MEM is not set

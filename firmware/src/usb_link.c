@@ -10,6 +10,8 @@
 static StreamBufferHandle_t s_rx;
 static StreamBufferHandle_t s_tx;
 static volatile TaskHandle_t s_notify;
+/* Bytes the writer took from s_tx and has not handed to the driver yet. */
+static volatile size_t s_in_flight;
 
 static void reader_task(void *arg)
 {
@@ -38,6 +40,7 @@ static void writer_task(void *arg)
     uint8_t buf[USB_CHUNK];
     for (;;) {
         size_t n = xStreamBufferReceive(s_tx, buf, sizeof(buf), portMAX_DELAY);
+        s_in_flight = n;
         size_t off = 0;
         while (off < n) {
             /* Blocks here (never in the modem task) while no host reads. */
@@ -46,6 +49,7 @@ static void writer_task(void *arg)
                 off += (size_t)w;
             }
         }
+        s_in_flight = 0;
     }
 }
 
@@ -81,4 +85,19 @@ size_t usb_link_write(const uint8_t *buf, size_t len)
 size_t usb_link_tx_space(void)
 {
     return xStreamBufferSpacesAvailable(s_tx);
+}
+
+bool usb_link_flush(uint32_t timeout_ms)
+{
+    TickType_t t0 = xTaskGetTickCount();
+    TickType_t limit = pdMS_TO_TICKS(timeout_ms);
+    while (!xStreamBufferIsEmpty(s_tx) || s_in_flight != 0) {
+        if (xTaskGetTickCount() - t0 >= limit) {
+            return false;
+        }
+        vTaskDelay(1);
+    }
+    TickType_t used = xTaskGetTickCount() - t0;
+    TickType_t left = used < limit ? limit - used : 0;
+    return usb_serial_jtag_wait_tx_done(left) == ESP_OK;
 }

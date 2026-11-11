@@ -55,8 +55,10 @@ Why this address:
   its RTC FAST code and data end at 0x600FE11C, its RTC timer data is the top
   24 bytes (0x600FFFE8), and RTC FAST heap is off (`sdkconfig.defaults`, and
   `main.c` refuses to build if it or an IDF RTC reserve option is turned on).
-* The **other modes** do use that memory: Arduino 2.x (Simian, RNode), the
-  LFD3K-SM modem and Meshtastic all keep RTC FAST in their heap, and Arduino
+* The **LFD3K-SM modem** keeps RTC FAST out of its heap too (it writes the
+  token itself for AT+MODE, see below).
+* The **other modes** do use that memory: Arduino 2.x (Simian, RNode) and
+  Meshtastic keep RTC FAST in their heap, and Arduino
   reserves only the top 16 bytes. So the address is not free in those modes, and
   it does not need to be: the token is only trusted on the boot right after the
   picker wrote it, the bootloader consumes it there, and stray heap data never
@@ -138,6 +140,22 @@ Pure logic for PC tests: `bootloader/choose.c` (boot decision and token) and
   else to it: its Wi-Fi driver keeps its config in RAM and the PHY calibrates
   at every boot (`CONFIG_ESP_WIFI_NVS_ENABLED` and
   `CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE` off).
+* `AT+MODE?` lists the modes (`MODE LFD3K-SM *`, then the others, `NO IMAGE`
+  after an empty slot; same image header and app descriptor check as the
+  picker). `AT+MODE=MODEM|RADAR|RNODE|MESH` (no call, slot has an image):
+  full image verify, `esp_ota_set_boot_partition` (skipped when otadata
+  already points there), OK, the OK leaves the USB port, then the token
+  (built with `choose.h` and `choose.c`, slot = the ota index) is written
+  with interrupts off and `esp_restart()` follows. The bootloader consumes
+  the token and starts that mode without the logo. `AT+MODE=PICKER`
+  restarts without a token, so the picker shows. ERROR during a call or for
+  an empty slot, and always on the single app layout.
+* The modem has RTC FAST heap off (`sdkconfig.defaults`), and
+  `firmware/src/mode_switch.c` refuses to build if it, the IDF RTC reserve
+  area or RTC data in RTC FAST is turned on, so nothing in the modem owns
+  0x600FFFC0 when the token is written.
+* AT+MODE does not change the picker's stored last mode: after a power
+  cycle the picker starts its own last mode again.
 
 ## Recovery
 
