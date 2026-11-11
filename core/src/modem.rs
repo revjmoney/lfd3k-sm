@@ -47,10 +47,12 @@ use crate::discovery::{
     SVC_HOTSPOT,
 };
 use crate::frame::{FrameType, Header, HEADER_LEN, NAME_MAX};
+use crate::lan::{Found, FoundList};
 use crate::link::{Event, Link, Role, State};
 use crate::menu::{self, render, Action, Menu, View};
 use crate::radio::{Radio, RxInfo};
 use crate::settings::{parse_hostport, BeaconMode, Forward, Settings, WireMode, MAX_FWD};
+use crate::telnet::{link_frame, LinkStats, LINK_FRAME_MAX};
 use crate::tier::{best_tier, Tier};
 use crate::wire::{Call, Phase, Wire, WireReq};
 
@@ -382,6 +384,10 @@ pub struct Modem {
     /// name that got past the privacy screen); empty until one does.
     last_caller: [u8; NAME_MAX],
     last_caller_len: u8,
+    /// Retrains on the current (or last) radio call, for LFD3K-LINK.
+    call_retrains: u32,
+    /// Telnet servers the platform's mDNS browse found (`set_found_hosts`).
+    found: FoundList,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -462,6 +468,8 @@ impl Modem {
             boot_len: 0,
             last_caller: [0; NAME_MAX],
             last_caller_len: 0,
+            call_retrains: 0,
+            found: FoundList::new(),
         }
     }
 
@@ -518,6 +526,8 @@ impl Modem {
         self.boot_menu = false;
         self.last_caller = [0; NAME_MAX];
         self.last_caller_len = 0;
+        self.call_retrains = 0;
+        self.found.clear();
     }
 
     /// True once when the platform should save the directory
@@ -930,18 +940,81 @@ impl Modem {
         if used > 0 {
             self.wire.last_rx = Some(now_ms);
         }
+        // The server's opening negotiation, once seen, makes the LFD3K-LINK
+        // offer due.
+        self.wire.tn.opening_done();
         self.wire_pump(now_ms);
         used
     }
 
-    /// Bytes for the socket (telnet replies first). Returns bytes written.
+    /// Bytes for the socket (telnet replies first, then the LFD3K-LINK
+    /// offer and report when due, then call data). Returns bytes written.
     pub fn wire_output(&mut self, out: &mut [u8]) -> usize {
         match self.wire.call {
-            Call::Wire(Phase::Online) | Call::Bridge(Phase::Online) | Call::None => {
-                self.wire.output(out)
+            Call::Wire(Phase::Online) | Call::Bridge(Phase::Online) => {
+                let mut frame = [0u8; LINK_FRAME_MAX];
+                let n = if self.wire.link_wanted() {
+                    self.link_report(&mut frame)
+                } else {
+                    0
+                };
+                let report = frame.get(..n).filter(|r| !r.is_empty());
+                self.wire.output(out, report)
             }
+            Call::None => self.wire.output(out, None),
             _ => 0,
         }
+    }
+
+    /// Build the LFD3K-LINK report for the wire call now (see
+    /// `telnet::link_payload`): a bridged radio call reports its caller,
+    /// tier, last SNR and RSSI, retrains and compression; a USB Wi-Fi call
+    /// is `kind=wifi tier=WIFI` with no radio values.
+    fn link_report(&self, frame: &mut [u8; LINK_FRAME_MAX]) -> usize {
+        let radio = matches!(self.wire.call, Call::Bridge(_));
+        let tier = self
+            .link
+            .tier()
+            .filter(|_| radio && self.link.is_connected());
+        let rx = self.last_rx.filter(|_| radio);
+        let s = LinkStats {
+            modem: name_of(&self.cfg),
+            radio,
+            caller: if radio { self.last_caller() } else { "" },
+            sf: tier.map(Tier::sf),
+            bps: tier.map(Tier::air_bps),
+            snr_x4: rx.map(|i| i.snr_x4),
+            rssi: rx.map(|i| i.rssi_dbm),
+            retrains: radio.then_some(self.call_retrains),
+            lz_x10: radio.then(|| {
+                if self.link.lz() {
+                    self.link.lz_ratio_x10().max(1)
+                } else {
+                    0
+                }
+            }),
+        };
+        link_frame(&s, frame)
+    }
+
+    /// LFD3K-LINK is on for the current wire call (the server said DO 90).
+    pub fn link_on(&self) -> bool {
+        self.wire.call != Call::None && self.wire.tn.link_on()
+    }
+
+    /// The platform's latest mDNS browse of `_telnet._tcp` (at most
+    /// `FOUND_MAX` hosts kept, a repeated address and port once). Nothing
+    /// changes a setting: the menu's Forwards screen offers each host that
+    /// is not a forward yet, and only Enter there adds it.
+    pub fn set_found_hosts<I: IntoIterator<Item = Found>>(&mut self, hosts: I) {
+        if self.found.set(hosts) && self.menu.open {
+            self.menu.rd.refresh();
+        }
+    }
+
+    /// The hosts from the latest browse (`AT+FOUND?`).
+    pub fn found_hosts(&self) -> &FoundList {
+        &self.found
     }
 
     /// True while host bytes are call data (online, not escaped by `+++`).
@@ -1828,6 +1901,29 @@ impl Modem {
                 t.put(b"LZ ").put(onoff(self.link.lz())).put(b" RATIO ");
                 t.num(r / 10, 1).put(b".").num(r % 10, 1);
                 self.info(t.bytes());
+                // LFD3K-LINK on the current wire call (the server said DO 90).
+                let mut t = Txt::new();
+                t.put(b"LINK ").put(onoff(self.link_on()));
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::FoundQuery => {
+                let mut any = false;
+                let found = self.found;
+                for h in found.iter() {
+                    let mut t = Txt::new();
+                    t.put(b"FOUND ").put(h.name().as_bytes()).put(b" ");
+                    put_ip(&mut t, h.ip());
+                    t.put(b":").num(u32::from(h.port()), 1);
+                    if h.is_forward(&self.set) {
+                        t.put(b" FWD");
+                    }
+                    self.info(t.bytes());
+                    any = true;
+                }
+                if !any {
+                    self.info(b"FOUND NONE");
+                }
                 self.result(ResultCode::Ok);
             }
             AtCmd::Reset => {
@@ -2214,6 +2310,7 @@ impl Modem {
                 Event::Connect(_) if matches!(self.wire.call, Call::Bridge(_)) => {}
                 Event::Connect(t) => {
                     self.fresh_call();
+                    self.call_retrains = 0;
                     // Access policy: an answered call goes to the published
                     // forward only, never anywhere else.
                     let publ = if self.link.role() == Role::Answerer && !self.wire_active() {
@@ -2240,6 +2337,12 @@ impl Modem {
                     }
                 }
                 Event::Retrain(t) => {
+                    self.call_retrains = self.call_retrains.saturating_add(1);
+                    // A bridged caller's new tier goes to the server at once
+                    // (once the 1 s limit allows).
+                    if matches!(self.wire.call, Call::Bridge(_)) {
+                        self.wire.link_due = true;
+                    }
                     self.retrains.rotate_left(1);
                     if let Some(last) = self.retrains.last_mut() {
                         *last = Some(t);
@@ -2311,6 +2414,8 @@ impl Modem {
         w.last_tx = None;
         w.last_rx = None;
         w.cr_flush = false;
+        w.clock = now;
+        w.link_reset();
         w.name_len = 0;
         for (d, &c) in w.name.iter_mut().zip(name.iter()) {
             *d = c;
@@ -2363,6 +2468,7 @@ impl Modem {
     /// Move wire data along and run the wire timers (S7 for a dial or a
     /// bridge waiting for its connection, and for the drain after a close).
     fn wire_pump(&mut self, now: u32) {
+        self.wire.clock = now;
         let s7 = self.s7_ms();
         match self.wire.call {
             Call::None => {}
@@ -2520,6 +2626,7 @@ impl Modem {
             scan_hits: self.scan_hits(),
             ringing: self.link.state() == State::Ringing,
             unsaved: self.menu.unsaved,
+            found: &self.found,
         }
     }
 
@@ -2623,11 +2730,54 @@ impl Modem {
                 let ok = self.menu_run(radio, now);
                 self.menu.ui.ran(ok);
             }
+            Action::AddFound(i) => self.add_found(i, radio, now),
         }
         if self.menu.open {
             self.menu.unsaved = !self.set.same_profile(&self.saved);
             self.menu.rd.refresh();
         }
+    }
+
+    /// The owner pressed Enter on found host `i` (the `i`th one that is not
+    /// a forward yet) on the Forwards screen: exactly
+    /// `AT+FWD=<name>,<ip>,<port>,T`, then `AT+PUB=<name>` only when that
+    /// said OK, both through the AT parser and dispatch like any menu edit.
+    /// The name is the host's instance name when it is a valid forward
+    /// name, else `AXIS`; a name that already belongs to another forward is
+    /// refused (nothing is rewritten). The settings are then unsaved, so
+    /// leaving asks to save.
+    fn add_found<R: Radio>(&mut self, i: u8, radio: &mut R, now: u32) {
+        let Some(h) = self.found.new_host(&self.set, i).copied() else {
+            return;
+        };
+        let mut name = [0u8; crate::settings::FWD_NAME];
+        let mut len = 0;
+        let Some(n) = h.fwd_name(&self.set) else {
+            self.menu.ui.found_taken(h.fwd_pick());
+            return;
+        };
+        for (d, &c) in name.iter_mut().zip(n.as_bytes()) {
+            *d = c;
+            len += 1;
+        }
+        let name = name.get(..len).unwrap_or(&[]);
+        let mut ip = [0u8; 15];
+        let ip_len = h.ip_text(&mut ip);
+        let mut t = Txt::new();
+        t.put(b"AT+FWD=").put(name).put(b",");
+        t.put(ip.get(..ip_len).unwrap_or(&[])).put(b",");
+        t.num(u32::from(h.port()), 1).put(b",T");
+        self.menu.ui.set_line(t.bytes());
+        let mut ok = self.menu_run(radio, now);
+        if ok {
+            let mut t = Txt::new();
+            t.put(b"AT+PUB=").put(name);
+            self.menu.ui.set_line(t.bytes());
+            ok = self.menu_run(radio, now);
+        }
+        self.menu
+            .ui
+            .found_added(ok, core::str::from_utf8(name).unwrap_or(""));
     }
 
     /// Run the AT line the menu composed through the AT parser and the AT

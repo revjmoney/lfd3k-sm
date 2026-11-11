@@ -1,0 +1,6 @@
+# ESP-IDF component manager: components fetched at build time into
+# firmware/managed_components (git-ignored); dependencies.lock pins them.
+dependencies:
+  idf: ">=5.4"
+  # mDNS: advertise _lfd3k._tcp, browse _telnet._tcp (Apache-2.0).
+  espressif/mdns: "^1.4.0"

@@ -68,6 +68,8 @@ pub enum AtCmd<'a> {
     PubNone,
     /// `AT+PUB=<name>`
     Pub(&'a str),
+    /// `AT+FOUND?`: telnet servers the mDNS browse found on the LAN.
+    FoundQuery,
     /// `AT+SIMNET?`
     SimNetQuery,
     /// `AT+SIMNET=<a.b.c.d>` (Some) or `AT+SIMNET=0` (None).
@@ -231,7 +233,7 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+SCAN`, `+MENU`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
+/// `+FB`, `+SCAN`, `+MENU`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FOUND`, `+FWD`, `+PUB`, `+SIMNET`,
 /// `+BEACON`, `+DIR`, `+MODE` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
@@ -256,7 +258,7 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         return Err(AtError::BadArg);
     }
     let known = [
-        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR", "NAME", "MODE",
+        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR", "NAME", "MODE", "FOUND",
     ];
     if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
         return Err(AtError::Unknown);
@@ -273,6 +275,11 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
     } else if name.eq_ignore_ascii_case("WIFI") {
         match form {
             Form::Query => Ok(AtCmd::WifiQuery),
+            Form::Set(_) => Err(AtError::BadArg),
+        }
+    } else if name.eq_ignore_ascii_case("FOUND") {
+        match form {
+            Form::Query => Ok(AtCmd::FoundQuery),
             Form::Set(_) => Err(AtError::BadArg),
         }
     } else if name.eq_ignore_ascii_case("FWD") {

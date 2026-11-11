@@ -11,3 +11,4 @@ vendor/
 multimode/picker/.pio/
 multimode/picker/sdkconfig.picker
 multimode/out/
+firmware/managed_components/

@@ -24,6 +24,7 @@ pub mod screens;
 use crate::at::{AtCmd, ResultCode};
 use crate::directory::{Directory, DIR_MAX};
 use crate::discovery::valid_station;
+use crate::lan::FoundList;
 use crate::radio::RxInfo;
 use crate::settings::{
     parse_port, valid_fwd_name, valid_host, valid_pass, valid_ssid, BeaconMode, Settings, WireMode,
@@ -320,6 +321,10 @@ pub enum Action {
     Scan,
     /// Run the composed AT line (`Ui::take_line`) and report with `Ui::ran`.
     Run,
+    /// Add the `n`th found host that is not a forward yet as a telnet
+    /// forward and publish it (`AT+FWD=...,T` then `AT+PUB=...`), and report
+    /// with `Ui::found_added` or `Ui::found_taken`.
+    AddFound(u8),
 }
 
 /// What a `Run` was, for its message.
@@ -383,6 +388,8 @@ pub struct View<'a> {
     pub ringing: bool,
     /// Live settings differ from the saved profile.
     pub unsaved: bool,
+    /// Telnet servers the mDNS browse found on the LAN.
+    pub found: &'a FoundList,
 }
 
 /// Menu screen state.
@@ -602,6 +609,49 @@ impl Ui {
                 "Done, live now. Save settings keeps it after a reboot.",
             ),
             (false, _) => self.say(true, "Not taken: the same rules as the AT command apply."),
+        }
+    }
+
+    /// The modem ran the two lines for a found host (`Action::AddFound`):
+    /// `ok` when both said OK; `name` is the forward name used.
+    pub fn found_added(&mut self, ok: bool, name: &str) {
+        if !ok {
+            self.say(
+                true,
+                "Not added: all 8 forwards are in use, or the AT rules refused it.",
+            );
+            return;
+        }
+        self.msg_len = 0;
+        self.msg_err = false;
+        let parts: [&[u8]; 3] = [
+            b"Added ",
+            name.as_bytes(),
+            b" and published it. Save settings keeps it.",
+        ];
+        for &c in parts.iter().flat_map(|p| p.iter()) {
+            if let Some(d) = self.msg.get_mut(usize::from(self.msg_len)) {
+                *d = c;
+                self.msg_len += 1;
+            }
+        }
+    }
+
+    /// A found host's forward name already belongs to another forward:
+    /// nothing was changed.
+    pub fn found_taken(&mut self, name: &str) {
+        self.msg_len = 0;
+        self.msg_err = true;
+        let parts: [&[u8]; 3] = [
+            b"A forward named ",
+            name.as_bytes(),
+            b" exists: delete or rename it first.",
+        ];
+        for &c in parts.iter().flat_map(|p| p.iter()) {
+            if let Some(d) = self.msg.get_mut(usize::from(self.msg_len)) {
+                *d = c;
+                self.msg_len += 1;
+            }
         }
     }
 
@@ -895,15 +945,20 @@ impl Ui {
     }
 
     fn fwd_key(&mut self, k: Key, v: &View) -> Action {
-        let n = MAX_FWD as u8;
+        // The 8 forward slots, then one row per found host not a forward yet.
+        let n = MAX_FWD as u8 + v.found.new_count(v.set);
+        self.sel = self.sel.min(n.saturating_sub(1));
+        let found = self.sel.checked_sub(MAX_FWD as u8);
         let cur = v.set.fwd.get(usize::from(self.sel)).copied().flatten();
         match k {
             Key::Up => self.sel = wrap_prev(self.sel, n),
             Key::Down | Key::Tab => self.sel = wrap_next(self.sel, n),
             Key::Esc | Key::Left => self.screen = Screen::Main,
-            Key::Enter => match cur {
-                Some(f) => self.fwd_begin_edit(self.sel, f.name(), f.host()),
-                None => self.fwd_begin_add(v),
+            Key::Enter => match (found, cur) {
+                // Only this key on a found row ever adds it.
+                (Some(i), _) => return Action::AddFound(i),
+                (None, Some(f)) => self.fwd_begin_edit(self.sel, f.name(), f.host()),
+                (None, None) => self.fwd_begin_add(v),
             },
             Key::Char(c) => match (c.to_ascii_uppercase(), cur) {
                 (b'A', _) => self.fwd_begin_add(v),

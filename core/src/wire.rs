@@ -183,7 +183,20 @@ pub(crate) struct Wire {
     pub(crate) last_rx: Option<u32>,
     /// A held CR has waited `CR_HOLD_MS`: send it (as CR NUL) now.
     pub(crate) cr_flush: bool,
+    /// Latest time any wire call saw (`Modem::wire_pump`, input), for the
+    /// LFD3K-LINK rate limit (`output` has no clock of its own).
+    pub(crate) clock: u32,
+    /// When the last LFD3K-LINK report was written out on this connection.
+    pub(crate) link_sent: Option<u32>,
+    /// A report is due before the 10 s period (a retrain): sent once the
+    /// 1 s limit allows.
+    pub(crate) link_due: bool,
 }
+
+/// LFD3K-LINK reports go out at least this far apart.
+pub const LINK_MIN_GAP_MS: u32 = 1_000;
+/// And this often while nothing else asks for one.
+pub const LINK_PERIOD_MS: u32 = 10_000;
 
 impl Wire {
     pub(crate) const fn new() -> Wire {
@@ -200,6 +213,9 @@ impl Wire {
             last_tx: None,
             last_rx: None,
             cr_flush: false,
+            clock: 0,
+            link_sent: None,
+            link_due: false,
         }
     }
 
@@ -216,6 +232,35 @@ impl Wire {
         self.last_tx = None;
         self.last_rx = None;
         self.cr_flush = false;
+        self.clock = 0;
+        self.link_sent = None;
+        self.link_due = false;
+    }
+
+    /// A new connection: no report sent on it yet.
+    pub(crate) fn link_reset(&mut self) {
+        self.link_sent = None;
+        self.link_due = false;
+    }
+
+    /// An LFD3K-LINK report should go out now: the server agreed (DO 90),
+    /// the call is online, and it is the first report, a retrain's, or the
+    /// 10 s period, never within 1 s of the last one.
+    pub(crate) fn link_wanted(&self) -> bool {
+        let online = matches!(
+            self.call,
+            Call::Wire(Phase::Online) | Call::Bridge(Phase::Online)
+        );
+        if !online || !self.tn.link_on() {
+            return false;
+        }
+        match self.link_sent {
+            None => true,
+            Some(t) => {
+                let gap = self.clock.wrapping_sub(t);
+                gap >= LINK_MIN_GAP_MS && (self.link_due || gap >= LINK_PERIOD_MS)
+            }
+        }
     }
 
     pub(crate) fn name(&self) -> &[u8] {
@@ -223,8 +268,14 @@ impl Wire {
     }
 
     /// Bytes for the socket: a pending pair byte, then telnet replies, then
-    /// user data (encoded here, so a reply never lands inside a pair).
-    pub(crate) fn output(&mut self, out: &mut [u8]) -> usize {
+    /// the LFD3K-LINK offer and `report` (a whole `IAC SB 90 ... IAC SE`
+    /// frame, see `link_wanted`), then user data (encoded here, so a reply
+    /// never lands inside a pair). The offer and the report go out only
+    /// whole, after every queued reply, and the report only when `out` also
+    /// has room for all the caller data waiting (each byte counted twice for
+    /// a possible `IAC IAC` or CR NUL): stats never hold caller data back.
+    /// A report that does not fit stays due for a later call.
+    pub(crate) fn output(&mut self, out: &mut [u8], report: Option<&[u8]>) -> usize {
         let mut n = 0;
         if let Some(p) = self.pend {
             match out.get_mut(n) {
@@ -242,6 +293,32 @@ impl Wire {
             self.call,
             Call::Wire(Phase::Online) | Call::Bridge(Phase::Online)
         );
+        if live && self.tn.replies_pending() == 0 {
+            if self.tn.offer_due() && out.len().saturating_sub(n) >= 3 && self.tn.take_offer() {
+                for c in [
+                    crate::telnet::IAC,
+                    crate::telnet::WILL,
+                    crate::telnet::OPT_LINK,
+                ] {
+                    if let Some(d) = out.get_mut(n) {
+                        *d = c;
+                        n += 1;
+                    }
+                }
+            }
+            if let Some(r) = report.filter(|r| !r.is_empty()) {
+                let room = out.len().saturating_sub(n);
+                let backlog = self.tx.len().saturating_mul(2);
+                if room >= r.len().saturating_add(backlog) {
+                    if let Some(d) = out.get_mut(n..n + r.len()) {
+                        d.copy_from_slice(r);
+                        n += r.len();
+                        self.link_sent = Some(self.clock);
+                        self.link_due = false;
+                    }
+                }
+            }
+        }
         while n < out.len() {
             let mut two = [0u8; 2];
             let k = self.tx.peek(&mut two);

@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "mdns_link.h"
 
 static const char *TAG = "wifi";
 
@@ -184,6 +185,11 @@ static void wifi_task(void *arg)
             last_status = now;
             build_status();
         }
+        /* mDNS: a client address, or the hotspot, is a network to talk on. */
+        portENTER_CRITICAL(&s_mux);
+        bool net_up = s_started && (s_ip[0] != 0 || s_cfg.ap_on);
+        portEXIT_CRITICAL(&s_mux);
+        mdns_link_step(net_up);
     }
 }
 
@@ -201,6 +207,7 @@ void wifi_link_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL));
+    mdns_link_init(); /* advertising starts once the modem task hands over its name */
     xTaskCreatePinnedToCore(wifi_task, "wifi", 5120, NULL, 5, NULL, 0);
 }
 

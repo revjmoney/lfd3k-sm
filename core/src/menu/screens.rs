@@ -619,27 +619,71 @@ fn fwd_body(w: &mut Row, i: u8, ui: &Ui, v: &View) {
             }
             w.pad_to(a, COLS - 2);
         }
-        11 => {
+        10 => {
             w.pad_to(TEXT, 3).str(LABEL, "Answered radio calls go to: ");
             match v.set.published() {
                 Some(f) => w.str(VALUE, f.name()),
                 None => w.str(DIM, "nothing published"),
             };
         }
-        13 => {
+        11 => {
             w.pad_to(TEXT, 3);
             w.str(
                 DIM,
                 "ATDT <name> dials a forward over Wi-Fi. T is telnet, R raw TCP.",
             );
         }
-        14 => {
+        12 => {
             w.pad_to(TEXT, 3).num(VALUE, v.set.fwd_count() as u32);
             w.str(DIM, " of ")
                 .num(DIM, MAX_FWD as u32)
                 .str(DIM, " used.");
         }
+        14..=17 => found_row(w, i - 14, ui, v),
         _ => {}
+    }
+}
+
+/// A telnet server the mDNS browse found that is not a forward yet:
+/// `Found: <name> <ip>:<port>  Enter adds <forward> forward and publishes
+/// it`. The name shows at most 16 characters; when the whole line would not
+/// fit the box, the tail is the shorter `Enter adds and publishes it`.
+fn found_row(w: &mut Row, k: u8, ui: &Ui, v: &View) {
+    let Some(h) = v.found.new_host(v.set, k) else {
+        return;
+    };
+    let sel = ui.sel.checked_sub(MAX_FWD as u8) == Some(k);
+    let (a, d) = if sel { (BAR, BAR) } else { (KEY, TEXT) };
+    let name = h.name().as_bytes();
+    let name = name.get(..16).unwrap_or(name);
+    let mut ip = [0u8; 15];
+    let ip_len = h.ip_text(&mut ip);
+    let ip = ip.get(..ip_len).unwrap_or(&[]);
+    let port = h.port();
+    let port_len = match port {
+        0..=9 => 1,
+        10..=99 => 2,
+        100..=999 => 3,
+        1000..=9999 => 4,
+        _ => 5,
+    };
+    let fwd = h.fwd_pick().as_bytes();
+    // Columns: 1 marker, "Found: " 7, name, space, ip:port, 2 spaces.
+    let head = 1 + 7 + name.len() + 1 + ip.len() + 1 + port_len + 2;
+    let long = 11 + fwd.len() + 25;
+    let room = usize::from(COLS - 2).saturating_sub(1);
+    w.pad_to(TEXT, 1).cell(a, if sel { 0xAF } else { b' ' });
+    w.str(a, "Found: ").text(d, name).cell(d, b' ');
+    w.text(d, ip).cell(d, b':').num(d, u32::from(port));
+    w.str(d, "  ");
+    if head + long <= room {
+        w.str(a, "Enter").str(d, " adds ").text(d, fwd);
+        w.str(d, " forward and publishes it");
+    } else {
+        w.str(a, "Enter").str(d, " adds and publishes it");
+    }
+    if sel {
+        w.pad_to(a, COLS - 2);
     }
 }
 
@@ -861,6 +905,11 @@ fn help(w: &mut Row, ui: &Ui, v: &View) {
                 ("Up Down", "move"),
                 ("Enter", "edit"),
                 ("Left Right", "step"),
+                ("Esc", "back"),
+            ],
+            Screen::Fwd if ui.sel >= MAX_FWD as u8 => &[
+                ("Enter", "add as forward and publish"),
+                ("Up Down", "move"),
                 ("Esc", "back"),
             ],
             Screen::Fwd => &[
