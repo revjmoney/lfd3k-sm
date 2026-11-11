@@ -83,6 +83,9 @@ counts as a crash for the picker, so the first boot would show LAST MODE CRASHED
   appended SHA-256, last 32 bytes of the .bin) is
   `f312de7d8ec431fe1b80a84067cb01932cdeeaa7cb24f69e1b499f11c0e61d12`. Read what the device reports
   first, compare, and only then set the hash.
+  Done on Rev's V4 (2026-11-11, rnodeconf 1.3.5): `rnodeconf COMn -i` (read only), then
+  `rnodeconf COMn -r --product c3 --model c8 --hwrev 1` (Heltec LoRa32 v4 with PA), then
+  `rnodeconf COMn -L` (must print the hash above), then `rnodeconf COMn -H <that hash>`.
 * **Do not long-press PRG in RNODE mode.** It may start RNode's console, which may mount and format the
   first SPIFFS partition, Meshtastic's data (unverified against the 1.86 source).
 * **First launch check.** The first start from the picker must reach LFD3K-SM (the modem screen, not the
