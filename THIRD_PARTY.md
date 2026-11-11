@@ -33,7 +33,7 @@ core and ffi have no dependencies outside the workspace. The only third-party cr
 
 | Font | License | Used in |
 |------|---------|---------|
-| Noto Sans SC, Noto Sans JP, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans Arabic | SIL Open Font License 1.1 | rendered glyph bitmaps only: the idle show words in `firmware/src/idle_words.h`, made on the PC by `tools/gen_idle_words.py`; the font files stay in `vendor/fonts/` (git-ignored, not in the repo or the firmware) |
+| Noto Sans SC, Noto Sans JP, Noto Sans KR, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans Arabic, Noto Sans Hebrew, Noto Sans Thai | SIL Open Font License 1.1 | rendered glyph bitmaps only: the idle show words in `firmware/src/idle_words.h`, made on the PC by `tools/gen_idle_words.py`; the font files stay in `vendor/fonts/` (git-ignored, not in the repo or the firmware) |
 
 ## PC tools (not shipped)
 

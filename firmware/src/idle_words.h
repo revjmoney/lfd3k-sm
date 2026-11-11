@@ -2,7 +2,8 @@
  *
  * 1-bit bitmaps of the complex script idle words, rendered on the PC with Pillow
  * and libraqm (shaped: conjuncts, joining, right to left) from Noto Sans SC,
- * Noto Sans JP, Noto Sans Devanagari, Noto Sans Bengali and Noto Sans Arabic
+ * Noto Sans JP, Noto Sans KR, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans
+ * Arabic, Noto Sans Hebrew and Noto Sans Thai
  * (bold, wght 700). The fonts are under the SIL Open Font License 1.1; only these
  * rendered glyph bitmaps are in the firmware, the font files are not.
  *
@@ -67,6 +68,28 @@ static const uint32_t IDLE_BMP_UR_COLS[34] = {
     0x0CF80, 0x007C0, 0x0CF80, 0x0CE00, 0x00C00, 0x00C00, 0x0CC00, 0x0CFE0,
     0x04FF0, 0x007C0,
 };
+/* Korean, 28 x 16 */
+static const uint32_t IDLE_BMP_KO_COLS[28] = {
+    0x01FFC, 0x01FFC, 0x01C0C, 0x00C0C, 0x00C0C, 0x00C0C, 0x00800, 0x07FFF,
+    0x07FFF, 0x000C0, 0x000C0, 0x0FFFF, 0x0FFFF, 0x00000, 0x00000, 0x00800,
+    0x0180C, 0x01C0C, 0x00E0C, 0x0070C, 0x003CC, 0x001FC, 0x0007C, 0x00000,
+    0x00000, 0x0FFFF, 0x0FFFF, 0x0FFFF,
+};
+/* Hebrew, 37 x 16 */
+static const uint32_t IDLE_BMP_HE_COLS[37] = {
+    0x0FFE7, 0x0FFE7, 0x0FFE7, 0x0FFE7, 0x00007, 0x00007, 0x00E07, 0x00FC7,
+    0x00FFF, 0x007FF, 0x0007F, 0x0000F, 0x00000, 0x00002, 0x00007, 0x00007,
+    0x00007, 0x00007, 0x00007, 0x00FFF, 0x00FFF, 0x00FFE, 0x00FF8, 0x00000,
+    0x00000, 0x003F7, 0x007FF, 0x00FFF, 0x00F0F, 0x00C07, 0x01C07, 0x01C07,
+    0x00C07, 0x00F0F, 0x00FFE, 0x007FE, 0x001F8,
+};
+/* Thai, 31 x 18 */
+static const uint32_t IDLE_BMP_TH_COLS[31] = {
+    0x10180, 0x381C0, 0x381C0, 0x381C0, 0x381C0, 0x3C3C0, 0x3FFDF, 0x1FF9F,
+    0x07F1F, 0x00000, 0x00000, 0x001C0, 0x001C0, 0x001C0, 0x001C0, 0x3FFC0,
+    0x3FFC0, 0x3FF80, 0x00000, 0x00000, 0x000C0, 0x00FC0, 0x07FC0, 0x3FF80,
+    0x3F800, 0x3C1C0, 0x381C0, 0x1E3C0, 0x1FFC0, 0x0FF80, 0x03E00,
+};
 
 static const idle_bmp_t IDLE_BMP_ZH = {32, 16, 0, IDLE_BMP_ZH_COLS};
 static const idle_bmp_t IDLE_BMP_JA = {34, 16, 0, IDLE_BMP_JA_COLS};
@@ -74,5 +97,8 @@ static const idle_bmp_t IDLE_BMP_HI = {52, 16, 0, IDLE_BMP_HI_COLS};
 static const idle_bmp_t IDLE_BMP_BN = {43, 17, 0, IDLE_BMP_BN_COLS};
 static const idle_bmp_t IDLE_BMP_AR = {39, 16, 1, IDLE_BMP_AR_COLS};
 static const idle_bmp_t IDLE_BMP_UR = {34, 16, 1, IDLE_BMP_UR_COLS};
+static const idle_bmp_t IDLE_BMP_KO = {28, 16, 0, IDLE_BMP_KO_COLS};
+static const idle_bmp_t IDLE_BMP_HE = {37, 16, 1, IDLE_BMP_HE_COLS};
+static const idle_bmp_t IDLE_BMP_TH = {31, 18, 0, IDLE_BMP_TH_COLS};
 
 #endif

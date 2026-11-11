@@ -435,8 +435,8 @@ static void hexline(FILE *f, const char *label, const uint8_t *fb)
 /* The preview script: twelve loops, one per transition, then the scroller. */
 static void idle_dump(const char *dir)
 {
-    static const int SEQ[] = {IS_IDLE, IS_ZH, IS_ES, IS_CLOCK, IS_HI, IS_RU, IS_TEMP, IS_AR, IS_DE, IS_JA,
-                              IS_UPTIME, IS_TR, IS_BN, IS_UR, IS_FR, IS_HEARD};
+    static const int SEQ[] = {IS_IDLE, IS_ZH, IS_ES, IS_CLOCK, IS_HI, IS_RU, IS_TEMP, IS_AR, IS_SV, IS_KO,
+                              IS_UPTIME, IS_EL, IS_TH, IS_HE, IS_PL, IS_JA};
     enum { NSLOT = 17 };
     static idle_slot_t sc[NSLOT];
     for (int i = 0; i < 12; i++) {

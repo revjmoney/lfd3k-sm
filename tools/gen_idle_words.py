@@ -36,6 +36,9 @@ WORDS = [
      "NotoSansBengali[wdth,wght].ttf", "bn", "ltr", 17),
     ("AR", "Arabic", "خامل", "NotoSansArabic[wdth,wght].ttf", "ar", "rtl", 16),
     ("UR", "Urdu", "بیکار", "NotoSansArabic[wdth,wght].ttf", "ur", "rtl", 16),
+    ("KO", "Korean", "대기", "NotoSansKR[wght].ttf", "ko", "ltr", 16),
+    ("HE", "Hebrew", "סרק", "NotoSansHebrew[wdth,wght].ttf", "he", "rtl", 16),
+    ("TH", "Thai", "ว่าง", "NotoSansThai[wdth,wght].ttf", "th", "ltr", 18),  # the full band: the tone mark needs a clear row
 ]
 
 
@@ -88,7 +91,8 @@ def main(argv):
         " *",
         " * 1-bit bitmaps of the complex script idle words, rendered on the PC with Pillow",
         " * and libraqm (shaped: conjuncts, joining, right to left) from Noto Sans SC,",
-        " * Noto Sans JP, Noto Sans Devanagari, Noto Sans Bengali and Noto Sans Arabic",
+        " * Noto Sans JP, Noto Sans KR, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans",
+        " * Arabic, Noto Sans Hebrew and Noto Sans Thai",
         " * (bold, wght 700). The fonts are under the SIL Open Font License 1.1; only these",
         " * rendered glyph bitmaps are in the firmware, the font files are not.",
         " *",

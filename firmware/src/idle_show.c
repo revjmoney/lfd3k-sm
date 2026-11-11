@@ -13,7 +13,7 @@
  * neighbour, so no item shows twice in a row. The transition is hash(n) % 12.
  *
  * Band. Items are drawn into an 18 row mask, rows 0..17 = y 12..29: 2x text at y 14..27
- * (Ş's cedilla to y 29), 1x text at y 18..24, the script bitmaps (16 or 17 rows) centred
+ * (Ş's cedilla to y 29), 1x text at y 18..24, the script bitmaps (16 to 18 rows) centred
  * on y 21. Each column of the mask is a uint32_t, bit 0 = y 12. */
 #include <stdio.h>
 #include <string.h>
@@ -54,16 +54,18 @@ static const item_def_t ITEMS[IS_ITEMS] = {
     {"JAPANESE", 1, NULL, &IDLE_BMP_JA},
     {"HINDI", 1, NULL, &IDLE_BMP_HI},
     {"SPANISH", 1, "INACTIVO", NULL},
-    {"FRENCH", 1, "INACTIF", NULL},
     {"ARABIC", 1, NULL, &IDLE_BMP_AR},
     {"BENGALI", 1, NULL, &IDLE_BMP_BN},
-    {"PORTUGUESE", 1, "OCIOSO", NULL},
     {"RUSSIAN", 1, "\xD0\x9F\xD0\xA0\xD0\x9E\xD0\xA1\xD0\xA2\xD0\x9E\xD0\x99", NULL}, /* ПРОСТОЙ */
     {"URDU", 1, NULL, &IDLE_BMP_UR},
-    {"INDONESIAN", 1, "SIAGA", NULL},
     {"GERMAN", 1, "LEERLAUF", NULL},
-    {"SWAHILI", 1, "TULIVU", NULL},
     {"TURKISH", 1, "BO\xC5\x9E" "TA", NULL}, /* BOŞTA */
+    {"SWEDISH", 1, "V\xC3\x84" "NTAR", NULL}, /* VÄNTAR */
+    {"POLISH", 1, "JA\xC5\x81" "OWY", NULL}, /* JAŁOWY */
+    {"GREEK", 1, "\xCE\x91\xCE\x94\xCE\xA1\xCE\x91\xCE\x9D\xCE\x97\xCE\xA3", NULL}, /* ΑΔΡΑΝΗΣ */
+    {"KOREAN", 1, NULL, &IDLE_BMP_KO},
+    {"HEBREW", 1, NULL, &IDLE_BMP_HE},
+    {"THAI", 1, NULL, &IDLE_BMP_TH},
     {"CLOCK", 1, NULL, NULL},
     {"UPTIME", 1, NULL, NULL},
     {"TEMP", 1, NULL, NULL},

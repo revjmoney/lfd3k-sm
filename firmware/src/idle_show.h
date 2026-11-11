@@ -9,7 +9,8 @@
 
 /* Items. Weights: IDLE 3, every other 1 (info items only while available). */
 enum {
-    IS_IDLE, IS_ZH, IS_JA, IS_HI, IS_ES, IS_FR, IS_AR, IS_BN, IS_PT, IS_RU, IS_UR, IS_ID, IS_DE, IS_SW, IS_TR,
+    IS_IDLE, IS_ZH, IS_JA, IS_HI, IS_ES, IS_AR, IS_BN, IS_RU, IS_UR, IS_DE, IS_TR,
+    IS_SV, IS_PL, IS_EL, IS_KO, IS_HE, IS_TH,
     IS_CLOCK, IS_UPTIME, IS_TEMP, IS_HEARD, IS_CALLER, IS_GPS,
     IS_ITEMS,
     IS_BLANK = IS_ITEMS /* nothing: the band after the scroller has gone */
