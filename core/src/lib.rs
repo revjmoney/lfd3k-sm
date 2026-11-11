@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod frame;
 pub mod link;
 pub mod lz;
+pub mod menu;
 pub mod modem;
 pub mod radio;
 pub mod settings;

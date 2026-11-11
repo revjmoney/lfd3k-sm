@@ -9,7 +9,7 @@
 //! |-------:|-----:|-------|
 //! | 0 | 4 | magic `LFS1` |
 //! | 4 | 1 | version (2) |
-//! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password, bit4 S31 = 0 (compression off) |
+//! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password, bit4 S31 = 0 (compression off), bit5 S32 = 1 (boot to menu) |
 //! | 6 | 16 | S registers S0, S2, S7, S12, S20, S21, S22, S30 as u16 (S30 two's complement) |
 //! | 22 | 1 | published forward index, 0xFF none |
 //! | 23 | 33 | hotspot SSID: length byte, 32 bytes zero padded |
@@ -33,10 +33,15 @@
 //! An older build refuses a blob with bit 4 set (unknown flag) and falls
 //! back to its defaults; that only happens after a downgrade with S31 = 0.
 //!
+//! S32 (phase 4, boot to menu) lives in flags bit 5, stored as is (set means
+//! S32 = 1; the default 0 leaves the bit clear), by the same rule: layout,
+//! length and version unchanged, every older v2 blob loads with S32 = 0, a
+//! v1 blob with bit 5 set is refused.
+//!
 //! Forward record: used (0 or 1), name length, name\[16\], host length,
 //! host\[63\], port u16, mode (0 telnet, 1 raw). An unused record is all zero.
 
-use crate::at::{SRegs, REG_LZ};
+use crate::at::{SRegs, REG_LZ, REG_MENU};
 use crate::frame::valid_name;
 
 /// Forward slots.
@@ -72,11 +77,13 @@ const FLAG_VERBOSE: u8 = 4;
 const FLAG_SHOW: u8 = 8;
 /// S31 = 0 (inverted, so blobs from before S31 load with it on).
 const FLAG_NO_LZ: u8 = 16;
-/// The registers in the 16 byte register field, in order. S31 is the
-/// flags bit above; every other register in `SRegs::NUMBERS` is here.
+/// S32 = 1 (boot to menu).
+const FLAG_MENU: u8 = 32;
+/// The registers in the 16 byte register field, in order. S31 and S32 are
+/// the flags bits above; every other register in `SRegs::NUMBERS` is here.
 const BLOB_REGS: [u8; NREGS] = [0, 2, 7, 12, 20, 21, 22, 30];
 
-const _: () = assert!(SRegs::NUMBERS.len() == NREGS + 1);
+const _: () = assert!(SRegs::NUMBERS.len() == NREGS + 2);
 const _: () = assert!(BLOB_USED <= BLOB_LEN);
 
 fn printable(s: &str) -> bool {
@@ -488,6 +495,36 @@ impl Settings {
         self.fwd.get(i)?.as_ref()
     }
 
+    /// Boot to menu (S32 = 1): the menu opens on the first host byte.
+    pub fn boot_menu(&self) -> bool {
+        self.sregs.get(REG_MENU) == Some(1)
+    }
+
+    /// Same profile as `o`: every field but `show_ap_pass` (whether the
+    /// generated hotspot password may still be shown is not a setting).
+    pub fn same_profile(&self, o: &Settings) -> bool {
+        self.ap_on == o.ap_on
+            && self.ap_ssid() == o.ap_ssid()
+            && self.ap_pass() == o.ap_pass()
+            && self.sta_ssid() == o.sta_ssid()
+            && self.sta_pass() == o.sta_pass()
+            && self.fwd == o.fwd
+            && self.publish == o.publish
+            && self.sregs == o.sregs
+            && self.echo == o.echo
+            && self.verbose == o.verbose
+            && self.beacon == o.beacon
+    }
+
+    /// Hotspot or client network settings differ from `o`.
+    pub fn wifi_differs(&self, o: &Settings) -> bool {
+        self.ap_on != o.ap_on
+            || self.ap_ssid() != o.ap_ssid()
+            || self.ap_pass() != o.ap_pass()
+            || self.sta_ssid() != o.sta_ssid()
+            || self.sta_pass() != o.sta_pass()
+    }
+
     /// Serialise into `out` (zero filled first); returns the bytes used.
     pub fn to_blob(&self, out: &mut [u8; BLOB_LEN]) -> usize {
         *out = [0; BLOB_LEN];
@@ -501,6 +538,7 @@ impl Settings {
             (self.verbose, FLAG_VERBOSE),
             (self.show_ap_pass, FLAG_SHOW),
             (self.sregs.get(REG_LZ) == Some(0), FLAG_NO_LZ),
+            (self.sregs.get(REG_MENU) == Some(1), FLAG_MENU),
         ] {
             if on {
                 flags |= bit;
@@ -559,7 +597,7 @@ impl Settings {
         let flags = r.u8()?;
         let mut known = FLAG_AP | FLAG_ECHO | FLAG_VERBOSE | FLAG_SHOW;
         if version == VERSION {
-            known |= FLAG_NO_LZ;
+            known |= FLAG_NO_LZ | FLAG_MENU;
         }
         if flags & !known != 0 {
             return None;
@@ -575,6 +613,9 @@ impl Settings {
             }
         }
         if !s.sregs.set(REG_LZ, u16::from(flags & FLAG_NO_LZ == 0)) {
+            return None;
+        }
+        if !s.sregs.set(REG_MENU, u16::from(flags & FLAG_MENU != 0)) {
             return None;
         }
         let publish = r.u8()?;

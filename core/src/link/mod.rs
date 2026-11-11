@@ -348,6 +348,12 @@ impl Link {
         u32::try_from(r).unwrap_or(u32::MAX)
     }
 
+    /// Data payload bytes of the current (or last) call before compression,
+    /// both directions, resends included (the menu's throughput).
+    pub fn data_bytes(&self) -> u32 {
+        self.lz_raw
+    }
+
     /// Count one Data payload for the ratio.
     fn lz_count(&mut self, raw: usize, air: usize) {
         let (raw, air) = (raw as u32, air as u32);

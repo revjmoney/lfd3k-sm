@@ -86,6 +86,8 @@ pub enum AtCmd<'a> {
     DirRemove(&'a str),
     /// `AT+DIR=0`: remove every unpinned entry.
     DirClear,
+    /// `AT+MENU`: open the full-screen setup menu.
+    Menu,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,7 +166,7 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+SCAN`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
+/// `+FB`, `+SCAN`, `+MENU`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
 /// `+BEACON`, `+DIR` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
@@ -177,13 +179,15 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
             Ok(AtCmd::FrameBuffer)
         } else if arg.eq_ignore_ascii_case("SCAN") {
             Ok(AtCmd::Scan)
+        } else if arg.eq_ignore_ascii_case("MENU") {
+            Ok(AtCmd::Menu)
         } else {
             Err(AtError::Unknown)
         };
     };
     let name = arg.get(..i).ok_or(AtError::Unknown)?.trim_end();
     let rest = arg.get(i..).ok_or(AtError::Unknown)?;
-    if name.eq_ignore_ascii_case("SCAN") {
+    if name.eq_ignore_ascii_case("SCAN") || name.eq_ignore_ascii_case("MENU") {
         return Err(AtError::BadArg);
     }
     let known = [
@@ -520,9 +524,13 @@ pub const REG_TX_POWER: u8 = 30;
 /// only when both ends have it at 1 (see `lz.rs`).
 pub const REG_LZ: u8 = 31;
 
+/// S32: boot to menu, 1 opens the setup menu on the first host byte after
+/// boot, 0 (default) starts in plain AT command mode.
+pub const REG_MENU: u8 = 32;
+
 /// (register, min, max, default). Values are compared as i16; S30 is stored
 /// as the two's complement of its i16 value, the others are never negative.
-const REGS: [(u8, i16, i16, i16); 9] = [
+const REGS: [(u8, i16, i16, i16); 10] = [
     (0, 0, 255, 0),
     (2, 0, 127, 43),
     (7, 1, 255, 30),
@@ -532,11 +540,12 @@ const REGS: [(u8, i16, i16, i16); 9] = [
     (22, 1, 255, 20),
     (REG_TX_POWER, -9, 22, 2),
     (REG_LZ, 0, 1, 1),
+    (REG_MENU, 0, 1, 0),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SRegs {
-    vals: [u16; 9],
+    vals: [u16; 10],
 }
 
 impl Default for SRegs {
@@ -547,10 +556,10 @@ impl Default for SRegs {
 
 impl SRegs {
     /// Register numbers present, for `AT&V`.
-    pub const NUMBERS: [u8; 9] = [0, 2, 7, 12, 20, 21, 22, 30, 31];
+    pub const NUMBERS: [u8; 10] = [0, 2, 7, 12, 20, 21, 22, 30, 31, 32];
 
     pub const fn new() -> Self {
-        let mut vals = [0u16; 9];
+        let mut vals = [0u16; 10];
         let mut i = 0;
         while i < vals.len() {
             vals[i] = REGS[i].3 as u16;
@@ -754,7 +763,7 @@ mod tests {
             assert_eq!(s.get(n), None, "S{n} should not exist");
             assert!(!SRegs::new().set(n, 0));
         }
-        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30, 31]);
+        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30, 31, 32]);
     }
 
     #[test]

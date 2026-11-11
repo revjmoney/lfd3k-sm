@@ -29,6 +29,15 @@
 //! from a name that is not a pinned directory entry (`AT+DIR=+NAME`) is
 //! dropped before the link sees it, so nothing at all is sent (no RING, no
 //! CallReject).
+//!
+//! Setup menu (see `menu/`): `AT+MENU` (or, with S32 = 1, the first host
+//! byte after boot) opens a full-screen ANSI menu. While it is open every
+//! host byte goes to the menu, never to the AT parser, and nothing else
+//! reaches the host: result codes and info lines are held back (RING shows
+//! in the menu's status line, a NO CARRIER is printed on leave). Menu edits
+//! are AT lines run through `parse_line` and the AT dispatch. Leaving clears
+//! the screen and prints OK (then NO CARRIER and RING when they apply). A
+//! call that connects while it is open (auto-answer) closes it first.
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::directory::{Directory, DIR_MAX};
@@ -38,6 +47,7 @@ use crate::discovery::{
 };
 use crate::frame::{valid_name, FrameType, Header, HEADER_LEN, NAME_MAX};
 use crate::link::{Event, Link, Role, State};
+use crate::menu::{self, render, Action, Menu, View};
 use crate::radio::{Radio, RxInfo};
 use crate::settings::{parse_hostport, BeaconMode, Forward, Settings, WireMode, MAX_FWD};
 use crate::tier::{best_tier, Tier};
@@ -51,7 +61,7 @@ pub const RELEASE_NAME: &str = "r.420 BL4Z3B4ND ULTR4M0D3M";
 pub const RELEASE_TAGLINE: &str = "S0N1C B00M R4D10 PR0 MAX";
 
 /// Gain of the Heltec V4 GC1109 front end, shown in AT&V.
-const GC1109_GAIN_DB: i32 = 12;
+pub(crate) const GC1109_GAIN_DB: i32 = 12;
 
 const OUT_CAP: usize = 1024;
 /// Output space kept free of call data so result codes always fit.
@@ -342,6 +352,10 @@ pub struct Modem {
     /// The name of the current radio dial, credited when it answers.
     dial_name: [u8; NAME_MAX],
     dial_len: u8,
+    /// The setup menu (AT+MENU) and its screen state.
+    menu: Menu,
+    /// S32 was set at boot: the first host byte opens the menu.
+    boot_menu: bool,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -413,6 +427,8 @@ impl Modem {
             dir_list: None,
             dial_name: [0; NAME_MAX],
             dial_len: 0,
+            menu: Menu::new(),
+            boot_menu: false,
         }
     }
 
@@ -460,6 +476,8 @@ impl Modem {
         self.dir_saved_at = 0;
         self.dir_list = None;
         self.dial_len = 0;
+        self.menu.stop();
+        self.boot_menu = false;
     }
 
     /// True once when the platform should save the directory
@@ -561,11 +579,13 @@ impl Modem {
 
     /// Boot: make `s` (from `Settings::from_blob`) the current settings and
     /// the profile `ATZ` restores. Registers, echo and verbose apply now.
+    /// With S32 = 1 the first host byte after this opens the menu.
     pub fn load_settings(&mut self, s: Settings) {
         self.cfg.sregs = s.sregs;
         self.echo = s.echo;
         self.verbose = s.verbose;
         self.saved.clone_from(&s);
+        self.boot_menu = s.boot_menu();
         self.set = s;
         self.wifi_changed = true;
     }
@@ -717,6 +737,9 @@ impl Modem {
         match self.wire.call {
             Call::Wire(Phase::Dialing { .. }) => {
                 self.wire.call = Call::Wire(Phase::Online);
+                if self.menu.open {
+                    self.menu_close(false);
+                }
                 self.fresh_call();
                 self.mode = Mode::Data;
                 self.esc = 0;
@@ -818,9 +841,25 @@ impl Modem {
         if !bytes.is_empty() {
             self.escape_timer(now_ms);
         }
+        // Boot to menu (S32): the first host bytes open it and are dropped.
+        if self.boot_menu && !bytes.is_empty() {
+            self.boot_menu = false;
+            if self.mode == Mode::Command && !self.menu.open {
+                self.menu_open(now_ms, false);
+                self.after(radio, now_ms);
+                return bytes.len();
+            }
+        }
         let mut used = 0;
         while used < bytes.len() {
             let rest = bytes.get(used..).unwrap_or(&[]);
+            if self.menu.open {
+                if let Some(&b) = rest.first() {
+                    self.menu_byte(b, radio, now_ms);
+                }
+                used += 1;
+                continue;
+            }
             if self.mode == Mode::Data {
                 used += self.data_input(rest, now_ms);
                 break;
@@ -851,6 +890,9 @@ impl Modem {
         self.escape_timer(now_ms);
         self.disc_tick(radio, now_ms);
         self.dir_save_timer(now_ms);
+        if self.menu.open {
+            self.menu_tick(radio, now_ms);
+        }
         // A discovery frame queued above goes out in this pump.
         self.link.tick(radio, &self.cfg.sregs, now_ms);
         self.after(radio, now_ms);
@@ -1258,6 +1300,8 @@ impl Modem {
         if self.dir_list.is_some() {
             self.pump_list();
         }
+        // So does the menu's redraw.
+        self.menu_pump();
         n
     }
 
@@ -1660,14 +1704,7 @@ impl Modem {
                     self.end_wire(false);
                 }
                 self.mode = Mode::Command;
-                // Back to the saved profile (power-on defaults if none was
-                // loaded). A password that was hidden stays hidden.
-                self.cfg.sregs = self.saved.sregs;
-                self.echo = self.saved.echo;
-                self.verbose = self.saved.verbose;
-                let shown = self.set.show_ap_pass && self.saved.show_ap_pass;
-                self.set.clone_from(&self.saved);
-                self.set.show_ap_pass = shown;
+                self.restore_profile();
                 self.wifi_changed = true;
                 // A scan or a listing in progress ends silently.
                 self.disc.scan = None;
@@ -1829,22 +1866,7 @@ impl Modem {
                 self.result(ResultCode::Ok);
             }
             AtCmd::Scan => {
-                // Only with no call at all, never in HIDDEN (a ScanReq
-                // carries our name), one scan at a time.
-                let ok = self.mode == Mode::Command
-                    && self.air_idle()
-                    && self.set.beacon != BeaconMode::Hidden
-                    && self.disc.scan.is_none();
-                if ok {
-                    self.disc_start(now);
-                    let id = self.disc.rand(255) as u8;
-                    self.disc.scan = Some(Scan {
-                        id,
-                        asked: now,
-                        sent: None,
-                        hits: 0,
-                    });
-                } else {
+                if !self.start_scan(now) {
                     self.result(ResultCode::Error);
                 }
             }
@@ -1862,7 +1884,61 @@ impl Modem {
                 self.dir.clear_unpinned();
                 self.result(ResultCode::Ok);
             }
+            AtCmd::Menu => {
+                // Not while a call is being set up (dialing, training, a
+                // Wi-Fi dial): idle, ringing, or a call up in online
+                // command mode. No OK now: it comes when the menu closes.
+                let setup = matches!(
+                    self.link.state(),
+                    State::Dialing
+                        | State::AwaitTrain
+                        | State::AwaitTierSet
+                        | State::AwaitTierAck
+                        | State::Probe
+                ) || matches!(
+                    self.wire.call,
+                    Call::Wire(Phase::Dialing { .. }) | Call::Bridge(Phase::Dialing { .. })
+                );
+                if setup || self.menu.open {
+                    self.result(ResultCode::Error);
+                } else {
+                    self.menu_open(now, true);
+                }
+            }
         }
+    }
+
+    /// Back to the saved profile (power-on defaults if none was loaded):
+    /// registers, E, V and the settings. A password that was hidden stays
+    /// hidden. Shared by ATZ and the menu's discard.
+    fn restore_profile(&mut self) {
+        self.cfg.sregs = self.saved.sregs;
+        self.echo = self.saved.echo;
+        self.verbose = self.saved.verbose;
+        let shown = self.set.show_ap_pass && self.saved.show_ap_pass;
+        self.set.clone_from(&self.saved);
+        self.set.show_ap_pass = shown;
+    }
+
+    /// Start an AT+SCAN: only with no call at all, never in HIDDEN (a
+    /// ScanReq carries our name), one scan at a time. Shared by AT+SCAN and
+    /// the menu.
+    fn start_scan(&mut self, now: u32) -> bool {
+        let ok = self.mode == Mode::Command
+            && self.air_idle()
+            && self.set.beacon != BeaconMode::Hidden
+            && self.disc.scan.is_none();
+        if ok {
+            self.disc_start(now);
+            let id = self.disc.rand(255) as u8;
+            self.disc.scan = Some(Scan {
+                id,
+                asked: now,
+                sent: None,
+                hits: 0,
+            });
+        }
+        ok
     }
 
     fn ok_or_error(&mut self, ok: bool) {
@@ -1874,6 +1950,15 @@ impl Modem {
     }
 
     fn result(&mut self, code: ResultCode) {
+        if self.menu.open {
+            // The menu owns the screen: keep what the dispatch said (menu
+            // edits read it), hold a NO CARRIER for the leave, and redraw
+            // (RING and call state show in the status line).
+            self.menu.last = Some(code);
+            self.menu.held_nc |= code == ResultCode::NoCarrier;
+            self.menu.rd.refresh();
+            return;
+        }
         let mut b = [0u8; 64];
         let n = format_result(&code, self.verbose, &mut b);
         self.out.push(b.get(..n).unwrap_or(&[]));
@@ -1888,8 +1973,11 @@ impl Modem {
         }
     }
 
-    /// `\r\n<text>\r\n`.
+    /// `\r\n<text>\r\n`. Nothing while the menu is open.
     fn info(&mut self, text: &[u8]) {
+        if self.menu.open {
+            return;
+        }
         let mut t = Txt::new();
         t.put(b"\r\n").put(text).put(b"\r\n");
         self.out.push(t.bytes());
@@ -1932,6 +2020,10 @@ impl Modem {
                         None => false,
                     };
                     if !bridged {
+                        // A call takes the host: the menu closes first.
+                        if self.menu.open {
+                            self.menu_close(false);
+                        }
                         self.mode = Mode::Data;
                         self.esc = 0;
                         self.esc_dead = false;
@@ -1977,6 +2069,7 @@ impl Modem {
         if self.dir_list.is_some() {
             self.pump_list();
         }
+        self.menu_pump();
     }
 
     /// Host data in data mode: into the Wi-Fi call or the radio link.
@@ -2113,8 +2206,12 @@ impl Modem {
         }
     }
 
-    /// Wire bytes to the host, keeping OUT_RESERVE free.
+    /// Wire bytes to the host, keeping OUT_RESERVE free. None while the
+    /// menu owns the screen.
     fn drain_wire(&mut self) {
+        if self.menu.open {
+            return;
+        }
         let mut tmp = [0u8; 256];
         loop {
             let room = self.out.free().saturating_sub(OUT_RESERVE).min(tmp.len());
@@ -2170,7 +2267,8 @@ impl Modem {
     /// full) and clear `closing` before returning.
     fn drain(&mut self) {
         let mut tmp = [0u8; 256];
-        loop {
+        // The menu owns the screen: call data stays in the link.
+        while !self.menu.open {
             let room = self.out.free().saturating_sub(OUT_RESERVE).min(tmp.len());
             let n = if room == 0 {
                 0
@@ -2186,6 +2284,192 @@ impl Modem {
             self.closing = false;
             self.result(ResultCode::NoCarrier);
         }
+    }
+
+    /// Read-only state for the menu's keys and rows.
+    fn view(&self, now: u32) -> View<'_> {
+        View {
+            name: name_of(&self.cfg),
+            set: &self.set,
+            dir: &self.dir,
+            now,
+            call_state: self.call_state(),
+            wire_state: self.wire_state(),
+            tier: self.link.tier().filter(|_| self.link.is_connected()),
+            last_rx: self.last_rx,
+            retrains: &self.retrains,
+            lz: self.link.lz(),
+            lz_x10: self.link.lz_ratio_x10(),
+            bps: self.menu.bps,
+            wifi: self.wifi.get(..self.wifi_len).unwrap_or(&[]),
+            radio: self.radio_diag,
+            simnet: self.simnet,
+            simnet_fail: self.simnet_fail,
+            stack_free: self.stack_free,
+            heap_min: self.heap_min,
+            note: self.note.get(..self.note_len).unwrap_or(&[]),
+            scanning: self.disc.scan.is_some(),
+            scan_hits: self.scan_hits(),
+            ringing: self.link.state() == State::Ringing,
+            unsaved: self.menu.unsaved,
+        }
+    }
+
+    /// Open the menu (AT+MENU, or boot to menu). `after_cr`: the line that
+    /// opened it ended with CR (a LF right after it is not a key).
+    fn menu_open(&mut self, now: u32, after_cr: bool) {
+        // A listing in progress ends: the menu owns the screen.
+        self.dir_list = None;
+        self.menu.start(now, self.link.data_bytes(), after_cr);
+        self.menu.unsaved = !self.set.same_profile(&self.saved);
+    }
+
+    /// Close the menu: restore the screen (reset colors, clear, show the
+    /// cursor), then a NO CARRIER held while it was open, OK when `ok`, and
+    /// RING when a caller still rings. A scan still running ends silently.
+    /// Everything here fits in the `OUT_RESERVE` the redraw never uses.
+    fn menu_close(&mut self, ok: bool) {
+        let held = self.menu.held_nc;
+        self.menu.stop();
+        self.out.push(render::LEAVE);
+        self.disc.scan = None;
+        if held {
+            self.result(ResultCode::NoCarrier);
+        }
+        if ok {
+            self.result(ResultCode::Ok);
+        }
+        if self.link.state() == State::Ringing {
+            self.result(ResultCode::Ring);
+        }
+    }
+
+    /// One host byte while the menu is open.
+    fn menu_byte<R: Radio>(&mut self, b: u8, radio: &mut R, now: u32) {
+        let keys = self.menu.dec.feed(b, now);
+        for k in keys.into_iter().flatten() {
+            if !self.menu.open {
+                break;
+            }
+            self.menu_key(k, radio, now);
+        }
+    }
+
+    /// From the tick: a lone ESC that timed out, and the once a second
+    /// refresh (throughput, ages, status line).
+    fn menu_tick<R: Radio>(&mut self, radio: &mut R, now: u32) {
+        if let Some(k) = self.menu.dec.timeout(now) {
+            self.menu_key(k, radio, now);
+        }
+        if self.menu.open && self.menu.tick(now, self.link.data_bytes()) {
+            self.menu.unsaved = !self.set.same_profile(&self.saved);
+        }
+    }
+
+    /// One key: the menu decides, the modem acts.
+    fn menu_key<R: Radio>(&mut self, k: menu::Key, radio: &mut R, now: u32) {
+        self.menu.now = now;
+        let mut ui = core::mem::take(&mut self.menu.ui);
+        let act = ui.key(k, &self.view(now));
+        self.menu.ui = ui;
+        match act {
+            Action::None => {}
+            Action::Leave => self.menu_close(true),
+            Action::DiscardLeave => {
+                let wifi = self.set.wifi_differs(&self.saved);
+                self.restore_profile();
+                self.wifi_changed |= wifi;
+                self.menu_close(true);
+            }
+            Action::SaveLeave => {
+                self.menu.ui.set_line(b"AT&W");
+                self.menu_run(radio, now);
+                self.menu_close(true);
+            }
+            Action::Dial(slot) => {
+                // Exactly ATDT <name>, after leaving the menu.
+                let mut name = [0u8; NAME_MAX];
+                let mut len = 0;
+                if let Some(e) = self.dir.slot(usize::from(slot)) {
+                    for (d, &c) in name.iter_mut().zip(e.name().as_bytes()) {
+                        *d = c;
+                        len += 1;
+                    }
+                }
+                self.menu_close(false);
+                match core::str::from_utf8(name.get(..len).unwrap_or(&[])) {
+                    Ok(n) if !n.is_empty() => self.exec(AtCmd::Dial(n), radio, now),
+                    _ => self.result(ResultCode::Error),
+                }
+                self.sync_set();
+            }
+            Action::Scan => {
+                let ok = self.start_scan(now);
+                self.menu.ui.scan_started(ok);
+            }
+            Action::Run => {
+                let ok = self.menu_run(radio, now);
+                self.menu.ui.ran(ok);
+            }
+        }
+        if self.menu.open {
+            self.menu.unsaved = !self.set.same_profile(&self.saved);
+            self.menu.rd.refresh();
+        }
+    }
+
+    /// Run the AT line the menu composed through the AT parser and the AT
+    /// dispatch (only settings, forward, directory and save commands). True
+    /// when the dispatch said OK. The line is wiped (it may hold a password).
+    fn menu_run<R: Radio>(&mut self, radio: &mut R, now: u32) -> bool {
+        let mut buf = [0u8; menu::LINE_MAX];
+        let n = self.menu.ui.take_line(&mut buf);
+        self.menu.last = None;
+        let parsed = core::str::from_utf8(buf.get(..n).unwrap_or(&[]))
+            .ok()
+            .map(parse_line);
+        let ok = match parsed {
+            Some(Ok(cmd)) if menu::allowed(&cmd) => {
+                self.exec(cmd, radio, now);
+                self.menu.last == Some(ResultCode::Ok)
+            }
+            _ => false,
+        };
+        buf.fill(0);
+        self.sync_set();
+        ok
+    }
+
+    /// Send the menu rows that changed, each whole, while the host output
+    /// keeps `OUT_RESERVE` free; the rest waits for the next pump.
+    fn menu_pump(&mut self) {
+        if !self.menu.open {
+            return;
+        }
+        if self.menu.rd.prologue {
+            if self.out.free() < render::PROLOGUE.len() + OUT_RESERVE {
+                return;
+            }
+            self.out.push(render::PROLOGUE);
+            self.menu.rd.prologue = false;
+        }
+        while let Some(r) = self.menu.rd.next_dirty() {
+            let row = menu::screens::row(r, &self.menu.ui, &self.view(self.menu.now));
+            let h = row.hash();
+            if !self.menu.rd.shows(r, h) {
+                let b = row.bytes();
+                if self.out.free() < b.len() + OUT_RESERVE {
+                    return;
+                }
+                self.out.push(b);
+            }
+            self.menu.rd.done(r, h);
+        }
+    }
+
+    /// The setup menu is open (host bytes are menu keys).
+    pub fn in_menu(&self) -> bool {
+        self.menu.open
     }
 
     /// A new call or a reset: nothing from the old call may follow.
