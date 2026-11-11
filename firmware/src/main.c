@@ -174,7 +174,7 @@ static void save_pending(pending_save_t *p, bool (*store)(const uint8_t *, size_
                          const lfd3k_status_t *st)
 {
     bool wait = p->failed && (uint32_t)(now_ms - p->failed_ms) < 5000;
-    if (p->held && st->state == 0 && st->wire == 0 && !wait) {
+    if (p->held && st->state == 0 && st->wire == 0 && st->scanning == 0 && !wait) {
         if (store(p->blob, p->len)) {
             p->held = false;
             p->failed = false;

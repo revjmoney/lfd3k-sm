@@ -70,7 +70,7 @@ It and everything it pulls in are dev-only for proptest: none of it is built int
 
 | Font | License | Used in |
 |------|---------|---------|
-| Noto Sans SC, Noto Sans JP, Noto Sans KR, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans Arabic, Noto Sans Hebrew, Noto Sans Thai | SIL Open Font License 1.1 | rendered glyph bitmaps only: the idle show words in `firmware/src/idle_words.h`, made on the PC by `tools/gen_idle_words.py`; the font files stay in `vendor/fonts/` (git-ignored, not in the repo or the firmware) |
+| Noto Sans SC, Noto Sans JP, Noto Sans KR, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans Arabic, Noto Sans Hebrew, Noto Sans Thai | SIL Open Font License 1.1 | rendered glyph bitmaps only: the idle show words in `firmware/src/idle_words.h`, made on the PC by `tools/gen_idle_words.py`; the font files stay in `vendor/fonts/` (git-ignored, not in the repo or the firmware). Copyright 2022 The Noto Project Authors (Arabic, Devanagari, Thai; Bengali 2025 and Hebrew 2024, same holder). The CJK fonts (SC, JP, KR) carry Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. Licence text: `vendor/fonts/OFL.txt` and https://openfontlicense.org |
 
 ## PC tools (not shipped)
 

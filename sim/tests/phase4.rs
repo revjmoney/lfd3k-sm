@@ -642,7 +642,13 @@ fn ring_while_in_menu() {
         "{:?}",
         h.screen_b()
     );
-    assert!(h.screen_b().ends_with("/ARQ/LZ\r\n") || h.screen_b().contains("CONNECT LORA"));
+    let s = h.screen_b();
+    let tail = &s[s.rfind("\r\nRING\r\n").expect("RING printed") + 2..];
+    let connect = tail
+        .lines()
+        .find(|l| l.starts_with("CONNECT LORA"))
+        .unwrap_or_else(|| panic!("no CONNECT after ATA: {tail:?}"));
+    assert!(connect.ends_with("/ARQ/LZ"), "{connect:?}");
 }
 
 #[test]

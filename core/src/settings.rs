@@ -34,8 +34,9 @@
 //! bit is S31 = 1, the default. So the layout, the length and the version
 //! stay as they were, and every v2 blob saved before S31 existed loads with
 //! compression on. A v1 blob with bit 4 set is refused (v1 never wrote it).
-//! An older build refuses a blob with bit 4 set (unknown flag) and falls
-//! back to its defaults; that only happens after a downgrade with S31 = 0.
+//! Every pre-v2 build (phase 3 and older) refuses any v2 or v3 blob (it
+//! accepts only 899 bytes, version 1) and falls back to factory settings, so
+//! the first save by this build already blocks a downgrade.
 //!
 //! S32 (phase 4, boot to menu) lives in flags bit 5, stored as is (set means
 //! S32 = 1; the default 0 leaves the bit clear), by the same rule: layout,

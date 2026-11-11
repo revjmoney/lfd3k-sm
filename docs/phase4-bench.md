@@ -6,6 +6,18 @@ You have one LoRa radio. So the second station is the PC modem over SimNet (see 
 
 Open PowerShell for every command. Replace `COMn` with the V4 port from Device Manager (VID_303A, PID_1001). Never COM15 or COM9. The controller flashes the V4. You do not.
 
+## After the flash (do this first)
+
+Right after the V4 is flashed, before anything else, type these in the V4 terminal. No log is needed.
+
+1. `AT+WIFI?` shows your network joined (you did not retype it) and its IP address, and the hotspot as before (same name and password as the last build).
+2. `AT&V` shows `STACK FREE` (expect about 8 to 9 KB; much under 6 KB is worth telling the controller about) and `HEAP MIN`.
+3. `AT+FWD?` still lists AXIS.
+4. `AT+DIR?` gives just `OK` at first (the directory starts empty).
+5. Once the time syncs (the V4 needs your network up), the OLED idle show gets the clock item, and the temperature item shows. The clock item only comes round every few minutes, so allow up to about 5 minutes.
+
+Warning: once this build saves settings (`AT&W`, a menu Save, or a hotspot join), an older build cannot read them and starts with factory settings. So do not go back to an older build without expecting to retype `AT+WSTA`.
+
 ## 0. Set up SimNet
 
 1. Join your Wi-Fi on the V4 if it is not joined yet: `AT+WSTA=<your network>,<your password>` (you type it yourself), then `AT&W`.
@@ -77,6 +89,7 @@ The mode is `AT+BEACON=ON`, `AT+BEACON=QUIET` or `AT+BEACON=HIDDEN`. `AT+BEACON?
 3. HIDDEN: `AT+BEACON=HIDDEN` on the V4.
    - Scan from the PC: no answer.
    - `AT+SCAN` on the V4 itself gives `ERROR` (a scan would reveal its name).
+   - Dialing out from the V4 (`ATD` or the menu) still works in HIDDEN: you chose to transmit, and the call request carries the V4 name. Only `AT+SCAN` is refused.
    - Dial the V4 from the PC with `ATDT <V4 name>`. Nothing answers. The PC prints `NO ANSWER` after about 30 seconds, and the V4 prints no `RING`. The V4 does not even send a reject.
 4. HIDDEN still answers pinned names. On the V4 type `AT+DIR=+PCMODEM`, then dial again from the PC. Now the V4 rings, and with `ATS0=1` it answers. Only a name you pinned by hand opens a HIDDEN modem. Hearing a name never does.
 5. Put it back with `AT+BEACON=ON`.
