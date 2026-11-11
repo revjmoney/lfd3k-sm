@@ -12,6 +12,8 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "sdkconfig.h"
 
 /* The launch token is written to a fixed RTC FAST address; nothing in the
@@ -28,6 +30,12 @@
 #endif
 
 static const char *TAG = "mode";
+
+/* The picker's own NVS (multimode/picker/src/main.c): partition, namespace,
+ * key "last" = u8 menu index, the same order as MODE_*. */
+#define PICKER_NVS_PART "picker_nvs"
+#define PICKER_NVS_NS   "picker"
+#define PICKER_NVS_KEY  "last"
 
 #define MODES 4
 
@@ -96,6 +104,35 @@ uint8_t mode_switch_slots(void)
     return mask;
 }
 
+/* Ruling P5-2: the mode AT+MODE chose becomes the picker's last mode, so a
+ * power cycle or RST starts it again. picker_nvs belongs to the picker: it is
+ * never erased here, and if it does not init cleanly nothing is written. A
+ * failure only logs; the switch goes on. */
+static void record_picker_last(int mode)
+{
+    esp_err_t e = nvs_flash_init_partition(PICKER_NVS_PART);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "picker_nvs: %s; last mode not recorded", esp_err_to_name(e));
+        return;
+    }
+    nvs_handle_t h;
+    e = nvs_open_from_partition(PICKER_NVS_PART, PICKER_NVS_NS, NVS_READWRITE, &h);
+    if (e == ESP_OK) {
+        uint8_t cur = 0xFF;
+        if (nvs_get_u8(h, PICKER_NVS_KEY, &cur) != ESP_OK || cur != (uint8_t)mode) {
+            e = nvs_set_u8(h, PICKER_NVS_KEY, (uint8_t)mode);
+            if (e == ESP_OK) {
+                e = nvs_commit(h);
+            }
+        }
+        nvs_close(h);
+    }
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "picker last mode not recorded: %s", esp_err_to_name(e));
+    }
+    nvs_flash_deinit_partition(PICKER_NVS_PART);
+}
+
 bool mode_switch_prepare(int mode)
 {
     if (mode == MODE_PICKER) {
@@ -115,6 +152,7 @@ bool mode_switch_prepare(int mode)
             ESP_LOGW(TAG, "ota_%d does not verify", s_ota[mode]);
             return false;
         }
+        record_picker_last(mode);
         return true;
     }
     esp_err_t e = esp_ota_set_boot_partition(p); /* verifies the whole image */
@@ -122,6 +160,7 @@ bool mode_switch_prepare(int mode)
         ESP_LOGW(TAG, "ota_%d: set boot failed: %s", s_ota[mode], esp_err_to_name(e));
         return false;
     }
+    record_picker_last(mode);
     return true;
 }
 

@@ -6,6 +6,13 @@
 #include "esp_random.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
+
+/* In the multimode layout the modem never initialises the shared "nvs", so
+ * the Wi-Fi driver must not need it (esp_wifi_init would fail at every boot). */
+#if CONFIG_ESP_WIFI_NVS_ENABLED
+#error "Wi-Fi NVS must stay off: the modem never inits the shared nvs (sdkconfig.defaults)"
+#endif
 
 static const char *TAG = "settings";
 #define NS      "lfd3k"

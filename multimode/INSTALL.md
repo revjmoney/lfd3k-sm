@@ -36,7 +36,10 @@ Keep the file somewhere safe, outside `multimode\out`.
 
 ## 3. Erase
 
-Only after Rev confirms the wipe again, right before this step:
+Only after Rev confirms the wipe again, right before this step. Use only this esptool line,
+never `pio run -d firmware -e heltec_v4 -t erase` (or `-t upload`) later: on a board that already
+runs the multimode layout that would wipe every mode (the env refuses both, see
+`firmware/platformio.ini`).
 
 ```
 python "%USERPROFILE%\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 -p COMn erase_flash

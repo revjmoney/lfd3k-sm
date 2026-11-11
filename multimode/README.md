@@ -154,8 +154,17 @@ Pure logic for PC tests: `bootloader/choose.c` (boot decision and token) and
   `firmware/src/mode_switch.c` refuses to build if it, the IDF RTC reserve
   area or RTC data in RTC FAST is turned on, so nothing in the modem owns
   0x600FFFC0 when the token is written.
-* AT+MODE does not change the picker's stored last mode: after a power
-  cycle the picker starts its own last mode again.
+* AT+MODE=MODEM|RADAR|RNODE|MESH also records the chosen mode as the
+  picker's last mode (`picker_nvs`, namespace `picker`, key `last`, the menu
+  index), after the image verified, so a power cycle or RST starts that mode
+  again. `picker_nvs` is never erased by the modem, and a failed write there
+  does not stop the switch. `AT+MODE=PICKER` leaves the stored last mode alone.
+* AT+MODE answers ERROR, and nothing switches, when a settings or directory
+  save is pending and writing it fails. Commands sent after an accepted
+  AT+MODE (the rest of the same line chunk) are dropped. If the OK cannot leave
+  the USB port within 2 s (no host reading), the modem restarts anyway.
+* Never `pio run -d firmware -e heltec_v4 -t erase` or `-t upload`: on this
+  layout either would wipe or overwrite every mode. The env refuses both.
 
 ## Recovery
 

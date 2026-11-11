@@ -1560,6 +1560,11 @@ impl Modem {
         if self.line_len == 0 {
             return;
         }
+        // An accepted AT+MODE is on its way to a restart: later lines (the
+        // rest of the same chunk) are dropped, so nothing starts behind it.
+        if self.mode_req.is_some() || self.mode_wait {
+            return;
+        }
         let mut copy = [0u8; LINE_CAP];
         let n = self.line_len.min(LINE_CAP);
         if let (Some(d), Some(s)) = (copy.get_mut(..n), self.line.get(..n)) {
@@ -2053,6 +2058,7 @@ impl Modem {
                     && self.air_idle()
                     && !self.wire.close
                     && self.disc.scan.is_none()
+                    && self.mode_req.is_none()
                     && !self.mode_wait;
                 let image = match self.mode_slots {
                     None => false,

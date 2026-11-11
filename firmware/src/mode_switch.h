@@ -22,9 +22,11 @@ bool mode_switch_available(void);
  * running modem is always set. */
 uint8_t mode_switch_slots(void);
 
-/* Prepares the switch: for a mode, verifies its image and points otadata at
- * it (esp_ota_set_boot_partition, which hashes the whole image); for the
- * picker, nothing. False on any failure (otadata then unchanged). */
+/* Prepares the switch: for a mode, verifies its image, points otadata at it
+ * (esp_ota_set_boot_partition, which hashes the whole image) and records it
+ * as the picker's last mode (picker_nvs "picker"/"last"; a failed write there
+ * only logs); for the picker, nothing. False on any failure of the verify or
+ * otadata (otadata then unchanged). */
 bool mode_switch_prepare(int mode);
 
 /* Writes the launch token for the mode (none for the picker) with

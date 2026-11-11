@@ -56,8 +56,12 @@ static char s_boot_pass[13];     /* drawn in app_main before the Wi-Fi driver ex
 static int s_udp_want = -1; /* -1 none, 0 close, 1 open */
 static uint8_t s_udp_ip[4];
 
-/* AT+MODE: the mode to restart into once the OK has left (-1 none). */
+/* AT+MODE: the mode to restart into once the OK has left (-1 none), and when
+ * it was accepted (the restart goes ahead after 2 s even if the OK cannot
+ * leave, so a host that stopped reading never parks the modem). */
 static int s_mode_go = -1;
+static uint32_t s_mode_ms;
+#define MODE_OUT_WAIT_MS 2000
 
 /* AT+SIMNET: open or close the UDP socket as the core switched radios. */
 static void simnet_step(void)
@@ -204,9 +208,27 @@ static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
     save_pending(&s_dir_save, settings_store_save_dir, now_ms, st);
 }
 
-/* AT+MODE: point otadata at the slot (the hash of the image runs under the
- * task watchdog, so it is fed around it), then let the core answer. */
-static void mode_step(void)
+/* Writes a held blob now (AT+MODE). True when nothing was held or it was written. */
+static bool save_now(pending_save_t *p, bool (*store)(const uint8_t *, size_t), uint32_t now_ms)
+{
+    if (!p->held) {
+        return true;
+    }
+    if (store(p->blob, p->len)) {
+        p->held = false;
+        p->failed = false;
+        return true;
+    }
+    p->failed = true;
+    p->failed_ms = now_ms;
+    return false;
+}
+
+/* AT+MODE: still no call (the status is checked again here), any held save
+ * written (ruling P5-3: a save that fails answers ERROR, nothing switches),
+ * then otadata points at the slot (the hash of the image runs under the task
+ * watchdog, so it is fed around it), then the core answers. */
+static void mode_step(uint32_t now_ms, const lfd3k_status_t *st)
 {
     if (s_mode_go >= 0) {
         return;
@@ -215,25 +237,31 @@ static void mode_step(void)
     if (m < 0) {
         return;
     }
-    esp_task_wdt_reset();
-    bool ok = mode_switch_prepare(m);
-    esp_task_wdt_reset();
+    bool ok = st->state == 0 && st->wire == 0 && st->scanning == 0;
+    if (ok) {
+        bool a = save_now(&s_set_save, settings_store_save, now_ms);
+        bool b = save_now(&s_dir_save, settings_store_save_dir, now_ms);
+        ok = a && b;
+        if (!ok) {
+            ESP_LOGW(TAG, "AT+MODE refused: a pending save failed");
+        }
+    }
+    if (ok) {
+        esp_task_wdt_reset();
+        ok = mode_switch_prepare(m);
+        esp_task_wdt_reset();
+    }
     lfd3k_mode_result(ok);
     if (ok) {
         s_mode_go = m;
+        s_mode_ms = now_ms;
     }
 }
 
-/* Last step of AT+MODE, once the core's output (the OK) is in the TX buffer:
- * write any save still held, let the OK leave the USB port, restart. */
+/* Last step of AT+MODE, once the core's output (the OK) is in the TX buffer
+ * or 2 s have passed: let the OK leave the USB port, restart. */
 static void mode_restart(void)
 {
-    if (s_set_save.held) {
-        settings_store_save(s_set_save.blob, s_set_save.len);
-    }
-    if (s_dir_save.held) {
-        settings_store_save_dir(s_dir_save.blob, s_dir_save.len);
-    }
     esp_task_wdt_reset();
     usb_link_flush(500);
     mode_switch_restart(s_mode_go);
@@ -447,7 +475,7 @@ static void modem_task(void *arg)
             panel_publish_trace(&tr);
         }
         save_step(now_ms, &st);
-        mode_step();
+        mode_step(now_ms, &st);
 
         if ((uint32_t)(now_ms - last_second) >= 1000) {
             last_second = now_ms;
@@ -466,6 +494,12 @@ static void modem_task(void *arg)
             publish_name(); /* AT+NAME can change it */
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
             lfd3k_set_heap_min(esp_get_minimum_free_heap_size());
+        }
+
+        /* AT+MODE accepted but the OK could not leave in 2 s (host not reading,
+         * or a dump still running): restart anyway. */
+        if (s_mode_go >= 0 && (uint32_t)(now_ms - s_mode_ms) >= MODE_OUT_WAIT_MS) {
+            mode_restart(); /* never returns */
         }
 
         /* Out to the host, never waiting. During a dump the core's own ring holds output. */
