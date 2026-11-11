@@ -5,3 +5,5 @@ firmware/lib/*.a
 firmware/sdkconfig.heltec_v4
 backups/
 __pycache__/
+multimode/picker/.pio/
+multimode/picker/sdkconfig.picker
