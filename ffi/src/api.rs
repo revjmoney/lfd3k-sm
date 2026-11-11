@@ -1086,3 +1086,57 @@ pub unsafe extern "C" fn lfd3k_wire_out(buf: *mut u8, len: usize) -> usize {
 pub extern "C" fn lfd3k_take_wire_close() -> bool {
     with_device(|d| d.modem.take_wire_close()).unwrap_or(false)
 }
+
+/// Longest found host name the platform passes, NUL included.
+pub const FOUND_NAME_CAP: usize = 32;
+/// Entries `lfd3k_set_found_hosts` reads at most (the core keeps 4).
+const FOUND_READ_MAX: usize = 8;
+
+/// One telnet server from the platform's mDNS browse. Mirrored in `lfd3k.h`.
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct lfd3k_found_t {
+    /// Instance name, NUL terminated (cut to 31 bytes).
+    pub name: [u8; FOUND_NAME_CAP],
+    /// IPv4 address, network order (`a.b.c.d` is `[a, b, c, d]`).
+    pub ip: [u8; 4],
+    pub port: u16,
+    pub reserved: [u8; 2],
+}
+
+// The C mirror in lfd3k.h has the same size (a static assert there too).
+const _: () = assert!(core::mem::size_of::<lfd3k_found_t>() == 40);
+
+/// The latest mDNS browse of `_telnet._tcp`: `n` entries at `hosts` (null
+/// or 0 clears the list). The core keeps the first 4 valid ones (port and
+/// address not zero, a name with something printable; the name is cut to
+/// printable ASCII). Nothing changes a setting: the menu's Forwards screen
+/// offers each host and only the owner's Enter adds it. `AT+FOUND?` lists them.
+///
+/// # Safety
+/// `hosts` must be null or valid for reads of `n` entries.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_set_found_hosts(hosts: *const lfd3k_found_t, n: usize) {
+    let mut list = [None; FOUND_READ_MAX];
+    let mut k = 0;
+    if !hosts.is_null() {
+        for i in 0..n.min(FOUND_READ_MAX) {
+            // SAFETY: `i < n` and `hosts` is valid for `n` reads (contract).
+            let h = unsafe { hosts.add(i).read() };
+            let len = h
+                .name
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(FOUND_NAME_CAP);
+            let name = h.name.get(..len).unwrap_or(&[]);
+            if let Some(f) = lfd3k_core::Found::new(name, h.ip, h.port) {
+                if let Some(d) = list.get_mut(k) {
+                    *d = Some(f);
+                    k += 1;
+                }
+            }
+        }
+    }
+    with_device(|d| d.modem.set_found_hosts(list.iter().flatten().copied()));
+}

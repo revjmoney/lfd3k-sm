@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "hal_radio.h"
 #include "lfd3k.h"
+#include "mdns_link.h"
 #include "mode_switch.h"
 #include "panel.h"
 #include "settings_store.h"
@@ -365,12 +366,28 @@ static void publish_info(const lfd3k_status_t *st)
     panel_publish_info(&in);
 }
 
-/* The live station name for the panel's name row (the boot name until settings load). */
+/* The live station name for the panel's name row (the boot name until settings load),
+ * and for the mDNS advertisement (TXT name=, with the core version as ver=). */
 static void publish_name(void)
 {
     char nm[17];
     if (lfd3k_station_name(nm, sizeof(nm)) > 0) {
         panel_set_name(nm);
+        char ver[16];
+        size_t n = lfd3k_core_version((uint8_t *)ver, sizeof(ver) - 1);
+        ver[n] = 0;
+        mdns_link_set_name(nm, ver);
+    }
+}
+
+/* Telnet servers the last mDNS browse found, into the core (the menu's Forwards
+ * screen and AT+FOUND?). Nothing is added as a forward without the owner's Enter there. */
+static void publish_found(void)
+{
+    lfd3k_found_t f[LFD3K_FOUND_MAX];
+    int n = mdns_link_take_found(f, LFD3K_FOUND_MAX);
+    if (n >= 0) {
+        lfd3k_set_found_hosts(f, (size_t)n);
     }
 }
 
@@ -451,6 +468,7 @@ static void modem_task(void *arg)
 
         lfd3k_status_t st;
         lfd3k_status(now_ms, &st);
+        mdns_link_set_idle(st.state == 0 && st.wire == 0); /* the mDNS browse never runs during a call */
 
         /* A Wi-Fi change is a full stop and start, which would kill a live socket or SimNet
          * link: hold it while any call is up (any wire state or radio call), apply it after. */
@@ -492,6 +510,7 @@ static void modem_task(void *arg)
             sntp_start_once();
             publish_info(&st);
             publish_name(); /* AT+NAME can change it */
+            publish_found();
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
             lfd3k_set_heap_min(esp_get_minimum_free_heap_size());
         }

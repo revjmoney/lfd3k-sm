@@ -191,6 +191,25 @@ size_t   lfd3k_wire_in(const uint8_t *buf, size_t len, uint32_t now_ms);
 size_t   lfd3k_wire_out(uint8_t *buf, size_t len);
 /* True once when the socket should be closed (drain lfd3k_wire_out first). */
 bool     lfd3k_take_wire_close(void);
+/* On a telnet wire the core offers IAC WILL 90 (LFD3K-LINK) after the server's
+ * opening and, only after IAC DO 90, sends IAC SB 90 <link stats> IAC SE inside
+ * lfd3k_wire_out (at most 165 bytes, at most once a second). AT&V shows LINK ON|OFF. */
+
+/* ---- LAN discovery (mDNS browse of _telnet._tcp, an AXIS board). ---- */
+
+#define LFD3K_FOUND_MAX 4
+typedef struct {
+    char     name[32];     /* instance name, NUL terminated (cut to 31) */
+    uint8_t  ip[4];        /* IPv4 a.b.c.d as ip[0..3] */
+    uint16_t port;
+    uint8_t  reserved[2];
+} lfd3k_found_t;
+_Static_assert(sizeof(lfd3k_found_t) == 40, "lfd3k_found_t must match ffi/src/api.rs");
+/* The latest browse result, n entries (n 0 or hosts NULL clears the list). The
+ * core keeps the first 4 valid ones (non-zero address and port, a printable name).
+ * Nothing changes a setting: the menu's Forwards screen offers each host that is
+ * not a forward yet and only the owner's Enter adds it. AT+FOUND? lists them. */
+void     lfd3k_set_found_hosts(const lfd3k_found_t *hosts, size_t n);
 
 #ifdef __cplusplus
 }

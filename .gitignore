@@ -12,3 +12,4 @@ multimode/picker/.pio/
 multimode/picker/sdkconfig.picker
 multimode/out/
 multimode/tests/build/
+firmware/managed_components/

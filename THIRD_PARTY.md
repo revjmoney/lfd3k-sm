@@ -65,6 +65,7 @@ It and everything it pulls in are dev-only for proptest: none of it is built int
 | Rust `core` and `compiler_builtins` (built with `-Zbuild-std=core`) | esp toolchain 1.97.0.0 | MIT or Apache-2.0 | ffi device build, linked into the firmware |
 | ESP-IDF (via PlatformIO `framework-espidf`) | 5.4.1 (platform espressif32 6.11.0) | Apache-2.0 (bundled components carry their own permissive licenses) | firmware |
 | FreeRTOS kernel (part of ESP-IDF) | as bundled | MIT | firmware |
+| espressif/mdns (ESP-IDF component registry, declared in `firmware/src/idf_component.yml`, pinned by `firmware/dependencies.lock`, fetched into the git-ignored `firmware/managed_components/`) | 1.15.1 | Apache-2.0 | firmware: advertises `_lfd3k._tcp`, browses `_telnet._tcp` (`firmware/src/mdns_link.c`) |
 
 ## Fonts (rendered glyph bitmaps only)
 
