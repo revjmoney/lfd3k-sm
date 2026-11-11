@@ -68,16 +68,18 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 
    ```
    powershell -ExecutionPolicy Bypass -File F:\lfd3k-sm\firmware\build_core.ps1
-   pio run -d F:\lfd3k-sm\firmware -e heltec_v4
+   pio run -d F:\lfd3k-sm\firmware -e heltec_v4_single
    ```
+
+   This sheet puts the modem alone on the V4 (the single app table, env `heltec_v4_single`). Since phase 5 the default env `heltec_v4` is the multimode build (the modem in slot ota_1 behind the picker): it refuses `-t upload`, and only its `firmware.bin` is written, to 0x4A0000 (see `multimode/README.md`).
 
    Then check that the firmware is newer than the Rust library:
 
    ```
-   Get-Item F:\lfd3k-sm\firmware\lib\liblfd3k_ffi.a, F:\lfd3k-sm\firmware\.pio\build\heltec_v4\firmware.bin | Select-Object Name, LastWriteTime
+   Get-Item F:\lfd3k-sm\firmware\lib\liblfd3k_ffi.a, F:\lfd3k-sm\firmware\.pio\build\heltec_v4_single\firmware.bin | Select-Object Name, LastWriteTime
    ```
 
-   `firmware.bin` must have the later time. If it does not, run `pio run -d F:\lfd3k-sm\firmware -e heltec_v4 -t clean`, then the `pio run` again. (The build also stops with "Stale Rust core" if a Rust source is newer than the library: run `build_core.ps1` and build again.)
+   `firmware.bin` must have the later time. If it does not, run `pio run -d F:\lfd3k-sm\firmware -e heltec_v4_single -t clean`, then the `pio run` again. (The build also stops with "Stale Rust core" if a Rust source is newer than the library: run `build_core.ps1` and build again.)
 
 2. Erase the chip. This clears the old otadata and the Radar settings, so the chip cannot boot the wrong slot:
 
@@ -89,10 +91,10 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
 4. Flash, the easy way:
 
    ```
-   pio run -d F:\lfd3k-sm\firmware -e heltec_v4 -t upload --upload-port COMn
+   pio run -d F:\lfd3k-sm\firmware -e heltec_v4_single -t upload --upload-port COMn
    ```
 
-5. Or flash with esptool directly, run from `F:\lfd3k-sm\firmware\.pio\build\heltec_v4`. These are the real offsets from `firmware\partitions.csv` and the build's `flasher_args.json`:
+5. Or flash with esptool directly, run from `F:\lfd3k-sm\firmware\.pio\build\heltec_v4_single`. These are the real offsets from `firmware\partitions.csv` and the build's `flasher_args.json`:
 
    | What | Offset | File |
    | --- | --- | --- |
@@ -102,7 +104,7 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
    | App (ota_0) | 0x10000 | `firmware.bin` |
 
    ```
-   cd F:\lfd3k-sm\firmware\.pio\build\heltec_v4
+   cd F:\lfd3k-sm\firmware\.pio\build\heltec_v4_single
    python "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py" --chip esp32s3 --port COMn --baud 921600 --before default_reset --after watchdog_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0 bootloader.bin 0x8000 partitions.bin 0xe000 ota_data_initial.bin 0x10000 firmware.bin
    ```
 

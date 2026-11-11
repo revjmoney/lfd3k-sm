@@ -1,7 +1,9 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+# The default env (heltec_v4) is the multimode build; heltec_v4_single
+# overrides these two in sdkconfig.defaults.single.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../multimode/partitions-multimode.csv"
+CONFIG_PARTITION_TABLE_FILENAME="../multimode/partitions-multimode.csv"
 # 1 ms tick so the 10 ms modem poll is real.
 CONFIG_FREERTOS_HZ=1000
 # Console and logs on UART0 only; the native USB port carries nothing but modem bytes.
@@ -13,3 +15,17 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 # 2 s, not the 5 s default: a hung modem is back in about 2 s. Radio init (worst
 # case about 1 s of BUSY waits) runs before the modem task subscribes.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=2
+
+# The modem keeps its data in its own NVS partition (lfd3k_nvs) in the
+# multimode layout and never writes the shared "nvs" there. So the Wi-Fi
+# driver keeps its config in RAM only (the modem sets it every boot anyway)
+# and the PHY calibrates at boot instead of storing its data in NVS.
+# CONFIG_ESP_WIFI_NVS_ENABLED is not set
+# CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE is not set
+
+# AT+MODE writes the multimode launch token at a fixed RTC FAST address
+# (multimode/README.md). Keep RTC FAST out of the heap so nothing in the modem
+# can own that address; mode_switch.c refuses to build otherwise.
+# CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP is not set
+# CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC is not set
+# CONFIG_ESP32S3_RTCDATA_IN_FAST_MEM is not set

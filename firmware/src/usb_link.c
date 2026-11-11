@@ -10,6 +10,10 @@
 static StreamBufferHandle_t s_rx;
 static StreamBufferHandle_t s_tx;
 static volatile TaskHandle_t s_notify;
+/* Bytes accepted by usb_link_write (modem task) and bytes handed to the USB
+ * driver (writer task); equal when nothing is queued or in flight. */
+static volatile uint32_t s_tx_in;
+static volatile uint32_t s_tx_out;
 
 static void reader_task(void *arg)
 {
@@ -46,6 +50,7 @@ static void writer_task(void *arg)
                 off += (size_t)w;
             }
         }
+        s_tx_out += (uint32_t)n;
     }
 }
 
@@ -75,10 +80,27 @@ size_t usb_link_read(uint8_t *buf, size_t len, TickType_t wait)
 
 size_t usb_link_write(const uint8_t *buf, size_t len)
 {
-    return xStreamBufferSend(s_tx, buf, len, 0);
+    size_t n = xStreamBufferSend(s_tx, buf, len, 0);
+    s_tx_in += (uint32_t)n;
+    return n;
 }
 
 size_t usb_link_tx_space(void)
 {
     return xStreamBufferSpacesAvailable(s_tx);
+}
+
+bool usb_link_flush(uint32_t timeout_ms)
+{
+    TickType_t t0 = xTaskGetTickCount();
+    TickType_t limit = pdMS_TO_TICKS(timeout_ms);
+    while (s_tx_out != s_tx_in) {
+        if (xTaskGetTickCount() - t0 >= limit) {
+            return false;
+        }
+        vTaskDelay(1);
+    }
+    TickType_t used = xTaskGetTickCount() - t0;
+    TickType_t left = used < limit ? limit - used : 0;
+    return usb_serial_jtag_wait_tx_done(left) == ESP_OK;
 }

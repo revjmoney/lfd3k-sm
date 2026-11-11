@@ -55,8 +55,10 @@ Why this address:
   its RTC FAST code and data end at 0x600FE11C, its RTC timer data is the top
   24 bytes (0x600FFFE8), and RTC FAST heap is off (`sdkconfig.defaults`, and
   `main.c` refuses to build if it or an IDF RTC reserve option is turned on).
-* The **other modes** do use that memory: Arduino 2.x (Simian, RNode), the
-  LFD3K-SM modem and Meshtastic all keep RTC FAST in their heap, and Arduino
+* The **LFD3K-SM modem** keeps RTC FAST out of its heap too (it writes the
+  token itself for AT+MODE, see below).
+* The **other modes** do use that memory: Arduino 2.x (Simian, RNode) and
+  Meshtastic keep RTC FAST in their heap, and Arduino
   reserves only the top 16 bytes. So the address is not free in those modes, and
   it does not need to be: the token is only trusted on the boot right after the
   picker wrote it, the bootloader consumes it there, and stray heap data never
@@ -119,6 +121,50 @@ loader tries the other slots.
 Pure logic for PC tests: `bootloader/choose.c` (boot decision and token) and
 `picker/src/picker_menu.c` (debounced level and time in, state out).
 `picker/src/picker_draw.c` is pure drawing.
+
+## LFD3K-SM in its slot
+
+* Build: `pio run -d firmware -e heltec_v4` (the default env) builds the modem
+  for slot ota_1; the size check uses that 1.5 MB slot. Only
+  `firmware/.pio/build/heltec_v4/firmware.bin` is written, to **0x4A0000**.
+  That env's own bootloader, partition table and otadata are not the
+  multimode ones (they come from the picker project), so the env refuses
+  `-t upload`. `-e heltec_v4_single` builds the modem alone with the old
+  single app table (`firmware/partitions.csv`).
+* Settings and directory: the modem's own NVS partition `lfd3k_nvs`
+  (namespace `lfd3k`, keys `settings` and `dir`). On its first boot under this
+  layout, old `lfd3k/settings` and `lfd3k/dir` blobs in the shared `nvs` are
+  copied over once, then only those two keys are erased there. With the single
+  app table (no `lfd3k_nvs`) the modem uses the default `nvs`, as before.
+* The modem never erases or reformats the shared `nvs`, and writes nothing
+  else to it: its Wi-Fi driver keeps its config in RAM and the PHY calibrates
+  at every boot (`CONFIG_ESP_WIFI_NVS_ENABLED` and
+  `CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE` off).
+* `AT+MODE?` lists the modes (`MODE LFD3K-SM *`, then the others, `NO IMAGE`
+  after an empty slot; same image header and app descriptor check as the
+  picker). `AT+MODE=MODEM|RADAR|RNODE|MESH` (no call, slot has an image):
+  full image verify, `esp_ota_set_boot_partition` (skipped when otadata
+  already points there), OK, the OK leaves the USB port, then the token
+  (built with `choose.h` and `choose.c`, slot = the ota index) is written
+  with interrupts off and `esp_restart()` follows. The bootloader consumes
+  the token and starts that mode without the logo. `AT+MODE=PICKER`
+  restarts without a token, so the picker shows. ERROR during a call or for
+  an empty slot, and always on the single app layout.
+* The modem has RTC FAST heap off (`sdkconfig.defaults`), and
+  `firmware/src/mode_switch.c` refuses to build if it, the IDF RTC reserve
+  area or RTC data in RTC FAST is turned on, so nothing in the modem owns
+  0x600FFFC0 when the token is written.
+* AT+MODE=MODEM|RADAR|RNODE|MESH also records the chosen mode as the
+  picker's last mode (`picker_nvs`, namespace `picker`, key `last`, the menu
+  index), after the image verified, so a power cycle or RST starts that mode
+  again. `picker_nvs` is never erased by the modem, and a failed write there
+  does not stop the switch. `AT+MODE=PICKER` leaves the stored last mode alone.
+* AT+MODE answers ERROR, and nothing switches, when a settings or directory
+  save is pending and writing it fails. Commands sent after an accepted
+  AT+MODE (the rest of the same line chunk) are dropped. If the OK cannot leave
+  the USB port within 2 s (no host reading), the modem restarts anyway.
+* Never `pio run -d firmware -e heltec_v4 -t erase` or `-t upload`: on this
+  layout either would wipe or overwrite every mode. The env refuses both.
 
 ## Recovery
 

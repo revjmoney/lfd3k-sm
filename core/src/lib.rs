@@ -18,7 +18,7 @@ pub mod tier;
 pub mod wire;
 
 pub use arq::{ArqRx, ArqTx};
-pub use at::{format_result, parse_line, AtCmd, AtError, ResultCode, SRegs};
+pub use at::{format_result, parse_line, AtCmd, AtError, ModeTarget, ResultCode, SRegs};
 pub use directory::{DirEntry, Directory, DIR_BLOB_LEN, DIR_MAX};
 pub use link::{Event, Link};
 pub use modem::{Config, Lights, Modem};

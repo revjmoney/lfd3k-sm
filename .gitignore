@@ -3,9 +3,12 @@ firmware/.pio/
 firmware/lib/*.a
 .superpowers/
 firmware/sdkconfig.heltec_v4
+firmware/sdkconfig.heltec_v4_single
 backups/
 __pycache__/
 vendor/
 .claude/
 multimode/picker/.pio/
 multimode/picker/sdkconfig.picker
+multimode/out/
+multimode/tests/build/
