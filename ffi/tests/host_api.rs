@@ -1596,3 +1596,88 @@ fn station_name_and_last_caller_c_abi() {
     assert_eq!(n, 4);
     assert_eq!(&who[..5], b"PEER\0");
 }
+
+// ---- AT+MODE through the C ABI (Phase 5) --------------------------------
+
+#[test]
+fn mode_abi_is_inert_before_init_and_without_slots() {
+    let _g = serial();
+    // Before init: no panic, nothing pending.
+    assert_eq!(init(""), -4);
+    lfd3k_set_mode_slots(0x0F);
+    assert_eq!(lfd3k_take_mode_request(), -1);
+    lfd3k_mode_result(true);
+    assert_eq!(host_out(), b"");
+
+    // Initialised but the firmware never reported slots (single app layout):
+    // AT+MODE answers ERROR and nothing is ever pending.
+    assert_eq!(init("MODEABI"), 0);
+    host_in(b"ATE0\r", 0);
+    host_out();
+    host_in(b"AT+MODE?\r", 10);
+    assert_eq!(text(&host_out()), "\r\nERROR\r\n");
+    host_in(b"AT+MODE=MESH\r", 20);
+    assert_eq!(text(&host_out()), "\r\nERROR\r\n");
+    assert_eq!(lfd3k_take_mode_request(), -1);
+}
+
+#[test]
+fn mode_abi_request_result_cycle_and_indices() {
+    let _g = serial();
+    assert_eq!(init("MODEABI"), 0);
+    host_in(b"ATE0\r", 0);
+    host_out();
+    lfd3k_set_mode_slots(0x0F);
+
+    // Index per target: 0 LFD3K-SM, 1 SIMIAN RADAR, 2 RNODE, 3 MESH, 4 picker.
+    for (word, idx) in [
+        ("MODEM", 0),
+        ("RADAR", 1),
+        ("RNODE", 2),
+        ("MESH", 3),
+        ("PICKER", 4),
+    ] {
+        let line = format!("AT+MODE={word}\r");
+        host_in(line.as_bytes(), 100);
+        assert_eq!(host_out(), b"", "{word}: no reply before the result");
+        assert_eq!(lfd3k_take_mode_request(), idx, "{word}");
+        assert_eq!(lfd3k_take_mode_request(), -1, "{word}: taken once");
+        lfd3k_mode_result(true);
+        assert_eq!(text(&host_out()), "\r\nOK\r\n", "{word}");
+    }
+
+    // A false result prints ERROR, and the port is usable at once.
+    host_in(b"AT+MODE=RNODE\r", 200);
+    assert_eq!(lfd3k_take_mode_request(), 2);
+    lfd3k_mode_result(false);
+    assert_eq!(text(&host_out()), "\r\nERROR\r\n");
+    host_in(b"AT\r", 210);
+    assert_eq!(text(&host_out()), "\r\nOK\r\n");
+
+    // A result nobody asked for prints nothing.
+    lfd3k_mode_result(true);
+    lfd3k_mode_result(false);
+    assert_eq!(host_out(), b"");
+}
+
+#[test]
+fn mode_abi_slot_mask_decides_no_image() {
+    let _g = serial();
+    assert_eq!(init("MODEABI"), 0);
+    host_in(b"ATE0\r", 0);
+    host_out();
+    lfd3k_set_mode_slots(0b1001); // this modem and MESH
+    host_in(b"AT+MODE?\r", 10);
+    let t = text(&host_out());
+    assert!(t.contains("MODE LFD3K-SM *"), "{t:?}");
+    assert!(t.contains("MODE SIMIAN RADAR NO IMAGE"), "{t:?}");
+    assert!(t.contains("MODE RNODE NO IMAGE"), "{t:?}");
+    assert!(t.contains("MODE MESH\r\n"), "{t:?}");
+    host_in(b"AT+MODE=RNODE\r", 20);
+    assert_eq!(text(&host_out()), "\r\nERROR\r\n");
+    assert_eq!(lfd3k_take_mode_request(), -1);
+    host_in(b"AT+MODE=MESH\r", 30);
+    assert_eq!(lfd3k_take_mode_request(), 3);
+    lfd3k_mode_result(true);
+    host_out();
+}
