@@ -250,4 +250,123 @@ fn main() {
     h.type_b("ATA\r");
     let up = h.run_until(30_000, |h| h.screen_b().ends_with("/ARQ/LZ\r\n"));
     println!("ATA after leaving the menu connects: {up}");
+
+    checks();
+}
+
+/// The host output after the last clear screen.
+fn tail(out: &[u8]) -> String {
+    let s = String::from_utf8_lossy(out).to_string();
+    let t = &s[s.rfind("\x1b[2J").unwrap_or(0)..];
+    t.chars().take(100).collect()
+}
+
+/// Printed transcripts of the paths the snapshots do not show.
+fn checks() {
+    // Boot to menu: S32=1 survives the blob; the first host bytes open the
+    // menu and are dropped; ATZ does not open it.
+    let mut s = Settings::defaults(NAME, "kq7Rmx2Lp9");
+    assert!(s.sregs.set(32, 1));
+    let mut blob = [0u8; lfd3k_core::BLOB_LEN];
+    let n = s.to_blob(&mut blob);
+    let back = Settings::from_blob(&blob[..n]).expect("blob");
+    let mut m = Modem::new(Config::new(NAME).expect("name"));
+    m.load_settings(back);
+    let mut r = NullRadio;
+    let took = m.host_input(b"AT\r", &mut r, 10);
+    let mut buf = [0u8; 4096];
+    let k = m.host_output(&mut buf);
+    println!(
+        "boot to menu: blob {n} bytes, took {took}, open {}, starts {:?}",
+        m.in_menu(),
+        String::from_utf8_lossy(&buf[..k.min(20)])
+    );
+    m.host_input(b"\x1b", &mut r, 20);
+    m.tick(&mut r, 200);
+    while m.host_output(&mut buf) > 0 {}
+    m.host_input(b"ATZ\r", &mut r, 300);
+    m.host_input(b"x", &mut r, 400);
+    println!("after ATZ and a key: open {}", m.in_menu());
+
+    // Directory Enter dials like ATDT <name> after leaving (CALLER is the
+    // second entry; AXIS is also a forward name, so ATDT AXIS would go
+    // over Wi-Fi).
+    let mut s = Sess::new(0);
+    s.typ(b"AT+MENU\r");
+    s.typ(ENTER);
+    s.typ(DOWN);
+    s.typ(ENTER);
+    s.settle();
+    println!("directory dial: open {}, {:?}", s.m.in_menu(), tail(&s.out));
+
+    // Save settings writes like AT&W and clears UNSAVED.
+    let mut s = Sess::new(0);
+    s.typ(b"AT+MENU\r");
+    for k in [b"s".as_slice(), ENTER, DOWN, RIGHT] {
+        s.typ(k);
+    }
+    s.esc();
+    s.typ(b"s");
+    s.typ(ENTER);
+    s.settle();
+    let saved = s.m.take_save_request();
+    println!(
+        "save: save request {saved}, saved mode {}, UNSAVED drawn after the save {}",
+        s.m.saved_settings().beacon.name(),
+        String::from_utf8_lossy(&s.out).rfind("UNSAVED")
+            > String::from_utf8_lossy(&s.out).rfind("Saved, like AT&W")
+    );
+
+    // Discard: Esc, Esc, Esc goes back to the saved profile and leaves.
+    let mut s = Sess::new(0);
+    s.typ(b"AT+MENU\r");
+    for k in [b"s".as_slice(), ENTER, DOWN, RIGHT] {
+        s.typ(k);
+    }
+    let live = s.m.settings().beacon.name();
+    s.esc();
+    s.esc();
+    s.esc();
+    s.settle();
+    println!(
+        "discard: live was {live}, now {}, open {}, {:?}",
+        s.m.settings().beacon.name(),
+        s.m.in_menu(),
+        tail(&s.out)
+    );
+
+    // Auto-answer while the menu is open: the menu closes, then CONNECT.
+    let mut h = Harness::new(SimChannel::constant_db(10, 11));
+    h.type_b("AT+MENU\r");
+    h.run_ms(200);
+    h.type_a("ATDT AXIS\r");
+    let up = h.run_until(30_000, |h| h.screen_b().contains("CONNECT"));
+    println!(
+        "auto-answer in menu: connected {up}, open {}, {:?}",
+        h.b.in_menu(),
+        tail(h.screen_b_bytes())
+    );
+
+    // A call that drops while the menu is open: NO CARRIER, then OK, on leave.
+    h.type_a("x");
+    h.run_ms(1100);
+    h.type_b("+++");
+    h.run_ms(1100);
+    h.type_b("AT+MENU\r");
+    h.run_ms(200);
+    h.type_a("+++");
+    h.run_ms(1100);
+    h.type_a("ATH\r");
+    h.run_ms(5000);
+    // Two Esc: the harness built AXIS with S0=1 in its Config but not in a
+    // saved profile, so the menu sees an unsaved change and asks first.
+    h.type_b("\x1b");
+    h.run_ms(300);
+    h.type_b("\x1b");
+    h.run_ms(300);
+    println!(
+        "drop in menu, leave: open {}, {:?}",
+        h.b.in_menu(),
+        tail(h.screen_b_bytes())
+    );
 }

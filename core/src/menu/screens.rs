@@ -891,6 +891,8 @@ fn wifi_ip(line: &[u8]) -> &[u8] {
 }
 
 fn status(w: &mut Row, v: &View) {
+    // Never column 80 of row 24 (an autowrap terminal would scroll).
+    w.limit = COLS - 1;
     let sep = |w: &mut Row| {
         w.cell(STATUS, b' ').cell(STATUS, 0xB3).cell(STATUS, b' ');
     };

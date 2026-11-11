@@ -35,6 +35,8 @@ class Term:
         self.fg, self.bg, self.bold = 7, 0, False
         self.pending_wrap = False
         self.cursor = True
+        # The menu must never write the bottom right cell (row 24, col 80).
+        self.strict = True
 
     def attr(self):
         return (self.fg + (8 if self.bold else 0), self.bg)
@@ -54,6 +56,8 @@ class Term:
             self.pending_wrap = False
             self.c = 0
             self.lf()
+        if self.strict and self.r == ROWS - 1 and self.c == COLS - 1:
+            raise ValueError("wrote the bottom right cell")
         fg, bg = self.attr()
         self.cells[self.r][self.c] = (b, fg, bg)
         if self.c == COLS - 1:

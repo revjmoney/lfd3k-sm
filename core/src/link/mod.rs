@@ -258,6 +258,9 @@ pub struct Link {
     /// host bytes before compression and bytes on the air.
     lz_raw: u32,
     lz_air: u32,
+    /// Call data bytes the host side moved: taken by `push_data` plus
+    /// handed out by `read_data`. Wraps; never reset (the menu's throughput).
+    moved: u32,
 }
 
 impl Default for Link {
@@ -329,6 +332,7 @@ impl Link {
             lz: false,
             lz_raw: 0,
             lz_air: 0,
+            moved: 0,
         }
     }
 
@@ -348,10 +352,12 @@ impl Link {
         u32::try_from(r).unwrap_or(u32::MAX)
     }
 
-    /// Data payload bytes of the current (or last) call before compression,
-    /// both directions, resends included (the menu's throughput).
+    /// Call data bytes moved between the host side and the link, both
+    /// directions (taken by `push_data`, handed out by `read_data`): resends
+    /// and data still waiting in the link do not count. A wrapping counter;
+    /// the menu's throughput is its difference over a second.
     pub fn data_bytes(&self) -> u32 {
-        self.lz_raw
+        self.moved
     }
 
     /// Count one Data payload for the ratio.
@@ -451,16 +457,20 @@ impl Link {
 
     /// Queue host bytes for the peer; returns bytes accepted.
     pub fn push_data(&mut self, data: &[u8]) -> usize {
-        if self.is_connected() {
+        let n = if self.is_connected() {
             self.tx.push(data)
         } else {
             0
-        }
+        };
+        self.moved = self.moved.wrapping_add(n as u32);
+        n
     }
 
     /// Received in-order bytes.
     pub fn read_data(&mut self, out: &mut [u8]) -> usize {
-        self.rx.read(out)
+        let n = self.rx.read(out);
+        self.moved = self.moved.wrapping_add(n as u32);
+        n
     }
 
     fn listen_tier(&self) -> Tier {

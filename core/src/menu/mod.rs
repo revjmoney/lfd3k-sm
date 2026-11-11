@@ -1148,7 +1148,7 @@ pub struct Menu {
     pub now: u32,
     /// Last once a second refresh.
     refreshed: u32,
-    /// Call data byte count at the last refresh, and the rate since.
+    /// `Link::data_bytes` at the last refresh, and the rate since.
     bytes: u32,
     pub bps: u32,
     /// A NO CARRIER came while the menu was open: printed on leave.
@@ -1214,12 +1214,7 @@ impl Menu {
         if dt < REFRESH_MS {
             return false;
         }
-        // A new call restarts the count.
-        let moved = if bytes >= self.bytes {
-            bytes - self.bytes
-        } else {
-            bytes
-        };
+        let moved = bytes.wrapping_sub(self.bytes);
         self.bps = u32::try_from(u64::from(moved) * 1000 / u64::from(dt.max(1))).unwrap_or(0);
         self.bytes = bytes;
         self.refreshed = now;
