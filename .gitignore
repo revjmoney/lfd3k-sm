@@ -10,3 +10,4 @@ vendor/
 .claude/
 multimode/picker/.pio/
 multimode/picker/sdkconfig.picker
+multimode/out/
