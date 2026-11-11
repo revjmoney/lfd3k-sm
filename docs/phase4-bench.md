@@ -1,4 +1,4 @@
-﻿# Phase 4 bench sheet (discovery, compression, the menu)
+# Phase 4 bench sheet (discovery, compression, the menu)
 
 For Rev. This is the list you follow to try the phase 4 features of the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM on the V4: beacons, `AT+SCAN`, the directory, privacy modes, calling by name, `/LZ` compression, the `AT+MENU` screen, `AT+NAME`, the idle show and the scan radar.
 
@@ -49,9 +49,9 @@ When you are done with everything, type `AT+SIMNET=0` on the V4.
 
 ## 3. Beacons
 
-Beacons are slow on purpose: one every 5 to 6 minutes at SF12.
+Beacons are slow on purpose: one every 5 to 6 minutes at SF12 (the first can take 6 minutes and a bit).
 
-1. Leave both modems idle and untouched for 6 minutes. Do not scan.
+1. Leave both modems idle and untouched for 7 minutes. Do not scan.
 2. Then type `AT+DIR?` on both. Each should list the other, heard by beacon alone.
 3. The OLED idle show has a HEARD item when something was heard in the last 15 minutes. Wait for it in the show.
 4. No beacon goes out during a call. The timer restarts after the call ends.
@@ -73,7 +73,7 @@ Beacons are slow on purpose: one every 5 to 6 minutes at SF12.
 The mode is `AT+BEACON=ON`, `AT+BEACON=QUIET` or `AT+BEACON=HIDDEN`. `AT+BEACON?` shows it. `AT&W` saves it. ON is the default.
 
 1. ON: sends beacons and answers scans. Try steps 1 to 3.
-2. QUIET: `AT+BEACON=QUIET` on the V4. Scan from the PC: the V4 still answers. Wait 6 minutes: the PC does not hear a beacon from the V4.
+2. QUIET: `AT+BEACON=QUIET` on the V4. Scan from the PC: the V4 still answers. Wait 7 minutes: the PC does not hear a beacon from the V4.
 3. HIDDEN: `AT+BEACON=HIDDEN` on the V4.
    - Scan from the PC: no answer.
    - `AT+SCAN` on the V4 itself gives `ERROR` (a scan would reveal its name).
@@ -123,19 +123,17 @@ The mode is `AT+BEACON=ON`, `AT+BEACON=QUIET` or `AT+BEACON=HIDDEN`. `AT+BEACON?
 4. Type `AT+MENU` and Enter. The blue title bar appears and the cursor hides.
 5. Keys on every screen:
 
-   | Key | Does |
-   |-----|------|
-   | Up, Down, Tab | move |
-   | Enter | open or edit |
-   | a letter | jump to the item that starts with it |
-   | Esc | back, or leave from the main menu |
+   - Up, Down, Tab: move
+   - Enter: open or edit
+   - a letter: jump to the item that starts with it
+   - Esc: back, or leave from the main menu
 
 6. Main menu: Directory and Scan, Link Status, Settings, Forwards, Wi-Fi, About, Save settings, Exit menu. Press Enter on Save settings to do `AT&W`.
 7. Directory and Scan: Enter dials the selected name (the menu closes and `ATDT` runs), `S` scans, `P` pins, `A` adds a name, `D` deletes (it asks Y or N).
 8. Settings: Left and Right step a value, Enter edits it. The fields are station name, privacy mode, TX power (S30), tier cap (S21), auto-answer (S0), compression (S31) and boot to menu (S32). An edit is checked the same way the AT command checks it, and a bad value shows a red line.
 9. Wi-Fi: passwords always show as `********`. When you type a new one, each character shows as `*`.
 10. The bottom line shows the name, the call state, the tier, the Wi-Fi address, and RING, SCAN and UNSAVED when they apply.
-11. Esc on the main menu leaves. If you changed something and did not save, it asks: Y discards and leaves, S saves and leaves, N stays.
+11. Esc on the main menu leaves. If you changed something and did not save, it asks: Y discards and leaves, S saves and leaves, N stays. A second Esc at that question discards and leaves too.
 12. A call that rings while the menu is open shows `RING` in the bottom line. Leave the menu with Esc, then type `ATA`.
 13. Mid call: type `+++` (guard time before and after), then `AT+MENU`. Link Status shows the tier, SNR and compression live. Leave and type `ATO` to go back to the call.
 14. Boot to menu: `ATS32=1`, `AT&W`, reboot. The first key you press opens the menu.
