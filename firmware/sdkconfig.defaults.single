@@ -1,0 +1,4 @@
+# heltec_v4_single only (applied after sdkconfig.defaults): the modem alone on
+# the board with the old single app table.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"

@@ -1,6 +1,8 @@
 #include "settings_store.h"
+#include <string.h>
 #include "bootloader_random.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_random.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -8,28 +10,124 @@
 static const char *TAG = "settings";
 #define NS      "lfd3k"
 #define KEY     "settings"
-#define KEY_DIR "dir" /* the directory blob; a later phase moves both to their own partition */
+#define KEY_DIR "dir"
+
+/* The modem's own NVS partition in the multimode layout
+ * (multimode/partitions-multimode.csv). Without it (the single app table)
+ * everything stays in the default "nvs", as before. */
+#define OWN_PART    "lfd3k_nvs"
+#define SHARED_PART "nvs"
+
+static const char *s_part = SHARED_PART;
+
+/* Blob buffer for the one time copy; the blobs are at most 1024 bytes. */
+#define MIGRATE_CAP 1024
+static uint8_t s_mig[MIGRATE_CAP];
+
+/* Initialise one partition, erasing and re-initialising it on
+ * NO_FREE_PAGES/NEW_VERSION. Only ever called for the partition the modem
+ * owns: "lfd3k_nvs", or "nvs" when the board has no "lfd3k_nvs". */
+static esp_err_t init_own(const char *part)
+{
+    esp_err_t e = nvs_flash_init_partition(part);
+    if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        e = nvs_flash_erase_partition(part);
+        if (e == ESP_OK) {
+            e = nvs_flash_init_partition(part);
+        }
+    }
+    return e;
+}
+
+static bool has_key(nvs_handle_t h, const char *key)
+{
+    size_t n = 0;
+    return nvs_get_blob(h, key, NULL, &n) == ESP_OK;
+}
+
+/* First boot under the multimode layout: copy an old lfd3k/settings and
+ * lfd3k/dir blob from the shared "nvs" into our own partition, then erase
+ * only those two keys there. Runs only while our partition has no settings.
+ * The shared partition belongs to the other modes: it is never erased or
+ * re-initialised here, and if it does not init cleanly nothing is copied. */
+static void migrate_from_shared(void)
+{
+    nvs_handle_t own;
+    if (nvs_open_from_partition(OWN_PART, NS, NVS_READWRITE, &own) != ESP_OK) {
+        return;
+    }
+    bool have = has_key(own, KEY);
+    if (have) {
+        nvs_close(own);
+        return;
+    }
+    if (nvs_flash_init_partition(SHARED_PART) != ESP_OK) {
+        nvs_close(own); /* empty, full or newer format: leave it alone */
+        return;
+    }
+    nvs_handle_t old;
+    if (nvs_open_from_partition(SHARED_PART, NS, NVS_READWRITE, &old) != ESP_OK) {
+        nvs_close(own); /* no lfd3k namespace there: nothing to move */
+        nvs_flash_deinit_partition(SHARED_PART);
+        return;
+    }
+    const char *keys[2] = {KEY, KEY_DIR};
+    bool copied[2] = {false, false};
+    bool failed = false;
+    for (int i = 0; i < 2; i++) {
+        size_t n = sizeof(s_mig);
+        esp_err_t e = nvs_get_blob(old, keys[i], s_mig, &n);
+        if (e == ESP_ERR_NVS_NOT_FOUND) {
+            continue;
+        }
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "old %s not readable: %s", keys[i], esp_err_to_name(e));
+            continue; /* left where it is */
+        }
+        e = nvs_set_blob(own, keys[i], s_mig, n);
+        if (e == ESP_OK) {
+            copied[i] = true;
+        } else {
+            failed = true;
+            ESP_LOGW(TAG, "copy of %s failed: %s", keys[i], esp_err_to_name(e));
+        }
+    }
+    memset(s_mig, 0, sizeof(s_mig));
+    /* Erase the old keys only once the copies are committed. */
+    if ((copied[0] || copied[1]) && nvs_commit(own) == ESP_OK && !failed) {
+        for (int i = 0; i < 2; i++) {
+            if (copied[i]) {
+                nvs_erase_key(old, keys[i]);
+            }
+        }
+        nvs_commit(old);
+        ESP_LOGI(TAG, "moved old settings%s from nvs to %s", copied[1] ? " and directory" : "", OWN_PART);
+    }
+    nvs_close(old);
+    nvs_close(own);
+    nvs_flash_deinit_partition(SHARED_PART);
+}
 
 bool settings_store_init(void)
 {
-    esp_err_t e = nvs_flash_init();
-    if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        e = nvs_flash_erase();
-        if (e == ESP_OK) {
-            e = nvs_flash_init();
-        }
-    }
+    bool own = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, OWN_PART) != NULL;
+    s_part = own ? OWN_PART : SHARED_PART;
+    esp_err_t e = init_own(s_part);
     if (e != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init failed: %s; running on defaults, no saves", esp_err_to_name(e));
+        ESP_LOGE(TAG, "NVS %s init failed: %s; running on defaults, no saves", s_part, esp_err_to_name(e));
         return false;
     }
+    if (own) {
+        migrate_from_shared();
+    }
+    ESP_LOGI(TAG, "settings in NVS partition %s", s_part);
     return true;
 }
 
 static bool load_key(const char *key, uint8_t *buf, size_t cap, size_t *len)
 {
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
+    if (nvs_open_from_partition(s_part, NS, NVS_READONLY, &h) != ESP_OK) {
         return false;
     }
     size_t n = cap;
@@ -45,7 +143,7 @@ static bool load_key(const char *key, uint8_t *buf, size_t cap, size_t *len)
 static bool save_key(const char *key, const uint8_t *buf, size_t len)
 {
     nvs_handle_t h;
-    esp_err_t e = nvs_open(NS, NVS_READWRITE, &h);
+    esp_err_t e = nvs_open_from_partition(s_part, NS, NVS_READWRITE, &h);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "open failed: %s", esp_err_to_name(e));
         return false;

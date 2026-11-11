@@ -120,6 +120,25 @@ Pure logic for PC tests: `bootloader/choose.c` (boot decision and token) and
 `picker/src/picker_menu.c` (debounced level and time in, state out).
 `picker/src/picker_draw.c` is pure drawing.
 
+## LFD3K-SM in its slot
+
+* Build: `pio run -d firmware -e heltec_v4` (the default env) builds the modem
+  for slot ota_1; the size check uses that 1.5 MB slot. Only
+  `firmware/.pio/build/heltec_v4/firmware.bin` is written, to **0x4A0000**.
+  That env's own bootloader, partition table and otadata are not the
+  multimode ones (they come from the picker project), so the env refuses
+  `-t upload`. `-e heltec_v4_single` builds the modem alone with the old
+  single app table (`firmware/partitions.csv`).
+* Settings and directory: the modem's own NVS partition `lfd3k_nvs`
+  (namespace `lfd3k`, keys `settings` and `dir`). On its first boot under this
+  layout, old `lfd3k/settings` and `lfd3k/dir` blobs in the shared `nvs` are
+  copied over once, then only those two keys are erased there. With the single
+  app table (no `lfd3k_nvs`) the modem uses the default `nvs`, as before.
+* The modem never erases or reformats the shared `nvs`, and writes nothing
+  else to it: its Wi-Fi driver keeps its config in RAM and the PHY calibrates
+  at every boot (`CONFIG_ESP_WIFI_NVS_ENABLED` and
+  `CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE` off).
+
 ## Recovery
 
 Holding **PRG at power on** enters the ESP32-S3 ROM download mode regardless of
