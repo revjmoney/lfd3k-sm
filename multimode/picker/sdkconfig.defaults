@@ -1,0 +1,35 @@
+# Heltec V4 (ESP32-S3R2): 16 MB flash QIO 80 MHz, quad PSRAM 2 MB.
+# These settings also build the bootloader, so they fix flash mode and size
+# for every mode that boots through it.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../partitions-multimode.csv"
+CONFIG_PARTITION_TABLE_FILENAME="../partitions-multimode.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# Quad PSRAM is on the board; the picker does not use it, and a failed probe
+# must never stop the picker.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# The launch token sits at a fixed RTC FAST address (multimode/README.md).
+# Keep RTC FAST out of the heap so nothing in the picker ever lands on it,
+# and keep the IDF retain area off (the bootloader would rewrite the top of
+# RTC FAST on every boot, which other modes own).
+# CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP is not set
+# CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC is not set
+# CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP is not set
+# CONFIG_BOOTLOADER_FACTORY_RESET is not set
+# CONFIG_BOOTLOADER_APP_TEST is not set
+# CONFIG_APP_ROLLBACK_ENABLE is not set
+
+# Console and logs on UART0 only; the native USB port carries nothing.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

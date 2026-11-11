@@ -1,0 +1,16 @@
+# LFD3K-SM multimode layout (16 MB). One bootloader, the picker as factory,
+# one app slot per mode. Offsets are fixed: every image and tool agrees on them.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0xF000,
+otadata,    data, ota,      0x18000,  0x2000,
+picker_nvs, data, nvs,      0x1A000,  0x6000,
+factory,    app,  factory,  0x20000,  0x80000,
+ota_0,      app,  ota_0,    0xA0000,  0x400000,
+ota_1,      app,  ota_1,    0x4A0000, 0x180000,
+ota_2,      app,  ota_2,    0x620000, 0x180000,
+ota_3,      app,  ota_3,    0x7A0000, 0x200000,
+lfd3k_nvs,  data, nvs,      0x9A0000, 0x10000,
+spiffs,     data, spiffs,   0x9B0000, 0x200000,
+littlefs,   data, spiffs,   0xBB0000, 0x100000,
+camdb,      data, 0x40,     0xCB0000, 0x320000,
+coredump,   data, coredump, 0xFD0000, 0x10000,
