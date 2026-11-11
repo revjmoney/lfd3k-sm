@@ -387,14 +387,16 @@ class InstallImageOffsets(unittest.TestCase):
         for digest, off, size, name, src in rows:
             off, size = int(off, 16), int(size)
             if name.strip() == "bootloader":
-                # merge_bin patches the flash parameters and the image digest, so compare
-                # the middle of the image with the bootloader file it came from.
+                # The header stays DIO (IDF writes DIO even for a QIO build), so the whole
+                # bootloader, header and appended digest included, must equal the built file.
                 self.assertEqual(full[off], 0xE9)
+                self.assertEqual(full[off + 2], 0x02, "bootloader header flash mode must be DIO")
+                self.assertEqual(full[off + 3], 0x4F, "bootloader header must say 16 MB, 80 MHz")
                 if os.path.isfile(src.strip()):
                     with open(src.strip(), "rb") as f:
                         orig = f.read()
                     self.assertEqual(len(orig), size)
-                    self.assertEqual(full[off + 4:off + size - 64], orig[4:size - 64])
+                    self.assertEqual(full[off:off + size], orig)
             else:
                 self.assertEqual(hashlib.sha256(full[off:off + size]).hexdigest(), digest, name)
             covered.append((off, off + size, name.strip()))
@@ -421,8 +423,11 @@ class InstallImageOffsets(unittest.TestCase):
         cmds = [l for l in text.splitlines() if "write_flash" in l and not l.lstrip().startswith("#")]
         self.assertEqual(len(cmds), 1)
         self.assertRegex(cmds[0], r"\b0x0 full-16mb\.bin\s*$")
-        self.assertIn("--flash_size 16MB", cmds[0])
-        self.assertIn("--flash_mode qio", cmds[0])
+        self.assertIn("--flash_size keep", cmds[0])
+        self.assertIn("--flash_mode keep", cmds[0])
+        self.assertIn("--flash_freq keep", cmds[0])
+        self.assertNotIn("qio", cmds[0])
+        self.assertIn("--after no_reset", cmds[0])
 
 
 SAMPLE_INFO = """\

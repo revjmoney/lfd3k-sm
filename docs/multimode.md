@@ -115,6 +115,18 @@ Two cautions that follow from the layout:
   bootloader and partition table and would replace the picker. Only the plain app image of each mode
   is written, into its own slot.
 
+## Setting up RNode, and one button to avoid
+
+* **RNode setup is EEPROM bootstrap and firmware hash only.** While RNODE mode is running, use
+  `rnodeconf` over its serial port for those commands. NEVER run `rnodeconf --autoinstall`, `--update`
+  or anything that writes firmware: it would overwrite the bootloader, the partition table, the shared
+  nvs, the picker and the start of MESH. The RNode image's file SHA-256 is
+  `df590b2d1aa4f4414cbf02314550a70d0636d7c5a689b9389189c028c86a0ea1`; the firmware hash the device
+  should report (appended SHA-256 in the image) is
+  `f312de7d8ec431fe1b80a84067cb01932cdeeaa7cb24f69e1b499f11c0e61d12`. Compare before setting it.
+* **In RNODE mode, do not long-press PRG.** That may start RNode's console feature, which may mount and
+  format the first SPIFFS partition, which is Meshtastic's data (unverified against the 1.86 source).
+
 ## Your settings stay yours
 
 * LFD3K-SM keeps its settings and station directory in its own storage area (`lfd3k_nvs`). The other

@@ -31,7 +31,7 @@ param(
     [string]$Python = 'python',
     [string]$Esptool = "$env:USERPROFILE\.platformio\packages\tool-esptoolpy\esptool.py",
     [string]$OutDir = '',
-    [ValidateSet('qio', 'dio')][string]$FlashMode = 'qio',   # the picker build is QIO (platformio.ini)
+    [ValidateSet('qio', 'dio')][string]$FlashMode = 'dio',   # header stays DIO like every image this board ran; the bootloader switches itself to QIO
     [string]$FlashFreq = '80m'
 )
 
@@ -152,11 +152,11 @@ if ($size -ne 16MB) { throw "merged image is $size bytes, expected 16777216" }
 
 # ---- flash_args.txt: the line the controller uses later; COMn is a placeholder ----
 $esptoolRel = '%USERPROFILE%\.platformio\packages\tool-esptoolpy\esptool.py'
-$line = ('python "{0}" --chip esp32s3 -p COMn -b 460800 --before default_reset --after watchdog_reset write_flash --flash_mode {1} --flash_freq {2} --flash_size 16MB 0x0 full-16mb.bin' -f $esptoolRel, $FlashMode, $FlashFreq)
+$line = ('python "{0}" --chip esp32s3 -p COMn -b 460800 --before default_reset --after no_reset write_flash --flash_mode keep --flash_freq keep --flash_size keep 0x0 full-16mb.bin' -f $esptoolRel)
 $argsFile = Join-Path $OutDir 'flash_args.txt'
 Set-Content -Path $argsFile -Value @(
     '# Replace COMn with the verified port (VID 303A PID 1001, MAC 88:56:A6:96:16:FC). Run from the multimode\out folder.',
-    '# Only after a full backup is verified and Rev has approved the wipe.',
+    '# Only after a full backup is verified and Rev has approved the wipe. After it, unplug and replug USB (no_reset: a watchdog reset would count as a crash).',
     $line) -Encoding ascii
 
 # ---- manifest ----
