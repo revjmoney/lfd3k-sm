@@ -1,9 +1,12 @@
 /* Front panel layout (128x64). Pure C, no ESP-IDF.
  *
- *  y  0..10   eight light boxes, 15 wide at x = 16*i: OH CD SD RD HS EC DC AA
+ *  y  0..10   eight light boxes, 15 wide at x = 16*i: OH CD SD RD HS EC DC AA (DC lit while
+ *             a radio call compresses, /ARQ/LZ)
  *  y 14..27   state word or tier name, 2x text, centred (Wi-Fi call: WIFI TCP, BRIDGE).
  *             While idle: the idle show (idle_show.c), y 12..29: the word changes every
- *             8 s loop into another language or a fact, with a transition each time
+ *             8 s loop into another language or a fact, with a transition each time.
+ *             While an AT+SCAN runs: the radar (SCAN, a sweeping scope, one blip per
+ *             answer, the count), y 12..37, in place of the idle show and the pulse
  *  y 30..36   rate line, 1x text, centred (online) / carrier pulse (idle, y 33..35)
  *  y 39..43   tier ladder, 8 cells 14 wide at x = 16*i (training, online)
  *  y 46..52   board name (up to 16 chars) at x 0; LFD3K-SM when none given. While idle it
@@ -287,6 +290,112 @@ static void idle_line(uint8_t *fb, uint32_t now_ms)
     }
 }
 
+/* ---- Scan radar ----
+ * While an AT+SCAN runs (status scanning = 1, the modem idle) the middle band shows SCAN
+ * on the left, a round radar scope in the middle (centre 64,24, radius 11: y 13..35) with
+ * a sweep line going round once every 1.6 s and a fading tail, one blip per answer so far
+ * (each at a fixed place picked from its number, the newest blinking; the 12 newest are
+ * drawn), and on the right the answer count with FOUND under it. Everything stays in
+ * y 12..37. Pure function of now_ms and scan_hits; integer only. */
+#define RADAR_CX    64
+#define RADAR_CY    24
+#define RADAR_R     11
+#define RADAR_STEPS 32   /* angle steps per turn */
+#define RADAR_STEP_MS 50 /* one turn in 1.6 s */
+#define RADAR_BLIPS 12
+
+/* 64 * sin(k * 2 pi / 32) for a quarter turn, k 0..8. */
+static const int8_t QSIN[9] = {0, 12, 24, 36, 45, 53, 59, 63, 64};
+
+static int sin32(int a)
+{
+    a &= RADAR_STEPS - 1;
+    if (a < 8) return QSIN[a];
+    if (a < 16) return QSIN[16 - a];
+    if (a < 24) return -QSIN[a - 16];
+    return -QSIN[32 - a];
+}
+
+static int cos32(int a)
+{
+    return sin32(a + 8);
+}
+
+/* Point at angle a, distance d from the centre (rounded to the nearest pixel). */
+static void radar_pt(int a, int d, int *x, int *y)
+{
+    int dx = cos32(a) * d, dy = sin32(a) * d;
+    *x = RADAR_CX + (dx >= 0 ? dx + 32 : dx - 32) / 64;
+    *y = RADAR_CY + (dy >= 0 ? dy + 32 : dy - 32) / 64;
+}
+
+/* Midpoint circle; every `gap`th point only (1: solid). */
+static void circle(uint8_t *fb, int cx, int cy, int r, int gap)
+{
+    int x = r, y = 0, err = 1 - r, k = 0;
+    while (x >= y) {
+        if (k++ % gap == 0) {
+            px(fb, cx + x, cy + y, 1);
+            px(fb, cx + y, cy + x, 1);
+            px(fb, cx - y, cy + x, 1);
+            px(fb, cx - x, cy + y, 1);
+            px(fb, cx - x, cy - y, 1);
+            px(fb, cx - y, cy - x, 1);
+            px(fb, cx + y, cy - x, 1);
+            px(fb, cx + x, cy - y, 1);
+        }
+        y++;
+        if (err < 0) {
+            err += 2 * y + 1;
+        } else {
+            x--;
+            err += 2 * (y - x) + 1;
+        }
+    }
+}
+
+static void scan_radar(uint8_t *fb, uint8_t hits, uint32_t now_ms)
+{
+    text(fb, 2, 17, "SCAN", 2, 1);
+
+    circle(fb, RADAR_CX, RADAR_CY, RADAR_R, 1);
+    circle(fb, RADAR_CX, RADAR_CY, RADAR_R / 2, 2); /* dotted inner ring */
+    px(fb, RADAR_CX, RADAR_CY, 1);
+
+    int a = (int)((now_ms / RADAR_STEP_MS) % RADAR_STEPS);
+    for (int back = 0; back < 3; back++) {
+        int every = back + 1; /* the tail thins out behind the beam */
+        for (int d = 1; d < RADAR_R; d++) {
+            if (d % every == 0) {
+                int x, y;
+                radar_pt(a - back, d, &x, &y);
+                px(fb, x, y, 1);
+            }
+        }
+    }
+
+    /* the newest RADAR_BLIPS answers, each at its own fixed place */
+    int first = hits > RADAR_BLIPS ? hits - RADAR_BLIPS : 0;
+    for (int i = first; i < hits; i++) {
+        uint32_t h = mix((uint32_t)i * 0x9E3779B9u + 0xB11Fu);
+        int x, y;
+        radar_pt((int)(h % RADAR_STEPS), 3 + (int)((h >> 8) % 7), &x, &y); /* 3..9 from the centre */
+        int solid = (i == hits - 1) && ((now_ms / 200) & 1);
+        for (int j = -1; j <= 1; j++) {
+            for (int k = -1; k <= 1; k++) {
+                if (solid || j == 0 || k == 0) {
+                    px(fb, x + j, y + k, 1);
+                }
+            }
+        }
+    }
+
+    char n[8];
+    snprintf(n, sizeof(n), "%u", (unsigned)hits);
+    text(fb, 104 - text_w(n, 2) / 2, 14, n, 2, 1);
+    text(fb, 104 - text_w("FOUND", 1) / 2, 31, "FOUND", 1, 1);
+}
+
 /* ---- Idle lights shuffle ----
  * While idle the eight light boxes slide into a new order once per 8 s loop, between
  * 1000 and 2200 ms of the loop; every fourth loop they sort back to OH CD SD RD HS EC
@@ -365,7 +474,6 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
             lights &= (uint8_t)~1u;
         }
     }
-    lights &= (uint8_t)~(1u << 6); /* DC stays off until compression exists */
 
     int lx[8], ly[8], moving[8];
     light_layout(s->state == 0 && s->radio_ok, now_ms, lx, ly, moving);
@@ -452,8 +560,12 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
             }
             break;
         default: {
-            idle_show_draw(fb, &s_info, now_ms); /* words, facts, transitions */
-            idle_line(fb, now_ms); /* breathing scope of the channel */
+            if (s->scanning) {
+                scan_radar(fb, s->scan_hits, now_ms); /* AT+SCAN: sweep and blips */
+            } else {
+                idle_show_draw(fb, &s_info, now_ms); /* words, facts, transitions */
+                idle_line(fb, now_ms); /* breathing scope of the channel */
+            }
             break;
         }
         }

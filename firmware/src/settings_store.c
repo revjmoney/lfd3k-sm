@@ -6,8 +6,9 @@
 #include "nvs_flash.h"
 
 static const char *TAG = "settings";
-#define NS  "lfd3k"
-#define KEY "settings"
+#define NS      "lfd3k"
+#define KEY     "settings"
+#define KEY_DIR "dir" /* the directory blob; a later phase moves both to their own partition */
 
 bool settings_store_init(void)
 {
@@ -25,14 +26,14 @@ bool settings_store_init(void)
     return true;
 }
 
-bool settings_store_load(uint8_t *buf, size_t cap, size_t *len)
+static bool load_key(const char *key, uint8_t *buf, size_t cap, size_t *len)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return false;
     }
     size_t n = cap;
-    esp_err_t e = nvs_get_blob(h, KEY, buf, &n);
+    esp_err_t e = nvs_get_blob(h, key, buf, &n);
     nvs_close(h);
     if (e != ESP_OK) {
         return false;
@@ -41,7 +42,7 @@ bool settings_store_load(uint8_t *buf, size_t cap, size_t *len)
     return true;
 }
 
-bool settings_store_save(const uint8_t *buf, size_t len)
+static bool save_key(const char *key, const uint8_t *buf, size_t len)
 {
     nvs_handle_t h;
     esp_err_t e = nvs_open(NS, NVS_READWRITE, &h);
@@ -49,16 +50,36 @@ bool settings_store_save(const uint8_t *buf, size_t len)
         ESP_LOGW(TAG, "open failed: %s", esp_err_to_name(e));
         return false;
     }
-    e = nvs_set_blob(h, KEY, buf, len);
+    e = nvs_set_blob(h, key, buf, len);
     if (e == ESP_OK) {
         e = nvs_commit(h);
     }
     nvs_close(h);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "save failed: %s", esp_err_to_name(e));
+        ESP_LOGW(TAG, "save of %s failed: %s", key, esp_err_to_name(e));
         return false;
     }
     return true;
+}
+
+bool settings_store_load(uint8_t *buf, size_t cap, size_t *len)
+{
+    return load_key(KEY, buf, cap, len);
+}
+
+bool settings_store_save(const uint8_t *buf, size_t len)
+{
+    return save_key(KEY, buf, len);
+}
+
+bool settings_store_load_dir(uint8_t *buf, size_t cap, size_t *len)
+{
+    return load_key(KEY_DIR, buf, cap, len);
+}
+
+bool settings_store_save_dir(const uint8_t *buf, size_t len)
+{
+    return save_key(KEY_DIR, buf, len);
 }
 
 void settings_store_gen_ap_pass(char out[13])

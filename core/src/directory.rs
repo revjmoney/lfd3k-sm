@@ -391,6 +391,34 @@ impl Directory {
 
     /// Parse a blob; None on anything invalid (see the module doc).
     pub fn from_blob(b: &[u8]) -> Option<Directory> {
+        let mut d = Directory::new();
+        d.load_blob(b).then_some(d)
+    }
+
+    /// Parse a blob into `self` in place (no second `Directory` on the
+    /// stack, for the firmware's modem task). True when accepted; on any
+    /// invalid blob (see the module doc) `self` is left empty and false is
+    /// returned.
+    pub fn load_blob(&mut self, b: &[u8]) -> bool {
+        let ok = self.fill_from_blob(b).is_some();
+        if !ok {
+            self.clear_all();
+        }
+        ok
+    }
+
+    /// Every slot empty, the clock and change flag back to zero, slot by
+    /// slot (no whole-array temporary).
+    fn clear_all(&mut self) {
+        for s in self.entries.iter_mut() {
+            *s = None;
+        }
+        self.clock = 0;
+        self.changed = false;
+    }
+
+    fn fill_from_blob(&mut self, b: &[u8]) -> Option<()> {
+        self.clear_all();
         let n = usize::from(*b.get(5)?);
         if n > DIR_MAX || b.len() != DIR_HEAD + n * DIR_REC + 2 {
             return None;
@@ -401,7 +429,7 @@ impl Directory {
         if crc16(body) != want || body.get(..4)? != MAGIC || *body.get(4)? != VERSION {
             return None;
         }
-        let mut d = Directory::new();
+        let d = self;
         let mut unpinned = 0usize;
         for i in 0..n {
             let rec = body.get(DIR_HEAD + i * DIR_REC..DIR_HEAD + (i + 1) * DIR_REC)?;
@@ -440,6 +468,6 @@ impl Directory {
             *d.entries.get_mut(i)? = Some(e);
         }
         d.clock = n as u32;
-        Some(d)
+        Some(())
     }
 }

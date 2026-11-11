@@ -251,6 +251,9 @@ fn calls_before_init_are_safe() {
         radio_ok: 1,
         wire: 9,
         simnet: 9,
+        scanning: 9,
+        scan_hits: 9,
+        heard: 9,
     };
     unsafe { lfd3k_status(0, &mut st) };
     assert_eq!(

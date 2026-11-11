@@ -31,13 +31,17 @@ static SemaphoreHandle_t s_frame_lock;
 static uint8_t s_done[PANEL_FB_BYTES];      /* last fully drawn frame, guarded by s_frame_lock */
 static uint8_t s_last_snap[PANEL_FB_BYTES]; /* modem task only: last good snapshot */
 
-static char s_name[17] = "LFD3K-SM";
+static char s_name[17] = "LFD3K-SM"; /* guarded by s_pub_lock; the panel task copies it */
 
 void panel_set_name(const char *name)
 {
     if (name && name[0]) {
-        strncpy(s_name, name, 16);
-        s_name[16] = 0;
+        char nm[17];
+        strncpy(nm, name, 16);
+        nm[16] = 0;
+        taskENTER_CRITICAL(&s_pub_lock);
+        memcpy(s_name, nm, sizeof(s_name));
+        taskEXIT_CRITICAL(&s_pub_lock);
     }
 }
 
@@ -138,11 +142,13 @@ static void panel_task(void *arg)
         rf_trace_t trace;
         panel_net_t net;
         static panel_info_t info; /* off the 4 KB stack */
+        char name[17];
         taskENTER_CRITICAL(&s_pub_lock);
         st = s_pub;
         trace = s_pub_trace;
         net = s_pub_net;
         info = s_pub_info;
+        memcpy(name, s_name, sizeof(name));
         taskEXIT_CRITICAL(&s_pub_lock);
 
         for (int i = 0; i < 2; i++) {
@@ -167,7 +173,7 @@ static void panel_task(void *arg)
         panel_render_set_net(&net);
         panel_render_set_info(&info);
         memset(&net, 0, sizeof(net)); /* the password never lingers on this stack */
-        panel_render(&st, s_name, now_ms, fb);
+        panel_render(&st, name, now_ms, fb);
         commit_frame(fb);
 
         if (oled_ok && memcmp(fb, shown, sizeof(shown)) != 0) {

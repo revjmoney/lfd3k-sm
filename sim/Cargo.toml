@@ -8,6 +8,9 @@ default-run = "lfd3k-sim"
 
 [dependencies]
 lfd3k-core = { path = "../core" }
+# lfd3k-pcmodem --raw: console raw mode and key events (MIT). Default features off:
+# only key events and the Windows console, no bracketed paste or derive helpers.
+crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
 
 [dev-dependencies]
 # Fuzz tests only (MIT OR Apache-2.0). Default features off: no fork/timeout crates.

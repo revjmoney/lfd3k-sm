@@ -16,6 +16,11 @@
  * (y 12..29; the sine waves 12..31; the explode dots 12..44), each transition ending
  * exactly on the new item; the schedule never shows an item twice in a row and never
  * picks GPS while hide_location is 1; a long idle run through the whole panel.
+ * Then the scan radar: with scanning set, every row outside y 12..37 equals the idle
+ * frame at the same time, the band is drawn, the sweep moves every 50 ms, each answer
+ * changes the band, and outside idle the flag changes nothing. Then the idle show fed
+ * with real data: heard counts 0..65535 and caller names under the station name rule,
+ * items shown exactly when set, inside the band, through every transition both ways.
  *
  *  With --dump it also writes <dir>/idle/items.txt (every item) and <dir>/idle/show.txt
  *  (a scripted preview of every transition and the scroller, one frame per 100 ms,
@@ -142,6 +147,24 @@ static void exhaustive(void)
                     }
                     check_one(&s, "ABCDEFGHIJKLMNOP", now);
                 }
+            }
+        }
+    }
+    /* A scan in every state (the core only scans while idle, the renderer must not care). */
+    static const uint8_t HITS[] = {0, 1, 12, 13, 255};
+    for (int state = 0; state <= 5; state++) {
+        for (size_t h = 0; h < sizeof(HITS) / sizeof(HITS[0]); h++) {
+            for (int ok = 0; ok <= 1; ok++) {
+                lfd3k_status_t s;
+                memset(&s, 0, sizeof(s));
+                s.state = (uint8_t)state;
+                s.tier = (int8_t)(state == 4 ? 5 : -1);
+                s.radio_ok = (uint8_t)ok;
+                s.scanning = 1;
+                s.scan_hits = HITS[h];
+                s.heard = 65535;
+                now += 211;
+                check_one(&s, "ABCDEFGHIJKLMNOP", now);
             }
         }
     }
@@ -423,6 +446,182 @@ static void idle_checks(void)
     panel_render_set_info(NULL);
 }
 
+/* ---- scan radar ---- */
+
+#define SCAN_Y0 12
+#define SCAN_Y1 37
+
+/* Do rows y0..y1 of a and b differ? */
+static int rows_differ(const uint8_t *a, const uint8_t *b, int y0, int y1)
+{
+    for (int y = y0; y <= y1; y++) {
+        for (int x = 0; x < 128; x++) {
+            uint8_t m = (uint8_t)(1u << (y & 7));
+            if ((a[(y >> 3) * 128 + x] & m) != (b[(y >> 3) * 128 + x] & m)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void scan_fail(const char *what, int hits, unsigned long t)
+{
+    printf("FAIL scan radar %s: hits %d at %lu\n", what, hits, t);
+    failures++;
+}
+
+static void scan_checks(void)
+{
+    static const int HITS[] = {0, 1, 2, 3, 7, 11, 12, 13, 100, 254, 255};
+    /* the idle frame to compare against holds IDLE (no transition, so nothing below
+     * y 37 from an EXPLODE); the lights shuffle and name row still run */
+    static const idle_slot_t only_idle = {SLOT_PRE_SCROLL, IS_IDLE, IS_IDLE, TR_EXPLODE, 0};
+    idle_show_set_script(&only_idle, 1);
+    lfd3k_status_t s;
+    memset(&s, 0, sizeof(s));
+    s.radio_ok = 1;
+    s.tier = -1;
+    s.lights = 0x80;
+    for (size_t h = 0; h < sizeof(HITS) / sizeof(HITS[0]); h++) {
+        for (uint32_t t = 900000u; t < 900000u + 4000u; t += 37) {
+            uint8_t idle[PANEL_FB_BYTES], scan[PANEL_FB_BYTES];
+            s.scanning = 0;
+            s.scan_hits = 0;
+            panel_render(&s, "AXISMODEM-7F3A", t, idle);
+            s.scanning = 1;
+            s.scan_hits = (uint8_t)HITS[h];
+            check_one(&s, "AXISMODEM-7F3A", t); /* guards, something drawn, repeatable */
+            panel_render(&s, "AXISMODEM-7F3A", t, scan);
+            renders += 2;
+            /* the radar only replaces the middle band: every other row is the idle frame's */
+            if (rows_differ(idle, scan, 0, SCAN_Y0 - 1) || rows_differ(idle, scan, SCAN_Y1 + 1, 63)) {
+                scan_fail("drew outside y 12..37", HITS[h], t);
+            }
+            if (!rows_differ(idle, scan, SCAN_Y0, SCAN_Y1)) {
+                scan_fail("band same as idle", HITS[h], t);
+            }
+        }
+    }
+    /* the sweep moves (one angle step every 50 ms), and each answer adds a blip */
+    s.scanning = 1;
+    for (uint32_t t = 910000u; t < 910000u + 1600u; t += 50) {
+        uint8_t a[PANEL_FB_BYTES], b[PANEL_FB_BYTES];
+        s.scan_hits = 0;
+        panel_render(&s, "AXISMODEM-7F3A", t, a);
+        panel_render(&s, "AXISMODEM-7F3A", t + 50, b);
+        if (!rows_differ(a, b, SCAN_Y0, SCAN_Y1)) {
+            scan_fail("sweep did not move", 0, t);
+        }
+        for (int h = 1; h <= 12; h++) {
+            s.scan_hits = (uint8_t)(h - 1);
+            panel_render(&s, "AXISMODEM-7F3A", t, a);
+            s.scan_hits = (uint8_t)h;
+            panel_render(&s, "AXISMODEM-7F3A", t, b);
+            renders += 2;
+            if (!rows_differ(a, b, SCAN_Y0, SCAN_Y1)) {
+                scan_fail("answer added no blip", h, t);
+            }
+        }
+        renders += 2;
+    }
+    /* outside idle the scan flag changes nothing */
+    for (int state = 1; state <= 5; state++) {
+        uint8_t a[PANEL_FB_BYTES], b[PANEL_FB_BYTES];
+        s.state = (uint8_t)state;
+        s.tier = 5;
+        s.scanning = 0;
+        panel_render(&s, "AXISMODEM-7F3A", 920000u, a);
+        s.scanning = 1;
+        s.scan_hits = 9;
+        panel_render(&s, "AXISMODEM-7F3A", 920000u, b);
+        renders += 2;
+        if (memcmp(a, b, PANEL_FB_BYTES) != 0) {
+            scan_fail("drawn outside idle", 9, (unsigned long)state);
+        }
+    }
+    idle_show_set_script(NULL, 0);
+}
+
+/* ---- the idle show fed with real data: heard count and last caller ---- */
+
+static void real_info_checks(void)
+{
+    /* heard counts the core can give (0 to 32 directory entries; the field is wider) and
+     * caller names under the station name rule (1 to 16 printable characters, no colon) */
+    static const uint16_t HEARD[] = {0, 1, 2, 9, 10, 31, 32, 99, 65535};
+    static const char *const CALLERS[] = {"", "A", "PCMODEM", "AXISMODEM-4F1C", "ABCDEFGHIJKLMNOP",
+                                          "REV J MONEY", "~!@#$%^&*()_+{}|", "WWWWWWWWWWWWWWWW"};
+    guarded_t g;
+    for (size_t h = 0; h < sizeof(HEARD) / sizeof(HEARD[0]); h++) {
+        for (size_t c = 0; c < sizeof(CALLERS) / sizeof(CALLERS[0]); c++) {
+            panel_info_t in = PANEL_INFO_INIT;
+            in.heard = HEARD[h];
+            strcpy(in.last_caller, CALLERS[c]);
+            if (idle_show_available(&in, IS_HEARD) != (HEARD[h] > 0)) {
+                printf("FAIL HEARD item availability, heard %u\n", (unsigned)HEARD[h]);
+                failures++;
+            }
+            if (idle_show_available(&in, IS_CALLER) != (CALLERS[c][0] != 0)) {
+                printf("FAIL caller item availability, caller \"%s\"\n", CALLERS[c]);
+                failures++;
+            }
+            for (int item = IS_HEARD; item <= IS_CALLER; item++) {
+                if (!idle_show_available(&in, item)) {
+                    continue;
+                }
+                arm(&g);
+                memset(g.fb, 0, PANEL_FB_BYTES);
+                idle_show_draw_item(g.fb, &in, item);
+                renders++;
+                if (!guards_ok(&g) || outside_rows(g.fb, 12, 29) || lit(g.fb) < 20) {
+                    printf("FAIL %s item, heard %u caller \"%s\"\n", idle_show_item_name(item),
+                           (unsigned)HEARD[h], CALLERS[c]);
+                    failures++;
+                }
+                /* every transition into and out of it stays in its rows and lands */
+                for (int tr = 0; tr < TR_COUNT; tr++) {
+                    int y1 = tr == TR_EXPLODE ? 44 : (tr == TR_SINE ? 31 : 29);
+                    for (int dir = 0; dir < 2; dir++) {
+                        int a = dir ? item : IS_IDLE, b = dir ? IS_IDLE : item;
+                        for (uint32_t t = 0; t < IDLE_TR_MS; t += 97) {
+                            arm(&g);
+                            memset(g.fb, 0, PANEL_FB_BYTES);
+                            idle_show_draw_trans(g.fb, &in, a, b, tr, t);
+                            renders++;
+                            if (!guards_ok(&g) || outside_rows(g.fb, 12, y1)) {
+                                idle_fail("real data transition", a, b, tr, t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    /* the schedule shows them when set and never when not */
+    panel_info_t on = PANEL_INFO_INIT, off = PANEL_INFO_INIT;
+    on.heard = 3;
+    strcpy(on.last_caller, "AXISMODEM-4F1C");
+    long seen_on[IS_ITEMS] = {0}, seen_off[IS_ITEMS] = {0};
+    for (uint32_t n = 0; n < 50000u; n++) {
+        idle_slot_t a, b;
+        idle_show_slot(&on, n, &a);
+        idle_show_slot(&off, n, &b);
+        if (a.item >= 0 && a.item < IS_ITEMS) seen_on[a.item]++;
+        if (a.next >= 0 && a.next < IS_ITEMS) seen_on[a.next]++;
+        if (b.item >= 0 && b.item < IS_ITEMS) seen_off[b.item]++;
+        if (b.next >= 0 && b.next < IS_ITEMS) seen_off[b.next]++;
+    }
+    if (!seen_on[IS_HEARD] || !seen_on[IS_CALLER]) {
+        printf("FAIL idle show never picks HEARD or the caller when set\n");
+        failures++;
+    }
+    if (seen_off[IS_HEARD] || seen_off[IS_CALLER]) {
+        printf("FAIL idle show picks HEARD or the caller when not set\n");
+        failures++;
+    }
+}
+
 static void hexline(FILE *f, const char *label, const uint8_t *fb)
 {
     fprintf(f, "%s\tFB:", label);
@@ -683,6 +882,39 @@ static void mockups(const char *dir)
     s.snr_x4 = 28;
     panel_render(&s, "AXISMODEM-7F3A", 32000, fb);
     dump(dir, "bridge", fb);
+
+    /* a compressing radio call: DC lit (OH CD SD HS EC DC AA) */
+    s.wire = 0;
+    s.lights = 0xF7;
+    panel_render(&s, "AXISMODEM-7F3A", 33000, fb);
+    dump(dir, "online_lz", fb);
+
+    /* AT+SCAN with three answers so far (the newest blip solid at this time) */
+    memset(&s, 0, sizeof(s));
+    s.lights = 0x80;
+    s.tier = -1;
+    s.radio_ok = 1;
+    s.scanning = 1;
+    s.scan_hits = 3;
+    panel_render(&s, "AXISMODEM-7F3A", 34250, fb);
+    dump(dir, "scan", fb);
+
+    /* the heard count and the last caller in the idle show, with a renamed station */
+    panel_info_t in = PANEL_INFO_INIT;
+    in.heard = 4;
+    strcpy(in.last_caller, "PCMODEM");
+    panel_render_set_info(&in);
+    static const idle_slot_t heard = {SLOT_NORMAL, IS_HEARD, IS_IDLE, TR_EXPLODE, 0};
+    static const idle_slot_t caller = {SLOT_NORMAL, IS_CALLER, IS_IDLE, TR_EXPLODE, 0};
+    s.scanning = 0;
+    s.scan_hits = 0;
+    idle_show_set_script(&heard, 1);
+    panel_render(&s, "REVJ", 40100, fb);
+    dump(dir, "idle_heard", fb);
+    idle_show_set_script(&caller, 1);
+    panel_render(&s, "REVJ", 40100, fb);
+    dump(dir, "idle_caller", fb);
+    panel_render_set_info(NULL);
     idle_show_set_script(NULL, 0);
 }
 
@@ -692,6 +924,8 @@ int main(int argc, char **argv)
     wifi_checks();
     splash_check();
     idle_checks();
+    scan_checks();
+    real_info_checks();
     if (argc == 3 && strcmp(argv[1], "--dump") == 0) {
         mockups(argv[2]);
         idle_dump(argv[2]);

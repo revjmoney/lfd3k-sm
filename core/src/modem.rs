@@ -369,6 +369,10 @@ pub struct Modem {
     /// AT+NAME name is set.
     boot_name: [u8; NAME_MAX],
     boot_len: u8,
+    /// The station that last called us over the radio (a CallReq to our
+    /// name that got past the privacy screen); empty until one does.
+    last_caller: [u8; NAME_MAX],
+    last_caller_len: u8,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -444,6 +448,8 @@ impl Modem {
             boot_menu: false,
             boot_name: [0; NAME_MAX],
             boot_len: 0,
+            last_caller: [0; NAME_MAX],
+            last_caller_len: 0,
         }
     }
 
@@ -495,6 +501,8 @@ impl Modem {
         self.dial_len = 0;
         self.menu.stop();
         self.boot_menu = false;
+        self.last_caller = [0; NAME_MAX];
+        self.last_caller_len = 0;
     }
 
     /// True once when the platform should save the directory
@@ -519,6 +527,32 @@ impl Modem {
         let dropped = self.dir.remove(name_of(&self.cfg));
         self.dir.take_changed();
         self.dir_dirty = dropped;
+    }
+
+    /// Boot: parse the platform's directory blob straight into the live
+    /// directory (`Directory::load_blob`, no copy on the caller's stack),
+    /// then as `load_directory`. False when the blob is refused: the
+    /// directory is then empty.
+    pub fn load_directory_blob(&mut self, b: &[u8]) -> bool {
+        let ok = self.dir.load_blob(b);
+        let dropped = self.dir.remove(name_of(&self.cfg));
+        self.dir.take_changed();
+        self.dir_dirty = dropped;
+        ok
+    }
+
+    /// The live station name (AT+NAME, else the platform's).
+    pub fn station_name(&self) -> &str {
+        name_of(&self.cfg)
+    }
+
+    /// The station that last called us over the radio, empty when none
+    /// has since reset.
+    pub fn last_caller(&self) -> &str {
+        self.last_caller
+            .get(..usize::from(self.last_caller_len))
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .unwrap_or("")
     }
 
     /// The privacy mode in force (AT+BEACON).
@@ -1026,6 +1060,15 @@ impl Modem {
         // The link ignores call id 0; so does the directory.
         if call_id != 0 {
             self.dir_heard(caller, None, info, now);
+            if valid_station(caller) {
+                let n = caller.len().min(NAME_MAX);
+                if let (Some(d), Some(s)) =
+                    (self.last_caller.get_mut(..n), caller.as_bytes().get(..n))
+                {
+                    d.copy_from_slice(s);
+                    self.last_caller_len = n as u8;
+                }
+            }
         }
         true
     }

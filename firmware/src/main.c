@@ -36,12 +36,18 @@ static const char *TAG = "lfd3k";
 #define DUMP_TAIL     6
 #define DUMP_TOTAL    (DUMP_HEAD + DUMP_HEX + DUMP_TAIL)
 
-/* Settings save: held until no call is active, then written to NVS. */
-static uint8_t s_blob[LFD3K_BLOB_LEN];
-static size_t s_blob_len;
-static bool s_save_held;
-static bool s_save_failed;       /* last write failed; retry 5 s after s_save_failed_ms */
-static uint32_t s_save_failed_ms;
+/* A blob waiting for NVS: held until no call is active, then written. The settings and
+ * the directory (key "dir") each have their own, so one never overwrites the other. */
+typedef struct {
+    uint8_t blob[LFD3K_BLOB_LEN]; /* LFD3K_DIR_BLOB_LEN is the same 1024 */
+    size_t len;
+    bool held;
+    bool failed;                  /* last write failed; retry 5 s after failed_ms */
+    uint32_t failed_ms;
+} pending_save_t;
+
+static pending_save_t s_set_save; /* settings; its blob is also the boot load buffer */
+static pending_save_t s_dir_save; /* directory; its blob is also the boot load buffer */
 static bool s_nvs_ok;
 static char s_boot_pass[13];     /* drawn in app_main before the Wi-Fi driver exists */
 
@@ -141,8 +147,8 @@ static bool drain_host_out(void)
 static void load_or_default_settings(void)
 {
     size_t len = 0;
-    if (s_nvs_ok && settings_store_load(s_blob, sizeof(s_blob), &len) &&
-        lfd3k_load_settings(s_blob, len) == 0) {
+    if (s_nvs_ok && settings_store_load(s_set_save.blob, sizeof(s_set_save.blob), &len) &&
+        lfd3k_load_settings(s_set_save.blob, len) == 0) {
         ESP_LOGI(TAG, "settings loaded (%u bytes)", (unsigned)len);
         return;
     }
@@ -150,23 +156,48 @@ static void load_or_default_settings(void)
     ESP_LOGI(TAG, "first boot: factory settings");
 }
 
-/* Saves wait for the call to end (a flash write must not stall a live call). */
-static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
+/* Boot, after the settings (so an AT+NAME name is in force): the saved directory, parsed
+ * in place by the core. None yet (first boot) or a refused blob leaves it empty. */
+static void load_directory(void)
 {
-    if (lfd3k_take_save(s_blob, sizeof(s_blob), &s_blob_len)) {
-        s_save_held = s_nvs_ok; /* a newer blob replaces a held one; no NVS, no saves */
-        s_save_failed = false;
+    size_t len = 0;
+    if (!s_nvs_ok || !settings_store_load_dir(s_dir_save.blob, sizeof(s_dir_save.blob), &len)) {
+        ESP_LOGI(TAG, "no saved directory");
+        return;
     }
-    bool wait = s_save_failed && (uint32_t)(now_ms - s_save_failed_ms) < 5000;
-    if (s_save_held && st->state == 0 && st->wire == 0 && !wait) {
-        if (settings_store_save(s_blob, s_blob_len)) {
-            s_save_held = false;
-            s_save_failed = false;
+    int rc = lfd3k_load_directory(s_dir_save.blob, len);
+    ESP_LOGI(TAG, "directory %s (%u bytes)", rc == 0 ? "loaded" : "refused", (unsigned)len);
+}
+
+/* Writes a held blob once no call is up (a flash write must not stall a live call). */
+static void save_pending(pending_save_t *p, bool (*store)(const uint8_t *, size_t), uint32_t now_ms,
+                         const lfd3k_status_t *st)
+{
+    bool wait = p->failed && (uint32_t)(now_ms - p->failed_ms) < 5000;
+    if (p->held && st->state == 0 && st->wire == 0 && !wait) {
+        if (store(p->blob, p->len)) {
+            p->held = false;
+            p->failed = false;
         } else {
-            s_save_failed = true;
-            s_save_failed_ms = now_ms;
+            p->failed = true;
+            p->failed_ms = now_ms;
         }
     }
+}
+
+/* Settings and directory saves; a newer blob replaces a held one; no NVS, no saves. */
+static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
+{
+    if (lfd3k_take_save(s_set_save.blob, sizeof(s_set_save.blob), &s_set_save.len)) {
+        s_set_save.held = s_nvs_ok;
+        s_set_save.failed = false;
+    }
+    if (lfd3k_take_dir_save(s_dir_save.blob, sizeof(s_dir_save.blob), &s_dir_save.len)) {
+        s_dir_save.held = s_nvs_ok;
+        s_dir_save.failed = false;
+    }
+    save_pending(&s_set_save, settings_store_save, now_ms, st);
+    save_pending(&s_dir_save, settings_store_save_dir, now_ms, st);
 }
 
 /* Wi-Fi strings for the OLED rows, once a second. The hotspot password goes along only
@@ -241,12 +272,15 @@ static void tsens_start(void)
     s_tsens = h;
 }
 
-/* Clock, uptime and chip temperature for the idle show, once a second. Heard count,
- * last caller and GPS stay empty for now (later tasks); the location stays hidden. */
-static void publish_info(void)
+/* Clock, uptime, chip temperature, the heard count (directory entries heard in the last
+ * 15 minutes, from the status) and the last caller for the idle show, once a second.
+ * GPS stays empty for now (later tasks); the location stays hidden. */
+static void publish_info(const lfd3k_status_t *st)
 {
     panel_info_t in = PANEL_INFO_INIT;
     in.uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    in.heard = st->heard;
+    lfd3k_last_caller(in.last_caller, sizeof(in.last_caller));
     if (panel_time_synced()) {
         time_t now = time(NULL);
         struct tm lt;
@@ -262,6 +296,15 @@ static void publish_info(void)
         in.temp_c = (int8_t)(v < -99 ? -99 : (v > 127 ? 127 : v));
     }
     panel_publish_info(&in);
+}
+
+/* The live station name for the panel's name row (the boot name until settings load). */
+static void publish_name(void)
+{
+    char nm[17];
+    if (lfd3k_station_name(nm, sizeof(nm)) > 0) {
+        panel_set_name(nm);
+    }
 }
 
 static void modem_task(void *arg)
@@ -286,6 +329,8 @@ static void modem_task(void *arg)
 
     load_or_default_settings();
     memset(s_boot_pass, 0, sizeof(s_boot_pass));
+    load_directory();
+    publish_name(); /* a saved AT+NAME name shows from the first idle frame */
     tcp_link_init(xTaskGetCurrentTaskHandle());
     udp_link_init(xTaskGetCurrentTaskHandle());
     {
@@ -373,7 +418,8 @@ static void modem_task(void *arg)
             lfd3k_set_wifi_status(line);
             publish_net();
             sntp_start_once();
-            publish_info();
+            publish_info(&st);
+            publish_name(); /* AT+NAME can change it */
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
             lfd3k_set_heap_min(esp_get_minimum_free_heap_size());
         }

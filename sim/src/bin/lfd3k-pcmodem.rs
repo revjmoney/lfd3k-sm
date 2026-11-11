@@ -13,10 +13,24 @@
 //!   start (repeatable), so `ATDT NAME` or `AT+PUB=NAME` work at once. No
 //!   mode: telnet (`T`) for port 23, raw (`R`) otherwise.
 //! - `--script <file> [--section <name>]`: unattended run (see below).
+//! - `--raw`: raw console (see below). Not with `--script`.
 //!
-//! Terminal: line mode (std has no raw console mode). Each line typed is sent
-//! with a CR; a line that is exactly the escape (`+++`) is sent without one,
-//! so wait a second before and after it. Host output goes to stdout as is.
+//! Terminal, default: line mode. Each line typed is sent with a CR; a line
+//! that is exactly the escape (`+++`) is sent without one, so wait a second
+//! before and after it. Host output goes to stdout as is (UTF-8 where valid,
+//! other bytes as CP437).
+//!
+//! Terminal, `--raw` (the `crossterm` crate): every key goes to the modem as
+//! it is pressed, as a VT100 terminal would send it, so `AT+MENU` works:
+//! arrows `ESC [ A..D`, Esc, Enter as CR, Backspace as BS, Tab, Home and
+//! End, Delete as DEL, Ctrl+letter as its control code (Ctrl+C included).
+//! Ctrl+] quits and puts the console back. Host output is shown as CP437
+//! (the menu's box drawing), with ANSI processing switched on.
+//!
+//! Discovery: the loop feeds every received frame to `radio_rx` and calls
+//! `tick` every millisecond, so this modem beacons (privacy mode ON, every
+//! 300 to 360 s), answers scans and runs `AT+SCAN` over SimNet like any
+//! other. Its directory lives only in memory (no blob is saved).
 //!
 //! Wi-Fi calls and bridges: the modem's wire requests are served with a real
 //! `TcpStream` (non-blocking, polled in the same loop), following the
@@ -63,11 +77,13 @@ struct Args {
     fwds: Vec<String>,
     script: Option<String>,
     section: Option<String>,
+    raw: bool,
 }
 
 fn usage() -> String {
     "usage: lfd3k-pcmodem --peer <ip> [--port <n>] [--bind <addr:port>] [--name <NAME>] \
-     [--snr <dB>] [--profile dip] [--fwd NAME=host:port[,T|R]]... [--script <file> [--section <name>]]"
+     [--snr <dB>] [--profile dip] [--fwd NAME=host:port[,T|R]]... [--script <file> [--section <name>]] \
+     [--raw]"
         .to_string()
 }
 
@@ -82,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
         fwds: Vec::new(),
         script: None,
         section: None,
+        raw: false,
     };
     let mut peer = None;
     let mut it = std::env::args().skip(1);
@@ -103,12 +120,97 @@ fn parse_args() -> Result<Args, String> {
             "--fwd" => a.fwds.push(v()?),
             "--script" => a.script = Some(v()?),
             "--section" => a.section = Some(v()?),
+            "--raw" => a.raw = true,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown option {k}\n{}", usage())),
         }
     }
     a.peer = peer.ok_or_else(usage)?;
+    if a.raw && a.script.is_some() {
+        return Err(format!(
+            "--raw and --script do not go together\n{}",
+            usage()
+        ));
+    }
     Ok(a)
+}
+
+// ---- Raw console (--raw). ----
+
+/// Puts the console back in its normal mode when dropped (every exit path).
+struct RawGuard;
+
+impl RawGuard {
+    fn enable() -> std::io::Result<RawGuard> {
+        crossterm::terminal::enable_raw_mode()?;
+        // Windows: let the console act on the menu's ANSI sequences.
+        #[cfg(windows)]
+        let _ = crossterm::ansi_support::supports_ansi();
+        Ok(RawGuard)
+    }
+}
+
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// The bytes a VT100 terminal sends for a key; `None` for Ctrl+] (quit).
+/// Keys with no byte form give an empty vector.
+fn key_bytes(k: &crossterm::event::KeyEvent) -> Option<Vec<u8>> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    Some(match k.code {
+        KeyCode::Char(']') if ctrl => return None,
+        KeyCode::Char(c) if ctrl && c.is_ascii_alphabetic() => {
+            vec![(c.to_ascii_uppercase() as u8) & 0x1F]
+        }
+        KeyCode::Char('[') if ctrl => vec![0x1B],
+        KeyCode::Char(c) if ctrl && (c == ' ' || c == '@') => vec![0],
+        KeyCode::Char(c) => c.to_string().into_bytes(),
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Backspace => vec![0x08],
+        KeyCode::Delete => vec![0x7F],
+        KeyCode::Esc => vec![0x1B],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        _ => Vec::new(),
+    })
+}
+
+/// Key presses (and repeats; Windows also reports releases, which are
+/// skipped) as bytes on the channel; an empty vector means quit.
+fn raw_keys(tx: mpsc::Sender<Vec<u8>>) {
+    use crossterm::event::{read, Event, KeyEventKind};
+    loop {
+        let Ok(ev) = read() else {
+            let _ = tx.send(Vec::new());
+            return;
+        };
+        let Event::Key(k) = ev else { continue };
+        if k.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key_bytes(&k) {
+            None => {
+                let _ = tx.send(Vec::new());
+                return;
+            }
+            Some(b) if b.is_empty() => {}
+            Some(b) => {
+                if tx.send(b).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// `NAME=host:port[,T|R]` as the `AT+FWD` line (no mode: telnet for port
@@ -277,6 +379,8 @@ fn wire_service(w: &mut Wire, m: &mut Modem, now: u32, got: &mut Vec<u8>, log: &
 
 struct Log {
     script: bool,
+    /// `--raw`: host bytes as CP437, notes end in CR LF.
+    raw: bool,
     line: Vec<u8>,
     /// Start of a UTF-8 sequence cut at the end of the last host chunk.
     utf8_tail: Vec<u8>,
@@ -305,6 +409,8 @@ impl Log {
     fn note(&mut self, now: u32, s: &str) {
         if self.script {
             println!("{} *  {s}", Self::stamp(now));
+        } else if self.raw {
+            eprint!("[pcmodem] {s}\r\n"); // raw mode: no newline translation
         } else {
             eprintln!("[pcmodem] {s}");
         }
@@ -313,7 +419,13 @@ impl Log {
     /// Host output: raw on the terminal, one stamped line per line in a script.
     fn host(&mut self, now: u32, b: &[u8]) {
         if !self.script {
-            let text = self.decode(b);
+            // Raw: every byte as CP437, since the menu's box corners and
+            // lines (CD BB, C4 BF, ...) are also valid two byte UTF-8.
+            let text = if self.raw {
+                b.iter().map(|&c| cp437(c)).collect()
+            } else {
+                self.decode(b)
+            };
             let mut o = std::io::stdout();
             let _ = o.write_all(text.as_bytes());
             let _ = o.flush();
@@ -528,10 +640,27 @@ fn main() -> ExitCode {
     };
     let mut log = Log {
         script: runner.is_some(),
+        raw: a.raw,
         line: Vec::new(),
         utf8_tail: Vec::new(),
     };
-    let lines = if runner.is_none() {
+    // Held for the whole run: dropping it (any return) restores the console.
+    let _raw_guard = if a.raw {
+        match RawGuard::enable() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("cannot put the console in raw mode: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+    let lines = if a.raw {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || raw_keys(tx));
+        Some(rx)
+    } else if runner.is_none() {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             for l in std::io::stdin().lock().lines() {
@@ -565,6 +694,12 @@ fn main() -> ExitCode {
             if a.dip { ", profile dip" } else { "" }
         ),
     );
+    if a.raw {
+        log.note(
+            radio.port().now_ms(),
+            "raw console: keys go straight to the modem, Ctrl+] quits",
+        );
+    }
 
     let mut input: VecDeque<u8> = VecDeque::new();
     for f in &a.fwds {
@@ -611,6 +746,10 @@ fn main() -> ExitCode {
         // Host input: typed lines or the script.
         if let Some(rx) = &lines {
             while let Ok(b) = rx.try_recv() {
+                if a.raw && b.is_empty() {
+                    log.note(now, "Ctrl+] pressed, bye");
+                    return ExitCode::SUCCESS; // the guard restores the console
+                }
                 input.extend(b);
             }
         }
