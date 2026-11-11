@@ -71,6 +71,8 @@ Do this before you flash anything. It saves the whole 16 MB chip, so Radar can c
    pio run -d F:\lfd3k-sm\firmware -e heltec_v4_single
    ```
 
+   This sheet puts the modem alone on the V4 (the single app table, env `heltec_v4_single`). Since phase 5 the default env `heltec_v4` is the multimode build (the modem in slot ota_1 behind the picker): it refuses `-t upload`, and only its `firmware.bin` is written, to 0x4A0000 (see `multimode/README.md`).
+
    Then check that the firmware is newer than the Rust library:
 
    ```

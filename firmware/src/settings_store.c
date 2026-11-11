@@ -65,8 +65,9 @@ static void migrate_from_shared(void)
         nvs_close(own); /* empty, full or newer format: leave it alone */
         return;
     }
+    /* Read only: a read-write open would create the namespace there. */
     nvs_handle_t old;
-    if (nvs_open_from_partition(SHARED_PART, NS, NVS_READWRITE, &old) != ESP_OK) {
+    if (nvs_open_from_partition(SHARED_PART, NS, NVS_READONLY, &old) != ESP_OK) {
         nvs_close(own); /* no lfd3k namespace there: nothing to move */
         nvs_flash_deinit_partition(SHARED_PART);
         return;
@@ -93,17 +94,20 @@ static void migrate_from_shared(void)
         }
     }
     memset(s_mig, 0, sizeof(s_mig));
-    /* Erase the old keys only once the copies are committed. */
-    if ((copied[0] || copied[1]) && nvs_commit(own) == ESP_OK && !failed) {
+    nvs_close(old);
+    /* Erase the old keys only once the copies are committed. The namespace
+     * exists there (it held them), so the read-write open creates nothing. */
+    if ((copied[0] || copied[1]) && nvs_commit(own) == ESP_OK && !failed &&
+        nvs_open_from_partition(SHARED_PART, NS, NVS_READWRITE, &old) == ESP_OK) {
         for (int i = 0; i < 2; i++) {
             if (copied[i]) {
                 nvs_erase_key(old, keys[i]);
             }
         }
         nvs_commit(old);
+        nvs_close(old);
         ESP_LOGI(TAG, "moved old settings%s from nvs to %s", copied[1] ? " and directory" : "", OWN_PART);
     }
-    nvs_close(old);
     nvs_close(own);
     nvs_flash_deinit_partition(SHARED_PART);
 }
