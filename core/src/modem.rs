@@ -26,8 +26,9 @@
 //! here and never reach the link. Heard stations (beacons, scan answers, a
 //! caller's CallReq to us, the answerer's CallAck or Train on our dial) go
 //! into the directory, never our own name. In HIDDEN mode a CallReq to us
-//! from a name not in the directory is dropped before the link sees it, so
-//! nothing at all is sent (no RING, no CallReject).
+//! from a name that is not a pinned directory entry (`AT+DIR=+NAME`) is
+//! dropped before the link sees it, so nothing at all is sent (no RING, no
+//! CallReject).
 
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::directory::{Directory, DIR_MAX};
@@ -885,8 +886,8 @@ impl Modem {
 
     /// Look at a received frame before the link does. Discovery frames are
     /// handled here and never reach the link; a CallReq to us feeds the
-    /// directory, or in HIDDEN mode is dropped when the caller is not in
-    /// it; the answerer of our dial is credited on its CallAck or Train.
+    /// directory, or in HIDDEN mode is dropped when the caller is not a
+    /// pinned entry; the answerer of our dial is credited on its CallAck or Train.
     /// False when the link must not see the frame.
     fn screen(&mut self, buf: &[u8], info: RxInfo, now: u32) -> bool {
         let Ok(f) = crate::frame::decode(buf) else {
@@ -908,7 +909,7 @@ impl Modem {
                 self.on_scan_resp(f.payload, info, now);
                 false
             }
-            FrameType::CallReq => self.screen_call_req(f.payload, info, now),
+            FrameType::CallReq => self.screen_call_req(f.payload, h.call_id, info, now),
             FrameType::CallAck | FrameType::Train => {
                 let dialing = matches!(self.link.state(), State::Dialing | State::AwaitTrain);
                 if dialing && h.call_id != 0 && h.call_id == self.link.call_id() {
@@ -927,18 +928,22 @@ impl Modem {
         }
     }
 
-    fn screen_call_req(&mut self, p: &[u8], info: RxInfo, now: u32) -> bool {
+    fn screen_call_req(&mut self, p: &[u8], call_id: u8, info: RxInfo, now: u32) -> bool {
         let Ok((caller, callee)) = crate::frame::parse_call_req(p) else {
             return true;
         };
         if !callee.eq_ignore_ascii_case(name_of(&self.cfg)) {
             return true;
         }
-        if self.set.beacon == BeaconMode::Hidden && self.dir.get(caller).is_none() {
-            // A stranger: drop it whole, so nothing is sent.
+        if self.set.beacon == BeaconMode::Hidden && !self.dir.get(caller).is_some_and(|e| e.pinned)
+        {
+            // Not pinned (AT+DIR=+NAME): drop it whole, so nothing is sent.
             return false;
         }
-        self.dir_heard(caller, None, info, now);
+        // The link ignores call id 0; so does the directory.
+        if call_id != 0 {
+            self.dir_heard(caller, None, info, now);
+        }
         true
     }
 
@@ -950,8 +955,8 @@ impl Modem {
             return; // our own scan echoed back
         }
         let hidden = self.set.beacon == BeaconMode::Hidden;
-        // HIDDEN: a scan never vouches for a stranger (it would let any
-        // scanner call us next), it only refreshes a name already known.
+        // HIDDEN: a scan only refreshes a name already known (call rights
+        // come from pinning alone, this just keeps strangers out of the list).
         if !hidden || self.dir.get(r.name).is_some() {
             self.dir_heard(r.name, None, info, now);
         }
@@ -981,7 +986,7 @@ impl Modem {
             ..info
         };
         // HIDDEN: an overheard answer only refreshes a name already known,
-        // like a ScanReq (only beacons add strangers there).
+        // like a ScanReq.
         if self.set.beacon != BeaconMode::Hidden || self.dir.get(r.name).is_some() {
             self.dir_heard(r.name, Some(r.services), both, now);
         }
@@ -1203,7 +1208,11 @@ impl Modem {
             };
             t.put(b" ");
             if e.heard_since_boot() {
-                t.num(at.wrapping_sub(e.heard_ms) / 1000, 1);
+                // Heard again after the command was typed: age 0, never
+                // a wrapped "negative" age.
+                let d = at.wrapping_sub(e.heard_ms);
+                let d = if d > u32::MAX / 2 { 0 } else { d };
+                t.num(d / 1000, 1);
             } else {
                 t.put(b"-");
             }

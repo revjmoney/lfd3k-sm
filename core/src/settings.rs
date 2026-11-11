@@ -148,8 +148,8 @@ impl WireMode {
 /// Privacy mode for discovery (`AT+BEACON`), saved in the blob.
 ///
 /// ON sends beacons and answers scans; QUIET answers scans but sends no
-/// beacons; HIDDEN sends nothing at all except answering calls from names
-/// already in the directory, and drops other callers silently.
+/// beacons; HIDDEN sends nothing at all except answering calls from pinned
+/// directory entries (`AT+DIR=+NAME`), and drops other callers silently.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BeaconMode {
     On,
