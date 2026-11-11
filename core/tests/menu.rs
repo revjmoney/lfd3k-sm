@@ -7,7 +7,7 @@
 use lfd3k_core::menu::render::{COLS, LEAVE, PROLOGUE, ROWS};
 use lfd3k_core::menu::{Decoder, Key, MAIN};
 use lfd3k_core::settings::BeaconMode;
-use lfd3k_core::{Config, Directory, Modem, Radio, RxInfo, Settings, Tier, BLOB_LEN};
+use lfd3k_core::{Config, Directory, Found, Modem, Radio, RxInfo, Settings, Tier, BLOB_LEN};
 
 struct NullRadio;
 
@@ -881,4 +881,81 @@ fn boot_to_menu() {
     m.load_settings(Settings::defaults(NAME, AP_PASS));
     m.host_input(b"AT\r", &mut r, 10);
     assert!(!m.in_menu());
+}
+
+#[test]
+fn mdns_found_board_needs_keypress() {
+    // A board the mDNS browse found is only shown. Without a key the modem
+    // adds nothing, publishes nothing and opens no connection, however long
+    // it sits there; Esc and the host walking away change nothing either.
+    let mut s = Sess::new(0);
+    let forwards = s.m.settings().fwd_count();
+    s.open();
+    s.keys(&[DOWN, DOWN, DOWN, ENTER]);
+    assert!(s.term().row(2).contains(" Forwards "));
+    let board = Found::new(b"axis-bbs", [192, 168, 1, 164], 23).expect("a board");
+    s.m.set_found_hosts([board]);
+    s.settle();
+    let shown = s.term().all();
+    assert!(
+        shown.contains("Found: axis-bbs 192.168.1.164:23"),
+        "{shown}"
+    );
+    s.run(30_000);
+    assert!(s.m.take_wire_request().is_none(), "dialed on its own");
+    assert!(!s.m.wire_active(), "a call started on its own");
+    assert_eq!(s.m.settings().fwd_count(), forwards, "forward added");
+    assert!(s.m.settings().published().is_none(), "published");
+    assert!(!s.m.take_save_request());
+    assert!(s.m.in_menu());
+    // The list is refreshed by the next browse: still nothing happens.
+    s.m.set_found_hosts([board]);
+    s.run(5_000);
+    assert!(s.m.take_wire_request().is_none() && !s.m.wire_active());
+    // Moving the highlight onto the row and off it again is not a key to
+    // add it either (only Enter is).
+    s.keys(&[DOWN, UP]);
+    assert_eq!(s.m.settings().fwd_count(), forwards);
+    assert!(s.m.take_wire_request().is_none() && !s.m.wire_active());
+    // AT+FOUND? lists it and still adds nothing.
+    let mut s = Sess::new(0);
+    s.m.set_found_hosts([board]);
+    s.typ(b"AT+FOUND?\r");
+    s.run(100);
+    assert!(
+        s.text().contains("FOUND axis-bbs 192.168.1.164:23"),
+        "{}",
+        s.text()
+    );
+    assert_eq!(s.m.settings().fwd_count(), forwards);
+    assert!(s.m.take_wire_request().is_none() && !s.m.wire_active());
+
+    // Enter on the row adds the forward and publishes it, and even then no
+    // call is started: dialing is a separate ATDT.
+    let mut s = Sess::new(0);
+    s.open();
+    s.keys(&[DOWN, DOWN, DOWN, ENTER]);
+    s.m.set_found_hosts([board]);
+    s.settle();
+    let n = s.m.settings().fwd_count();
+    // Down to the found row: it follows the last forward row.
+    for _ in 0..40 {
+        s.keys(&[DOWN]);
+        if s.m.settings().fwd_count() != n {
+            break;
+        }
+        // Stop when the highlighted row is the found one.
+        let row_of_found = (0..ROWS as usize).find(|&r| s.term().row(r).contains("Found:"));
+        if let Some(r) = row_of_found {
+            if (0..COLS as usize).any(|c| s.term().cell(r, c) == 0xAF) {
+                break;
+            }
+        }
+    }
+    s.keys(&[ENTER]);
+    assert_eq!(s.m.settings().fwd_count(), n + 1, "Enter adds the forward");
+    assert!(s.m.settings().published().is_some(), "and publishes it");
+    s.run(5_000);
+    assert!(s.m.take_wire_request().is_none(), "Enter never dials");
+    assert!(!s.m.wire_active());
 }

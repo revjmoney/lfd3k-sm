@@ -244,3 +244,134 @@ fn telnet_reply_queue_never_overflows() {
     assert!(answered > 0 && fed > 0);
     assert!(t.can_take());
 }
+
+// ---- LFD3K-LINK (option 90) report text ----
+
+use lfd3k_core::telnet::{
+    link_frame, link_payload, LinkStats, LINK_FRAME_MAX, LINK_PAYLOAD_MAX, OPT_LINK,
+};
+
+fn payload_text(s: &LinkStats<'_>) -> String {
+    let mut b = [0u8; LINK_PAYLOAD_MAX];
+    let n = link_payload(s, &mut b);
+    String::from_utf8(b[..n].to_vec()).expect("printable ASCII")
+}
+
+fn frame_bytes(s: &LinkStats<'_>) -> Vec<u8> {
+    let mut b = [0u8; LINK_FRAME_MAX];
+    let n = link_frame(s, &mut b);
+    b[..n].to_vec()
+}
+
+fn radio_stats() -> LinkStats<'static> {
+    LinkStats {
+        modem: "AXISMODEM-4F1C",
+        radio: true,
+        caller: "CALLER",
+        sf: Some(9),
+        bps: Some(1_760),
+        snr_x4: Some(38),
+        rssi: Some(-71),
+        retrains: Some(2),
+        lz_x10: Some(29),
+    }
+}
+
+#[test]
+fn link_payload_format() {
+    // Known stats: exact text, key order as documented.
+    assert_eq!(
+        payload_text(&radio_stats()),
+        "v=1 modem=AXISMODEM-4F1C kind=radio caller=CALLER tier=SF9 bps=1760 snr=9.5 rssi=-71 retrains=2 lz=2.9"
+    );
+    // Negative SNR (quarter dB, rounded to tenths), compression off.
+    let s = LinkStats {
+        snr_x4: Some(-22),
+        lz_x10: Some(0),
+        sf: Some(12),
+        ..radio_stats()
+    };
+    assert_eq!(
+        payload_text(&s),
+        "v=1 modem=AXISMODEM-4F1C kind=radio caller=CALLER tier=SF12 bps=1760 snr=-5.5 rssi=-71 retrains=2 lz=0"
+    );
+    // A USB Wi-Fi call: no caller, tier WIFI, unknown values left out.
+    let w = LinkStats {
+        modem: "AXISMODEM-4F1C",
+        radio: false,
+        caller: "",
+        sf: None,
+        bps: None,
+        snr_x4: None,
+        rssi: None,
+        retrains: None,
+        lz_x10: None,
+    };
+    assert_eq!(
+        payload_text(&w),
+        "v=1 modem=AXISMODEM-4F1C kind=wifi caller=- tier=WIFI"
+    );
+    // Empty names send "-".
+    let e = LinkStats {
+        modem: "",
+        caller: "",
+        ..radio_stats()
+    };
+    assert!(payload_text(&e).starts_with("v=1 modem=- kind=radio caller=- tier=SF9 "));
+
+    // Values clamp to what the server accepts.
+    let big = LinkStats {
+        snr_x4: Some(i16::MAX),
+        rssi: Some(i16::MAX),
+        retrains: Some(u32::MAX),
+        lz_x10: Some(u32::MAX),
+        ..radio_stats()
+    };
+    let t = payload_text(&big);
+    assert!(
+        t.contains(" snr=99.9 rssi=50 retrains=999999 lz=99.9"),
+        "{t}"
+    );
+    let low = LinkStats {
+        snr_x4: Some(i16::MIN),
+        rssi: Some(i16::MIN),
+        ..radio_stats()
+    };
+    let t = payload_text(&low);
+    assert!(t.contains(" snr=-99.9 rssi=-200 "), "{t}");
+
+    // Escaping: anything outside letters, digits and "- _ ." becomes "_",
+    // so no space, "=" or non-ASCII byte (0xFF included) is ever sent.
+    let nasty = LinkStats {
+        modem: "A B=C\u{ff}D\r\n",
+        caller: "x y\u{1}",
+        ..radio_stats()
+    };
+    let t = payload_text(&nasty);
+    assert!(
+        t.starts_with("v=1 modem=A_B_C__D__ kind=radio caller=x_y_ tier=SF9 "),
+        "{t}"
+    );
+    assert!(t.bytes().all(|c| (0x20..0x7F).contains(&c)));
+
+    // Length cap: names are cut to 24 bytes, the whole payload to 160, and
+    // the frame is IAC SB 90 <payload> IAC SE with no stray 0xFF inside.
+    let long_name = "N".repeat(200);
+    let long = LinkStats {
+        modem: &long_name,
+        caller: &long_name,
+        ..big
+    };
+    let t = payload_text(&long);
+    assert!(t.len() <= LINK_PAYLOAD_MAX, "{} bytes", t.len());
+    assert!(t.contains(&format!("modem={} ", "N".repeat(24))), "{t}");
+    for s in [&long, &nasty, &big, &low] {
+        let f = frame_bytes(s);
+        let p = payload_text(s);
+        assert!(f.len() <= LINK_FRAME_MAX);
+        assert_eq!(&f[..3], [IAC, SB, OPT_LINK]);
+        assert_eq!(&f[f.len() - 2..], [IAC, SE]);
+        assert_eq!(&f[3..f.len() - 2], p.as_bytes());
+        assert!(!f[3..f.len() - 2].contains(&IAC), "IAC inside the payload");
+    }
+}
