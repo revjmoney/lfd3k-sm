@@ -26,6 +26,9 @@ pub const COLS: u8 = 80;
 pub const ROW_BUF: usize = 400;
 /// Every row is dirty.
 const ALL: u32 = (1u32 << ROWS) - 1;
+/// Room kept at the end of a row: one color change and a cell, then the
+/// erase or the attribute reset that ends a row.
+const TAIL: usize = 32;
 
 /// Sent once when the menu opens: reset colors, clear, home, hide cursor.
 pub const PROLOGUE: &[u8] = b"\x1b[0m\x1b[2J\x1b[H\x1b[?25l";
@@ -49,6 +52,9 @@ pub struct Row {
     pub limit: u8,
     /// Color last sent in this row, 0xFF before the first.
     cur: u8,
+    /// The buffer is nearly full: the rest of the row is clipped (a row
+    /// only ever ends on a cell boundary, never inside an escape).
+    full: bool,
 }
 
 impl Row {
@@ -60,6 +66,7 @@ impl Row {
             col: 0,
             limit: COLS,
             cur: 0xFF,
+            full: false,
         };
         row.raw(b"\x1b[");
         row.dec(u32::from(r) + 1);
@@ -122,6 +129,11 @@ impl Row {
     /// One cell (any byte 0x20 and up; CP437 above 0x7F). Control bytes
     /// become a space, cells past `limit` are dropped.
     pub fn cell(&mut self, a: u8, c: u8) -> &mut Self {
+        if self.full || self.n + TAIL > ROW_BUF {
+            // Clip here; every loop over `limit` then ends.
+            self.full = true;
+            self.limit = self.col;
+        }
         if self.col >= self.limit {
             return self;
         }
@@ -199,6 +211,11 @@ impl Row {
     /// written.
     pub fn finish(&mut self, a: u8, last: bool) {
         self.limit = COLS;
+        if self.full {
+            // Clipped: leave the terminal with plain attributes.
+            self.raw(b"\x1b[0m");
+            return;
+        }
         if last {
             self.pad_to(a, COLS - 1);
             self.set(a);

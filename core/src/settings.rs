@@ -1,14 +1,15 @@
-//! Saved settings: hotspot, client network, forwards, publish, S registers.
+//! Saved settings: hotspot, client network, forwards, publish, S registers,
+//! station name.
 //!
 //! Pure data, no I/O. The platform stores the blob (`to_blob`) and hands it
 //! back at boot (`from_blob`); a blob with any problem is refused whole.
 //!
-//! Blob v2 (little endian, fixed offsets, 900 bytes used of `BLOB_LEN`):
+//! Blob v3 (little endian, fixed offsets, 917 bytes used of `BLOB_LEN`):
 //!
 //! | offset | size | field |
 //! |-------:|-----:|-------|
 //! | 0 | 4 | magic `LFS1` |
-//! | 4 | 1 | version (2) |
+//! | 4 | 1 | version (3) |
 //! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password, bit4 S31 = 0 (compression off), bit5 S32 = 1 (boot to menu) |
 //! | 6 | 16 | S registers S0, S2, S7, S12, S20, S21, S22, S30 as u16 (S30 two's complement) |
 //! | 22 | 1 | published forward index, 0xFF none |
@@ -18,13 +19,16 @@
 //! | 153 | 64 | client password |
 //! | 217 | 680 | 8 forward records of 85 bytes |
 //! | 897 | 1 | beacon mode: 0 ON, 1 QUIET, 2 HIDDEN |
-//! | 898 | 2 | CRC-16/CCITT-FALSE of bytes 0..898 |
+//! | 898 | 17 | station name (AT+NAME): length byte 0 to 16, 16 bytes zero padded; length 0 = the firmware's default name |
+//! | 915 | 2 | CRC-16/CCITT-FALSE of bytes 0..915 |
 //!
-//! Blob v1 (phase 3) is the same up to byte 896 with version 1 and the CRC
-//! at 897 (899 bytes, no beacon byte). `from_blob` still loads it, with the
-//! beacon mode ON; `to_blob` always writes v2, so the first save after an
-//! upgrade migrates the stored copy. A v1 blob is accepted only at exactly
-//! 899 bytes and a v2 blob only at exactly 900.
+//! Blob v2 (phase 4 tasks 1 to 3) is the same up to byte 897 with version 2
+//! and the CRC at 898 (900 bytes, no name). Blob v1 (phase 3) is the same up
+//! to byte 896 with version 1 and the CRC at 897 (899 bytes, no beacon
+//! byte). `from_blob` still loads both (v1 with the beacon mode ON, both
+//! with no stored name); `to_blob` always writes v3, so the first save after
+//! an upgrade migrates the stored copy. A v1 blob is accepted only at
+//! exactly 899 bytes, v2 only at 900 and v3 only at 917.
 //!
 //! S31 (phase 4, compression) lives in flags bit 4, stored inverted: a clear
 //! bit is S31 = 1, the default. So the layout, the length and the version
@@ -36,13 +40,14 @@
 //! S32 (phase 4, boot to menu) lives in flags bit 5, stored as is (set means
 //! S32 = 1; the default 0 leaves the bit clear), by the same rule: layout,
 //! length and version unchanged, every older v2 blob loads with S32 = 0, a
-//! v1 blob with bit 5 set is refused.
+//! v1 blob with bit 5 set is refused. Bits 4 and 5 are valid in v2 and v3.
 //!
 //! Forward record: used (0 or 1), name length, name\[16\], host length,
 //! host\[63\], port u16, mode (0 telnet, 1 raw). An unused record is all zero.
 
 use crate::at::{SRegs, REG_LZ, REG_MENU};
-use crate::frame::valid_name;
+use crate::discovery::valid_station;
+use crate::frame::{valid_name, NAME_MAX};
 
 /// Forward slots.
 pub const MAX_FWD: usize = 8;
@@ -60,7 +65,8 @@ pub const PASS_MIN: usize = 8;
 pub const BLOB_LEN: usize = 1024;
 
 const MAGIC: [u8; 4] = *b"LFS1";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
+const VERSION_V2: u8 = 2;
 const VERSION_V1: u8 = 1;
 const NO_PUB: u8 = 0xFF;
 const NREGS: usize = 8;
@@ -69,7 +75,10 @@ const FWD_REC: usize = 85;
 const OFF_FWD_END: usize = 217 + MAX_FWD * FWD_REC;
 const OFF_CRC_V1: usize = OFF_FWD_END;
 const BLOB_USED_V1: usize = OFF_CRC_V1 + 2;
-const OFF_CRC: usize = OFF_FWD_END + 1;
+const OFF_CRC_V2: usize = OFF_FWD_END + 1;
+const BLOB_USED_V2: usize = OFF_CRC_V2 + 2;
+/// v3: the station name field after the beacon byte.
+const OFF_CRC: usize = OFF_CRC_V2 + 1 + NAME_MAX;
 const BLOB_USED: usize = OFF_CRC + 2;
 const FLAG_AP: u8 = 1;
 const FLAG_ECHO: u8 = 2;
@@ -305,6 +314,9 @@ pub struct Settings {
     pub show_ap_pass: bool,
     /// Discovery privacy mode (AT+BEACON).
     pub beacon: BeaconMode,
+    /// Station name set with AT+NAME; empty means the firmware's default.
+    name: [u8; NAME_MAX],
+    name_len: u8,
 }
 
 /// Passwords are never printed.
@@ -323,6 +335,7 @@ impl core::fmt::Debug for Settings {
             .field("verbose", &self.verbose)
             .field("show_ap_pass", &self.show_ap_pass)
             .field("beacon", &self.beacon)
+            .field("name", &self.name())
             .finish()
     }
 }
@@ -347,6 +360,8 @@ impl Settings {
         verbose: true,
         show_ap_pass: true,
         beacon: BeaconMode::On,
+        name: [0; NAME_MAX],
+        name_len: 0,
     };
 
     /// Hotspot on, SSID = `name`, password `ap_pass` (8 to 63 characters),
@@ -373,6 +388,8 @@ impl Settings {
             verbose: true,
             show_ap_pass: true,
             beacon: BeaconMode::On,
+            name: [0; NAME_MAX],
+            name_len: 0,
         };
         s.ap_ssid_len = fill_lossy(&mut s.ap_ssid, name);
         s.ap_pass_len = fill_lossy(&mut s.ap_pass, ap_pass);
@@ -495,6 +512,26 @@ impl Settings {
         self.fwd.get(i)?.as_ref()
     }
 
+    /// The station name set with AT+NAME; empty: the firmware's default.
+    pub fn name(&self) -> &str {
+        text(&self.name, self.name_len)
+    }
+
+    /// Set the station name (a valid station name, the rule `Config::new`
+    /// uses), or empty for the firmware's default; false (nothing changed)
+    /// if invalid. The hotspot SSID does not follow.
+    pub fn set_name(&mut self, n: &str) -> bool {
+        if !(n.is_empty() || valid_station(n)) {
+            return false;
+        }
+        let mut b = [0; NAME_MAX];
+        let Some(len) = fill(&mut b, n) else {
+            return false;
+        };
+        (self.name, self.name_len) = (b, len);
+        true
+    }
+
     /// Boot to menu (S32 = 1): the menu opens on the first host byte.
     pub fn boot_menu(&self) -> bool {
         self.sregs.get(REG_MENU) == Some(1)
@@ -514,6 +551,7 @@ impl Settings {
             && self.echo == o.echo
             && self.verbose == o.verbose
             && self.beacon == o.beacon
+            && self.name() == o.name()
     }
 
     /// Hotspot or client network settings differ from `o`.
@@ -571,17 +609,21 @@ impl Settings {
             }
         }
         w.put(&[self.beacon.code()]);
+        w.put(&[self.name_len]);
+        w.put(&self.name);
         let end = w.pos;
         let crc = crc16(w.out.get(..end).unwrap_or(&[]));
         w.put(&crc.to_le_bytes());
         w.pos
     }
 
-    /// Parse a blob (v2, or v1 migrated with the beacon mode ON); `None` on
+    /// Parse a blob (v3, or v2 or v1 migrated: no stored name, v1 with the
+    /// beacon mode ON); `None` on
     /// wrong magic, version, length, CRC or any field that fails validation.
     pub fn from_blob(b: &[u8]) -> Option<Settings> {
         let (version, off_crc) = match b.len() {
             BLOB_USED => (VERSION, OFF_CRC),
+            BLOB_USED_V2 => (VERSION_V2, OFF_CRC_V2),
             BLOB_USED_V1 => (VERSION_V1, OFF_CRC_V1),
             _ => return None,
         };
@@ -596,7 +638,7 @@ impl Settings {
         }
         let flags = r.u8()?;
         let mut known = FLAG_AP | FLAG_ECHO | FLAG_VERBOSE | FLAG_SHOW;
-        if version == VERSION {
+        if version >= VERSION_V2 {
             known |= FLAG_NO_LZ | FLAG_MENU;
         }
         if flags & !known != 0 {
@@ -646,11 +688,14 @@ impl Settings {
                 Some(i)
             }
         };
-        s.beacon = if version == VERSION {
+        s.beacon = if version >= VERSION_V2 {
             BeaconMode::from_code(r.u8()?)?
         } else {
             BeaconMode::On
         };
+        if version == VERSION {
+            (s.name, s.name_len) = r.field(|t| t.is_empty() || valid_station(t))?;
+        }
         Some(s)
     }
 }

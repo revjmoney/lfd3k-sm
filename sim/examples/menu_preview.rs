@@ -263,6 +263,60 @@ fn tail(out: &[u8]) -> String {
 
 /// Printed transcripts of the paths the snapshots do not show.
 fn checks() {
+    // AT+NAME: live at once, saved in the blob (v3), empty back to default.
+    let mut s = Sess::new(0);
+    let start = s.out.len();
+    for line in [
+        "AT+NAME?",
+        "AT+NAME=REV:J",
+        "AT+NAME=REVJ",
+        "AT+NAME?",
+        "AT&W",
+    ] {
+        s.typ(line.as_bytes());
+        s.typ(b"\r");
+    }
+    let mut blob = [0u8; lfd3k_core::BLOB_LEN];
+    let n = s.m.saved_settings().to_blob(&mut blob);
+    let back = Settings::from_blob(&blob[..n]).expect("blob");
+    s.typ(b"AT+NAME=\rAT+NAME?\r");
+    let text = String::from_utf8_lossy(&s.out[start..]).replace("\r\n", " | ");
+    println!("name: {text}");
+    println!(
+        "name blob: {n} bytes, stored {:?}; v2 blob of the same profile loads: {}",
+        back.name(),
+        Settings::from_blob(&{
+            let mut v2 = blob[..898].to_vec();
+            v2[4] = 2;
+            let mut crc: u16 = 0xFFFF;
+            for &b in &v2 {
+                crc ^= u16::from(b) << 8;
+                for _ in 0..8 {
+                    crc = if crc & 0x8000 != 0 {
+                        (crc << 1) ^ 0x1021
+                    } else {
+                        crc << 1
+                    };
+                }
+            }
+            v2.extend_from_slice(&crc.to_le_bytes());
+            v2
+        })
+        .is_some_and(|s| s.name().is_empty())
+    );
+    // Menu Settings row 0: the name box runs AT+NAME.
+    let mut s = Sess::new(0);
+    s.typ(b"AT+MENU\r");
+    for k in [b"s".as_slice(), ENTER, ENTER, b"\x7f\x7f\x7f\x7fBBS", ENTER] {
+        s.typ(k);
+    }
+    s.settle();
+    println!(
+        "menu name edit: live name {:?}, saved name {:?} (not saved yet)",
+        s.m.settings().name(),
+        s.m.saved_settings().name()
+    );
+
     // Boot to menu: S32=1 survives the blob; the first host bytes open the
     // menu and are dropped; ATZ does not open it.
     let mut s = Settings::defaults(NAME, "kq7Rmx2Lp9");

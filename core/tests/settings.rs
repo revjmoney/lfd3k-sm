@@ -109,7 +109,7 @@ const FWD_REC: usize = 85;
 #[test]
 fn settings_blob_rejects_garbage() {
     let good = blob_of(&sample());
-    assert_eq!(good.len(), 900);
+    assert_eq!(good.len(), 917);
     assert!(Settings::from_blob(&good).is_some());
 
     // Wrong lengths: nothing, short, long, a whole 1 KB NVS page.
@@ -137,7 +137,7 @@ fn settings_blob_rejects_garbage() {
 
     // A forged blob with a GOOD checksum but a wrong field is refused too.
     let mut b = good.clone();
-    b[4] = 3; // version
+    b[4] = 4; // version
     fix_crc(&mut b);
     assert!(Settings::from_blob(&b).is_none(), "old or new version");
     let mut b = good.clone();

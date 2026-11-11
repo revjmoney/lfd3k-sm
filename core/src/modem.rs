@@ -42,10 +42,11 @@
 use crate::at::{format_result, parse_line, AtCmd, ResultCode, SRegs, REG_TX_POWER};
 use crate::directory::{Directory, DIR_MAX};
 use crate::discovery::{
-    self, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, DISC_MAX, HEARD_WINDOW_MS,
-    SCAN_SEND_LIMIT_MS, SCAN_WINDOW_MS, SLOTS, SLOT_MS, SVC_ACCEPTS, SVC_FORWARD, SVC_HOTSPOT,
+    self, valid_station, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, DISC_MAX,
+    HEARD_WINDOW_MS, SCAN_SEND_LIMIT_MS, SCAN_WINDOW_MS, SLOTS, SLOT_MS, SVC_ACCEPTS, SVC_FORWARD,
+    SVC_HOTSPOT,
 };
-use crate::frame::{valid_name, FrameType, Header, HEADER_LEN, NAME_MAX};
+use crate::frame::{FrameType, Header, HEADER_LEN, NAME_MAX};
 use crate::link::{Event, Link, Role, State};
 use crate::menu::{self, render, Action, Menu, View};
 use crate::radio::{Radio, RxInfo};
@@ -96,19 +97,27 @@ impl Config {
     /// 1 to 16 printable ASCII characters (the same rule as a CallReq name),
     /// so a modem can never hold a name it could not dial or answer to.
     pub fn new(name: &str) -> Option<Config> {
-        if !valid_name(name) || name.contains(':') {
-            return None;
-        }
         let mut c = Config {
             name: [0; NAME_MAX],
             name_len: 0,
             sregs: SRegs::new(),
         };
-        let n = name.len();
-        let (d, s) = (c.name.get_mut(..n)?, name.as_bytes().get(..n)?);
-        d.copy_from_slice(s);
-        c.name_len = n as u8;
-        Some(c)
+        c.set_name(name).then_some(c)
+    }
+
+    /// Change the name; false (nothing changed) unless it is a valid
+    /// station name (`discovery::valid_station`, the one rule for names).
+    pub fn set_name(&mut self, name: &str) -> bool {
+        if !valid_station(name) {
+            return false;
+        }
+        let mut b = [0; NAME_MAX];
+        for (d, &c) in b.iter_mut().zip(name.as_bytes()) {
+            *d = c;
+        }
+        self.name = b;
+        self.name_len = name.len().min(NAME_MAX) as u8;
+        true
     }
 }
 
@@ -356,6 +365,10 @@ pub struct Modem {
     menu: Menu,
     /// S32 was set at boot: the first host byte opens the menu.
     boot_menu: bool,
+    /// The name the platform gave (`Config` at reset): used while no
+    /// AT+NAME name is set.
+    boot_name: [u8; NAME_MAX],
+    boot_len: u8,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -429,6 +442,8 @@ impl Modem {
             dial_len: 0,
             menu: Menu::new(),
             boot_menu: false,
+            boot_name: [0; NAME_MAX],
+            boot_len: 0,
         }
     }
 
@@ -440,6 +455,8 @@ impl Modem {
         self.set = Settings::defaults(name_of(&cfg), "");
         self.set.ap_on = false;
         self.saved.clone_from(&self.set);
+        self.boot_name = cfg.name;
+        self.boot_len = cfg.name_len;
         self.cfg = cfg;
         self.link = Link::new();
         self.mode = Mode::Command;
@@ -587,7 +604,29 @@ impl Modem {
         self.saved.clone_from(&s);
         self.boot_menu = s.boot_menu();
         self.set = s;
+        self.apply_name();
         self.wifi_changed = true;
+    }
+
+    /// Make the live name the AT+NAME one in the settings, or the platform's
+    /// when none is set. Our own name never stays in the directory.
+    fn apply_name(&mut self) {
+        let mut b = [0u8; NAME_MAX];
+        let n = self.set.name().len().min(NAME_MAX);
+        if n > 0 {
+            if let (Some(d), Some(s)) = (b.get_mut(..n), self.set.name().as_bytes().get(..n)) {
+                d.copy_from_slice(s);
+            }
+            if let Ok(t) = core::str::from_utf8(b.get(..n).unwrap_or(&[])) {
+                self.cfg.set_name(t);
+            }
+        } else {
+            self.cfg.name = self.boot_name;
+            self.cfg.name_len = self.boot_len;
+        }
+        if self.dir.remove(name_of(&self.cfg)) {
+            self.dir_dirty = true;
+        }
     }
 
     /// True while the generated hotspot password may be shown on the OLED:
@@ -1884,6 +1923,24 @@ impl Modem {
                 self.dir.clear_unpinned();
                 self.result(ResultCode::Ok);
             }
+            AtCmd::NameQuery => {
+                let mut t = Txt::new();
+                t.put(b"NAME ").put(name_of(&self.cfg).as_bytes());
+                self.info(t.bytes());
+                self.result(ResultCode::Ok);
+            }
+            AtCmd::Name(n) => {
+                // Only with no call at all (a call never changes identity),
+                // never during call setup or a Wi-Fi call or bridge.
+                let ok = self.mode == Mode::Command
+                    && self.air_idle()
+                    && !self.wire.close
+                    && self.set.set_name(n);
+                if ok {
+                    self.apply_name();
+                }
+                self.ok_or_error(ok);
+            }
             AtCmd::Menu => {
                 // Not while a call is being set up (dialing, training, a
                 // Wi-Fi dial): idle, ringing, or a call up in online
@@ -1916,8 +1973,19 @@ impl Modem {
         self.echo = self.saved.echo;
         self.verbose = self.saved.verbose;
         let shown = self.set.show_ap_pass && self.saved.show_ap_pass;
+        // A call never changes identity: during one the name stays.
+        let mut keep = [0u8; NAME_MAX];
+        let n = self.set.name().len().min(NAME_MAX);
+        if let (Some(d), Some(s)) = (keep.get_mut(..n), self.set.name().as_bytes().get(..n)) {
+            d.copy_from_slice(s);
+        }
         self.set.clone_from(&self.saved);
         self.set.show_ap_pass = shown;
+        if self.air_idle() {
+            self.apply_name();
+        } else if let Ok(t) = core::str::from_utf8(keep.get(..n).unwrap_or(&[])) {
+            self.set.set_name(t);
+        }
     }
 
     /// Start an AT+SCAN: only with no call at all, never in HIDDEN (a
@@ -2383,8 +2451,12 @@ impl Modem {
             }
             Action::SaveLeave => {
                 self.menu.ui.set_line(b"AT&W");
-                self.menu_run(radio, now);
-                self.menu_close(true);
+                if self.menu_run(radio, now) {
+                    self.menu_close(true);
+                } else {
+                    // Not saved: stay, and say so.
+                    self.menu.ui.ran(false);
+                }
             }
             Action::Dial(slot) => {
                 // Exactly ATDT <name>, after leaving the menu.

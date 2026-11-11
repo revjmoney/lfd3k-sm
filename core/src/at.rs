@@ -88,6 +88,11 @@ pub enum AtCmd<'a> {
     DirClear,
     /// `AT+MENU`: open the full-screen setup menu.
     Menu,
+    /// `AT+NAME?`
+    NameQuery,
+    /// `AT+NAME=<name>`: the station name (trimmed, a valid station name);
+    /// `AT+NAME=` (empty) goes back to the firmware's default name.
+    Name(&'a str),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -166,7 +171,7 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+SCAN`, `+MENU`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
+/// `+FB`, `+SCAN`, `+MENU`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
 /// `+BEACON`, `+DIR` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
@@ -191,7 +196,7 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         return Err(AtError::BadArg);
     }
     let known = [
-        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR",
+        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR", "NAME",
     ];
     if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
         return Err(AtError::Unknown);
@@ -223,6 +228,14 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         }
     } else if name.eq_ignore_ascii_case("DIR") {
         parse_dir(form)
+    } else if name.eq_ignore_ascii_case("NAME") {
+        match form {
+            Form::Query => Ok(AtCmd::NameQuery),
+            Form::Set(v) if v.trim().is_empty() || valid_station(v.trim()) => {
+                Ok(AtCmd::Name(v.trim()))
+            }
+            Form::Set(_) => Err(AtError::BadArg),
+        }
     } else {
         parse_pub(form)
     }

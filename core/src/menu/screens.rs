@@ -79,7 +79,7 @@ pub fn row(r: u8, ui: &Ui, v: &View) -> Row {
                 .str(HEAD, screen_name(ui.screen))
                 .str(HEAD, " ");
             w.cell(BORDER, 0xC6);
-            while w.col() < COLS - 1 {
+            while w.col() < (COLS - 1).min(w.limit) {
                 w.cell(BORDER, 0xCD);
             }
             w.cell(BORDER, 0xBB);
@@ -436,7 +436,14 @@ fn settings_body(w: &mut Row, i: u8, ui: &Ui, v: &View) {
         w.pad_to(l, AT);
         match k {
             0 => {
-                w.str(a, v.name).str(d, "  set by the firmware");
+                w.str(a, v.name).str(
+                    d,
+                    if v.set.name().is_empty() {
+                        "  the firmware default"
+                    } else {
+                        "  set with AT+NAME"
+                    },
+                );
             }
             1 => {
                 w.str(a, v.set.beacon.name()).str(
@@ -749,7 +756,7 @@ fn overlay(w: &mut Row, i: u8, ui: &Ui) {
             (0xC0, 0xD9)
         };
         w.cell(BOX, l);
-        while w.col() < BOX_R {
+        while w.col() < BOX_R.min(w.limit) {
             w.cell(BOX, 0xC4);
         }
         w.cell(BOX, r);
@@ -912,16 +919,7 @@ fn status(w: &mut Row, v: &View) {
         }
     }
     sep(w);
-    if v.wifi.is_empty() {
-        w.str(STATUS, "WIFI OFF");
-    } else {
-        let ip = wifi_ip(v.wifi);
-        if ip != b"NO IP" {
-            w.str(STATUS, "IP ");
-        }
-        w.text(STATUS, ip);
-    }
-    w.cell(STATUS, b' ');
+    // Flags before the Wi-Fi address, so a long address is what gets cut.
     if v.ringing {
         w.str(STATUS_HOT, " RING ").cell(STATUS, b' ');
     }
@@ -931,7 +929,19 @@ fn status(w: &mut Row, v: &View) {
         w.cell(STATUS, b' ');
     }
     if v.unsaved {
-        w.str(STATUS_WARN, "UNSAVED");
+        w.str(STATUS_WARN, "UNSAVED").cell(STATUS, b' ');
+    }
+    if v.ringing || v.scanning || v.unsaved {
+        w.cell(STATUS, 0xB3).cell(STATUS, b' ');
+    }
+    if v.wifi.is_empty() {
+        w.str(STATUS, "WIFI OFF");
+    } else {
+        let ip = wifi_ip(v.wifi);
+        if ip != b"NO IP" {
+            w.str(STATUS, "IP ");
+        }
+        w.text(STATUS, ip);
     }
     w.finish(STATUS, true);
 }

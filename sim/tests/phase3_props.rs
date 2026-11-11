@@ -253,7 +253,7 @@ proptest! {
     #[test]
     fn settings_blob_roundtrip(s in settings()) {
         let blob = blob_of(&s);
-        prop_assert_eq!(blob.len(), 900);
+        prop_assert_eq!(blob.len(), 917);
         let back = Settings::from_blob(&blob);
         prop_assert_eq!(back.as_ref(), Some(&s));
         prop_assert_eq!(blob_of(back.as_ref().unwrap()), blob);

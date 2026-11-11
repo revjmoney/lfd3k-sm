@@ -155,8 +155,9 @@ impl Decoder {
                     self.st = Dec::Ground;
                     out.push_opt(arrow(b));
                 }
-                0x20..=0x3F if n < 16 => self.st = Dec::Csi(n + 1),
-                0x20..=0x3F => self.st = Dec::Ground,
+                // Parameters and intermediates: swallowed however many
+                // come (the count only saturates) until the final byte.
+                0x20..=0x3F => self.st = Dec::Csi(n.saturating_add(1).min(16)),
                 _ => {
                     self.st = Dec::Ground;
                     let k = self.ground(b, now);
@@ -165,7 +166,13 @@ impl Decoder {
             },
             Dec::Ss3 => {
                 self.st = Dec::Ground;
-                out.push_opt(arrow(b));
+                if (0x40..=0x7E).contains(&b) {
+                    out.push_opt(arrow(b));
+                } else {
+                    // Not an SS3 final (ESC, CR, ...): an ordinary byte.
+                    let k = self.ground(b, now);
+                    out.push_opt(k);
+                }
             }
         }
         out.k
@@ -248,6 +255,8 @@ pub enum Screen {
 /// A field being typed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
+    /// This station's name (`AT+NAME=<name>`; empty: the default).
+    Name,
     /// A station name to pin (`AT+DIR=+NAME`).
     DirAdd,
     /// A new value for S register n (`ATSn=v`).
@@ -271,6 +280,7 @@ impl Step {
     /// Prompt, longest text, masked.
     pub fn info(self) -> (&'static str, u8, bool) {
         match self {
+            Step::Name => ("Station name, empty for the default", 16, false),
             Step::DirAdd => ("Name to pin", 16, false),
             Step::Sreg(_) => ("New value", 5, false),
             Step::ApSsid => ("Hotspot name", 32, false),
@@ -337,6 +347,7 @@ pub fn allowed(cmd: &AtCmd<'_>) -> bool {
             | AtCmd::DirPin(_)
             | AtCmd::DirRemove(_)
             | AtCmd::Save
+            | AtCmd::Name(_)
     )
 }
 
@@ -792,7 +803,9 @@ impl Ui {
         let reg = |n: u8| i32::from(v.set.sregs.get(n).unwrap_or(0) as i16);
         match self.sel {
             0 => {
-                self.say(false, "The station name is set by the firmware.");
+                if step == 0 {
+                    self.begin(Step::Name, v.name.as_bytes());
+                }
                 Action::None
             }
             1 => {
@@ -982,6 +995,16 @@ impl Ui {
             Action::None
         };
         match step {
+            Step::Name => {
+                if !(text.is_empty() || valid_station(text)) {
+                    self.say(true, "A name is 1 to 16 printable characters, no colon.");
+                    return Action::None;
+                }
+                self.end_edit();
+                self.set_line(b"AT+NAME=");
+                self.add(text.as_bytes());
+                self.run(Ran::Setting)
+            }
             Step::DirAdd => {
                 if !valid_station(text) {
                     self.say(true, "A name is 1 to 16 printable characters, no colon.");

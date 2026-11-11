@@ -810,7 +810,7 @@ fn settings_load_save_roundtrip_c_abi() {
     unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
     let first = take_save().expect("defaults ask for a save");
     assert!(take_save().is_none(), "once");
-    assert_eq!(first.len(), 900);
+    assert_eq!(first.len(), 917);
     assert!(lfd3k_take_wifi_changed());
     let c = wifi_cfg();
     assert_eq!((c.ap_on, c.sta_set), (1, 0));
@@ -842,7 +842,7 @@ fn settings_load_save_roundtrip_c_abi() {
     assert!(!unsafe { lfd3k_take_save(ptr::null_mut(), 1024, &mut len) });
     assert!(!unsafe { lfd3k_take_save(small.as_mut_ptr(), 1024, ptr::null_mut()) });
     let blob = take_save().expect("the kept request");
-    assert_eq!(blob.len(), 900);
+    assert_eq!(blob.len(), 917);
     assert!(!lfd3k_show_ap_pass(), "saved once with a client network");
 
     // Power cycle: init, load the blob, and it all comes back.
