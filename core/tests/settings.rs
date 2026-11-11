@@ -2,6 +2,7 @@
 //! publish AT commands, through the public API of the core (a `Modem` on a
 //! radio that hears nothing).
 
+use lfd3k_core::settings::BeaconMode;
 use lfd3k_core::settings::{parse_hostport, valid_fwd_name, BLOB_LEN};
 use lfd3k_core::{Config, Forward, Modem, Radio, SRegs, Settings, Tier, WireMode, MAX_FWD};
 
@@ -109,7 +110,7 @@ const FWD_REC: usize = 85;
 #[test]
 fn settings_blob_rejects_garbage() {
     let good = blob_of(&sample());
-    assert_eq!(good.len(), 899);
+    assert_eq!(good.len(), 917);
     assert!(Settings::from_blob(&good).is_some());
 
     // Wrong lengths: nothing, short, long, a whole 1 KB NVS page.
@@ -137,7 +138,7 @@ fn settings_blob_rejects_garbage() {
 
     // A forged blob with a GOOD checksum but a wrong field is refused too.
     let mut b = good.clone();
-    b[4] = 2; // version
+    b[4] = 4; // version
     fix_crc(&mut b);
     assert!(Settings::from_blob(&b).is_none(), "old or new version");
     let mut b = good.clone();
@@ -795,4 +796,216 @@ fn atv_lines_stack_free_and_simnet() {
         error(&mut m, bad);
     }
     assert_eq!(m.take_simnet_request(), None);
+}
+
+/// A v1 blob (899 bytes) or v2 blob (900 bytes) of `s`, built by cutting a v3
+/// blob back to the layout the older firmware wrote: the same body up to the
+/// forwards, the v2 beacon byte only for v2, the old version number and a
+/// fresh checksum.
+fn old_blob(s: &Settings, version: u8) -> Vec<u8> {
+    let v3 = blob_of(s);
+    let body = match version {
+        1 => 897,
+        2 => 898,
+        _ => unreachable!(),
+    };
+    let mut b = v3[..body].to_vec();
+    b[4] = version;
+    b.extend_from_slice(&[0, 0]);
+    fix_crc(&mut b);
+    b
+}
+
+/// A v1 blob (899 bytes) written by main's own `to_blob` (phase 3, commit
+/// 5403ba1) for the sample profile below, kept as bytes so the migration test
+/// does not depend on this branch's encoder.
+const GOLDEN_V1_HEX: [&str; 19] = [
+    "4c465331010900002b002d0032001400070014000200000e415849534d4f44454d2d3132333400000000000000000000",
+    "00000000000000000c686f7473706f747077323334000000000000000000000000000000000000000000000000000000",
+    "00000000000000000000000000000000000000000000000007486f6d654e657400000000000000000000000000000000",
+    "000000000000000000125265762d486f6d652d5365637265742d39390000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000104415849530000000000000000000000000d3139322e",
+    "3136382e312e313634000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000017000001046563686f0000000000000000000000000831302e302e302e3900000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "581b01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000000000000000000000000000000000000000000000d7ad",
+];
+
+fn golden_v1() -> Vec<u8> {
+    let hex: String = GOLDEN_V1_HEX.concat();
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn golden_v1_blob_from_main_loads() {
+    let v1 = golden_v1();
+    assert_eq!(v1.len(), 899);
+    assert_eq!(v1[4], 1);
+    let back = Settings::from_blob(&v1).expect("main's v1 blob loads");
+    let mut want = sample();
+    want.sregs.set(31, 1);
+    assert_eq!(back, want);
+    assert_eq!(back.beacon, BeaconMode::On);
+    assert_eq!(back.name(), "");
+    assert_eq!(back.sta_ssid(), "HomeNet");
+}
+
+#[test]
+fn settings_blob_v1_migrates_to_v2() {
+    // What phase 1 to 3 firmware saved: no beacon mode, no menu or
+    // compression flags, no name. It must still load after the update, with
+    // the new settings at their defaults (beacons ON, compression ON, boot to
+    // menu off, the platform's name).
+    let mut s = sample();
+    s.sregs.set(31, 1);
+    let v1 = old_blob(&s, 1);
+    assert_eq!(v1.len(), 899);
+    let back = Settings::from_blob(&v1).expect("a v1 blob still loads");
+    assert_eq!(back.beacon, BeaconMode::On);
+    assert_eq!(back.name(), "");
+    assert_eq!(back.sregs.get(31), Some(1));
+    assert_eq!(back.sregs.get(32), Some(0));
+    assert_eq!(back, s, "everything else is carried over unchanged");
+    // A v1 blob never had a beacon mode: a forged one with a v2 flag is bad.
+    let mut flags = v1.clone();
+    flags[5] |= 16;
+    fix_crc(&mut flags);
+    assert!(
+        Settings::from_blob(&flags).is_none(),
+        "NO_LZ is not a v1 flag"
+    );
+    flags[5] = v1[5] | 32;
+    fix_crc(&mut flags);
+    assert!(
+        Settings::from_blob(&flags).is_none(),
+        "MENU is not a v1 flag"
+    );
+    // The checksum still counts.
+    for i in [0, 5, 100, 500, 897, 898] {
+        let mut b = v1.clone();
+        b[i] ^= 1;
+        assert!(Settings::from_blob(&b).is_none(), "byte {i}");
+    }
+}
+
+#[test]
+fn settings_blob_v1_v2_migrate_to_v3() {
+    let mut s = sample();
+    s.beacon = BeaconMode::Hidden;
+    s.sregs.set(31, 0);
+    s.sregs.set(32, 1);
+    assert!(s.set_name("REVJ"));
+    let v3 = blob_of(&s);
+    assert_eq!(v3.len(), 917);
+    assert_eq!(v3[4], 3);
+    // v2: keeps the beacon mode, the compression and menu flags; no name.
+    let v2 = old_blob(&s, 2);
+    assert_eq!(v2.len(), 900);
+    let b2 = Settings::from_blob(&v2).expect("a v2 blob loads");
+    assert_eq!(b2.beacon, BeaconMode::Hidden);
+    assert_eq!(b2.sregs.get(31), Some(0));
+    assert_eq!(b2.sregs.get(32), Some(1));
+    assert_eq!(b2.name(), "");
+    assert!(b2.boot_menu());
+    // v1 cannot carry compression off or the menu flag, so it is refused
+    // when forged with them, and the plain profile migrates.
+    let mut plain = sample();
+    plain.sregs.set(31, 1);
+    let b1 = Settings::from_blob(&old_blob(&plain, 1)).expect("v1 loads");
+    // Saving a migrated profile writes v3, and v3 loads back the same.
+    for (old, same_as) in [(b2, "v2"), (b1, "v1")] {
+        let again = blob_of(&old);
+        assert_eq!(again.len(), 917, "{same_as}");
+        assert_eq!(again[4], 3, "{same_as}");
+        assert_eq!(Settings::from_blob(&again), Some(old), "{same_as}");
+    }
+    // The v3 blob carries the name, which survives.
+    let b3 = Settings::from_blob(&v3).expect("v3");
+    assert_eq!(b3.name(), "REVJ");
+    assert_eq!(b3, s);
+    // Wrong lengths between versions are refused, not guessed.
+    assert!(Settings::from_blob(&v3[..v3.len() - 1]).is_none());
+    assert!(Settings::from_blob(&v2[..v2.len() - 1]).is_none());
+    let mut padded = v2.clone();
+    padded.push(0);
+    assert!(Settings::from_blob(&padded).is_none());
+    // A v3 blob with a bad name is refused, even with a good checksum.
+    for bad in [b':', 0x07] {
+        let mut b = v3.clone();
+        b[899] = bad;
+        fix_crc(&mut b);
+        assert!(Settings::from_blob(&b).is_none(), "name byte {bad:#x}");
+    }
+    // A v3 blob that claims a name longer than 16 is refused.
+    let mut b = v3.clone();
+    b[898] = 17;
+    fix_crc(&mut b);
+    assert!(Settings::from_blob(&b).is_none());
+}
+
+#[test]
+fn at_name_roundtrip_and_blob_v3() {
+    let mut m = modem();
+    assert_eq!(
+        run(&mut m, "AT+NAME?", 0),
+        "\r\nNAME AXISMODEM-1234\r\n\r\nOK\r\n"
+    );
+    // Set: live at once, the hotspot name is not touched.
+    let ssid_before = m.settings().ap_ssid().to_string();
+    ok(&mut m, "AT+NAME=REVJ");
+    assert_eq!(run(&mut m, "AT+NAME?", 0), "\r\nNAME REVJ\r\n\r\nOK\r\n");
+    assert_eq!(m.station_name(), "REVJ");
+    assert_eq!(m.settings().ap_ssid(), ssid_before);
+    // The rules of a station name: 1 to 16 printable characters, no colon.
+    error(&mut m, "AT+NAME=REV:J");
+    error(&mut m, "AT+NAME=ABCDEFGHIJKLMNOPQ");
+    assert_eq!(m.station_name(), "REVJ", "a refused name changes nothing");
+    ok(&mut m, "AT+NAME=ABCDEFGHIJKLMNOP");
+    assert_eq!(m.station_name(), "ABCDEFGHIJKLMNOP");
+    ok(&mut m, "AT+NAME=REVJ");
+    // Not saved until AT&W; then a v3 blob holds it.
+    assert_eq!(m.saved_settings().name(), "");
+    ok(&mut m, "AT&W");
+    assert!(m.take_save_request());
+    assert_eq!(m.saved_settings().name(), "REVJ");
+    let blob = blob_of(m.saved_settings());
+    assert_eq!(blob.len(), 917);
+    assert_eq!(blob[4], 3);
+    // A fresh modem that boots with the blob answers to the stored name.
+    let mut m2 = Modem::new(Config::new("AXISMODEM-1234").unwrap());
+    m2.load_settings(Settings::from_blob(&blob).expect("v3 loads"));
+    assert_eq!(m2.station_name(), "REVJ");
+    run(&mut m2, "ATE0", 0);
+    assert_eq!(run(&mut m2, "AT+NAME?", 0), "\r\nNAME REVJ\r\n\r\nOK\r\n");
+    // Empty goes back to the platform's name, and that is saved as empty.
+    ok(&mut m2, "AT+NAME=");
+    assert_eq!(m2.station_name(), "AXISMODEM-1234");
+    ok(&mut m2, "AT&W");
+    assert_eq!(m2.saved_settings().name(), "");
+    // ATZ returns to the saved name (a name typed since is dropped).
+    ok(&mut m2, "AT+NAME=OTHER");
+    ok(&mut m2, "ATZ");
+    assert_eq!(m2.station_name(), "AXISMODEM-1234");
+    // A heard station of that name leaves the directory when we take it.
+    let mut m3 = modem();
+    ok(&mut m3, "AT+DIR=+TAKEN");
+    ok(&mut m3, "AT+NAME=TAKEN");
+    assert!(m3.directory().get("TAKEN").is_none());
+    // The name is part of the profile: it counts as an unsaved change.
+    let mut m4 = modem();
+    ok(&mut m4, "AT+NAME=NEWNAME");
+    assert!(!m4.settings().same_profile(m4.saved_settings()));
 }

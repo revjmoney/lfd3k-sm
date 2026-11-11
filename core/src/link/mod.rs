@@ -15,9 +15,23 @@
 //! Radio contract assumed: `busy()` is true from the start of an inbound
 //! frame and during TX; after TX the core calls `listen` again (never while
 //! busy) before expecting to hear anything.
+//!
+//! Compression (see `lz.rs`): the caller appends a capability byte to its
+//! CallReq when its own S31 is 1. The answerer agrees when its own S31 is 1
+//! too, and then says so with CAP_LZ on its CallAck and as a 4th Train byte;
+//! the caller reads the answer from the Train (the frame it cannot connect
+//! without), so both ends always agree. At CONNECT the call uses LZ when we
+//! offered and the peer said yes. It sits between ARQ
+//! and the air: ArqTx keeps chunks plain (sequence numbers, the window and
+//! CHUNK all count host bytes), and a Data frame is compressed when it is
+//! built from a staged chunk, so a resend compresses the same chunk again
+//! to the same bytes. A received Data frame with `FLAG_LZ` is decompressed
+//! before ArqRx sees it; one that fails to decompress is dropped unacked,
+//! so the sender resends it. Receiving does not depend on the agreement:
+//! any `FLAG_LZ` frame is decoded (a peer only sends one after we offered).
 
 use crate::arq::{ArqRx, ArqTx, CHUNK};
-use crate::at::SRegs;
+use crate::at::{SRegs, REG_LZ};
 use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
@@ -109,6 +123,15 @@ fn since(now: u32, t: u32) -> u32 {
     now.wrapping_sub(t)
 }
 
+/// One xorshift32 step (13, 17, 5). A nonzero state never reaches zero.
+/// Shared by the link's retry jitter and the discovery scheduler.
+pub(crate) fn xorshift32(mut x: u32) -> u32 {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    x
+}
+
 fn air_ms(t: Tier, len: usize) -> u32 {
     (t.airtime_us(len) / 1000).saturating_add(1)
 }
@@ -151,6 +174,11 @@ fn reg(s: &SRegs, n: u8, d: u16) -> u32 {
 
 fn cap_tier(s: &SRegs) -> Tier {
     Tier::from_index(reg(s, 21, 7).min(7) as u8).unwrap_or(Tier::Sf5)
+}
+
+/// S31 = 1: offer compression on this call.
+fn lz_wanted(s: &SRegs) -> bool {
+    reg(s, REG_LZ, 1) == 1
 }
 
 pub struct Link {
@@ -219,6 +247,20 @@ pub struct Link {
     /// The modem is busy with a Wi-Fi call: an incoming CallReq is
     /// rejected (the caller sees BUSY) even while the link is idle.
     engaged: bool,
+    /// We offered compression on this call (own S31 at dial or answer).
+    lz_mine: bool,
+    /// The peer offered compression (CallReq or CallAck capability byte).
+    lz_peer: bool,
+    /// Both offered: Data frames go out compressed when that saves enough.
+    /// Kept after the call ends, for AT&V.
+    lz: bool,
+    /// Data payload bytes of this (or the last) call, both directions:
+    /// host bytes before compression and bytes on the air.
+    lz_raw: u32,
+    lz_air: u32,
+    /// Call data bytes the host side moved: taken by `push_data` plus
+    /// handed out by `read_data`. Wraps; never reset (the menu's throughput).
+    moved: u32,
 }
 
 impl Default for Link {
@@ -285,7 +327,44 @@ impl Link {
             ev_head: 0,
             ev_len: 0,
             engaged: false,
+            lz_mine: false,
+            lz_peer: false,
+            lz: false,
+            lz_raw: 0,
+            lz_air: 0,
+            moved: 0,
         }
+    }
+
+    /// Compression is on for the current (or last) call.
+    pub fn lz(&self) -> bool {
+        self.lz
+    }
+
+    /// Host payload bytes over air payload bytes for the current (or last)
+    /// call, both directions summed, times 10 and rounded; 10 when nothing
+    /// was sent.
+    pub fn lz_ratio_x10(&self) -> u32 {
+        if self.lz_air == 0 {
+            return 10;
+        }
+        let r = (u64::from(self.lz_raw) * 10 + u64::from(self.lz_air) / 2) / u64::from(self.lz_air);
+        u32::try_from(r).unwrap_or(u32::MAX)
+    }
+
+    /// Call data bytes moved between the host side and the link, both
+    /// directions (taken by `push_data`, handed out by `read_data`): resends
+    /// and data still waiting in the link do not count. A wrapping counter;
+    /// the menu's throughput is its difference over a second.
+    pub fn data_bytes(&self) -> u32 {
+        self.moved
+    }
+
+    /// Count one Data payload for the ratio.
+    fn lz_count(&mut self, raw: usize, air: usize) {
+        let (raw, air) = (raw as u32, air as u32);
+        self.lz_raw = self.lz_raw.saturating_add(raw);
+        self.lz_air = self.lz_air.saturating_add(air);
     }
 
     /// While true, an idle link answers every CallReq with CallReject.
@@ -321,6 +400,24 @@ impl Link {
 
     pub fn is_idle(&self) -> bool {
         self.state == State::Idle
+    }
+
+    /// Call id of the current call or call attempt (0 while idle).
+    pub fn call_id(&self) -> u8 {
+        self.call_id
+    }
+
+    /// Queue one discovery frame (Beacon, ScanReq, ScanResp, already
+    /// encoded, call id 0) on SF12. Taken only while the link is idle with
+    /// nothing else queued, so it never delays a Hangup or CallReject and
+    /// never goes out during a call; the next pump sends it and listens
+    /// again afterwards. False when refused.
+    pub fn send_discovery(&mut self, frame: &[u8]) -> bool {
+        if self.state != State::Idle || self.q_len > 0 || frame.len() > QBUF {
+            return false;
+        }
+        self.enq_raw(Tier::ROBUST, frame);
+        self.q_len > 0
     }
 
     /// Current tier while a call is up or training.
@@ -360,16 +457,20 @@ impl Link {
 
     /// Queue host bytes for the peer; returns bytes accepted.
     pub fn push_data(&mut self, data: &[u8]) -> usize {
-        if self.is_connected() {
+        let n = if self.is_connected() {
             self.tx.push(data)
         } else {
             0
-        }
+        };
+        self.moved = self.moved.wrapping_add(n as u32);
+        n
     }
 
     /// Received in-order bytes.
     pub fn read_data(&mut self, out: &mut [u8]) -> usize {
-        self.rx.read(out)
+        let n = self.rx.read(out);
+        self.moved = self.moved.wrapping_add(n as u32);
+        n
     }
 
     fn listen_tier(&self) -> Tier {
@@ -456,10 +557,7 @@ impl Link {
     /// Deterministic jitter in 0..=max ms. The seed mixes call id and role,
     /// so the two ends of a call never draw the same sequence.
     fn jitter(&mut self, max: u32) -> u32 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
+        let x = xorshift32(self.rng);
         self.rng = x;
         x % max.saturating_add(1)
     }
@@ -480,6 +578,11 @@ impl Link {
         self.rng = (u32::from(self.call_id).wrapping_mul(0x0101_0101) ^ mix) | 1;
         self.tx.reset();
         self.rx.reset();
+        self.lz_mine = false;
+        self.lz_peer = false;
+        self.lz = false;
+        self.lz_raw = 0;
+        self.lz_air = 0;
         self.staged = None;
         self.pending = None;
         self.ack_owed = false;
@@ -535,9 +638,12 @@ impl Link {
                 FrameType::CallReject => self.fail(Event::Busy, false),
                 FrameType::Train => {
                     let peer_snr = match f.payload {
-                        [_, a, b] => i16::from_le_bytes([*a, *b]),
+                        [_, a, b] | [_, a, b, _] => i16::from_le_bytes([*a, *b]),
                         _ => return,
                     };
+                    // The caller cannot connect without a Train, so its 4th
+                    // byte is the one place the agreed LZ answer is read.
+                    self.lz_peer = frame::parse_train_caps(f.payload) & frame::CAP_LZ != 0;
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
                     self.own_cap = cap_tier(sregs);
                     self.cap = self.own_cap.min(peer_cap);

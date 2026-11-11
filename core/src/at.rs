@@ -3,8 +3,10 @@
 //! One command per line in v0.1. Parsing is case-insensitive, tolerates
 //! surrounding whitespace, and never panics.
 
+use crate::discovery::valid_station;
 use crate::settings::{
-    parse_hostport, parse_port, valid_fwd_name, valid_host, valid_pass, valid_ssid, WireMode,
+    parse_hostport, parse_port, valid_fwd_name, valid_host, valid_pass, valid_ssid, BeaconMode,
+    WireMode,
 };
 use crate::tier::Tier;
 
@@ -70,6 +72,27 @@ pub enum AtCmd<'a> {
     SimNetQuery,
     /// `AT+SIMNET=<a.b.c.d>` (Some) or `AT+SIMNET=0` (None).
     SimNet(Option<[u8; 4]>),
+    /// `AT+BEACON?`
+    BeaconQuery,
+    /// `AT+BEACON=ON|QUIET|HIDDEN`
+    Beacon(BeaconMode),
+    /// `AT+SCAN`
+    Scan,
+    /// `AT+DIR?`
+    DirList,
+    /// `AT+DIR=+<name>`: add or pin.
+    DirPin(&'a str),
+    /// `AT+DIR=-<name>`: remove.
+    DirRemove(&'a str),
+    /// `AT+DIR=0`: remove every unpinned entry.
+    DirClear,
+    /// `AT+MENU`: open the full-screen setup menu.
+    Menu,
+    /// `AT+NAME?`
+    NameQuery,
+    /// `AT+NAME=<name>`: the station name (trimmed, a valid station name);
+    /// `AT+NAME=` (empty) goes back to the firmware's default name.
+    Name(&'a str),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -148,8 +171,8 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET` (`arg` is
-/// after the `+`).
+/// `+FB`, `+SCAN`, `+MENU`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FWD`, `+PUB`, `+SIMNET`,
+/// `+BEACON`, `+DIR` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
 /// one, nor may a password). SSID and password are taken as typed (inner
@@ -159,13 +182,22 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
     let Some(i) = arg.find(['=', '?']) else {
         return if arg.eq_ignore_ascii_case("FB") {
             Ok(AtCmd::FrameBuffer)
+        } else if arg.eq_ignore_ascii_case("SCAN") {
+            Ok(AtCmd::Scan)
+        } else if arg.eq_ignore_ascii_case("MENU") {
+            Ok(AtCmd::Menu)
         } else {
             Err(AtError::Unknown)
         };
     };
     let name = arg.get(..i).ok_or(AtError::Unknown)?.trim_end();
     let rest = arg.get(i..).ok_or(AtError::Unknown)?;
-    let known = ["WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET"];
+    if name.eq_ignore_ascii_case("SCAN") || name.eq_ignore_ascii_case("MENU") {
+        return Err(AtError::BadArg);
+    }
+    let known = [
+        "WAP", "WSTA", "WIFI", "FWD", "PUB", "SIMNET", "BEACON", "DIR", "NAME",
+    ];
     if !known.iter().any(|k| name.eq_ignore_ascii_case(k)) {
         return Err(AtError::Unknown);
     }
@@ -187,9 +219,53 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
         parse_fwd(form)
     } else if name.eq_ignore_ascii_case("SIMNET") {
         parse_simnet(form)
+    } else if name.eq_ignore_ascii_case("BEACON") {
+        match form {
+            Form::Query => Ok(AtCmd::BeaconQuery),
+            Form::Set(v) => BeaconMode::parse(v.trim())
+                .map(AtCmd::Beacon)
+                .ok_or(AtError::BadArg),
+        }
+    } else if name.eq_ignore_ascii_case("DIR") {
+        parse_dir(form)
+    } else if name.eq_ignore_ascii_case("NAME") {
+        match form {
+            Form::Query => Ok(AtCmd::NameQuery),
+            Form::Set(v) if v.trim().is_empty() || valid_station(v.trim()) => {
+                Ok(AtCmd::Name(v.trim()))
+            }
+            Form::Set(_) => Err(AtError::BadArg),
+        }
     } else {
         parse_pub(form)
     }
+}
+
+/// `AT+DIR?`, `AT+DIR=0`, `AT+DIR=+<name>`, `AT+DIR=-<name>` (the name is
+/// trimmed and must be a valid station name).
+fn parse_dir(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
+    let v = match form {
+        Form::Query => return Ok(AtCmd::DirList),
+        Form::Set(v) => v.trim(),
+    };
+    if v == "0" {
+        return Ok(AtCmd::DirClear);
+    }
+    let (pin, name) = if let Some(n) = v.strip_prefix('+') {
+        (true, n.trim())
+    } else if let Some(n) = v.strip_prefix('-') {
+        (false, n.trim())
+    } else {
+        return Err(AtError::BadArg);
+    };
+    if !valid_station(name) {
+        return Err(AtError::BadArg);
+    }
+    Ok(if pin {
+        AtCmd::DirPin(name)
+    } else {
+        AtCmd::DirRemove(name)
+    })
 }
 
 /// `<ssid>,<pass>`, both valid.
@@ -349,6 +425,9 @@ pub enum ResultCode {
     Busy,
     NoAnswer,
     Connect(Tier),
+    /// A radio call with compression on: `CONNECT <tier> <bps>/ARQ/LZ`,
+    /// numeric 1.
+    ConnectLz(Tier),
     /// A Wi-Fi (TCP) call: `CONNECT WIFI TCP`, numeric 1.
     ConnectWifi,
     Retrain(Tier),
@@ -411,12 +490,15 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
             ResultCode::NoCarrier => b.put(b"NO CARRIER"),
             ResultCode::Busy => b.put(b"BUSY"),
             ResultCode::NoAnswer => b.put(b"NO ANSWER"),
-            ResultCode::Connect(t) => {
+            ResultCode::Connect(t) | ResultCode::ConnectLz(t) => {
                 b.put(b"CONNECT ");
                 b.put(t.name().as_bytes());
                 b.put(b" ");
                 b.put_u32(t.air_bps());
                 b.put(b"/ARQ");
+                if matches!(code, ResultCode::ConnectLz(_)) {
+                    b.put(b"/LZ");
+                }
             }
             ResultCode::ConnectWifi => b.put(b"CONNECT WIFI TCP"),
             ResultCode::Retrain(t) => {
@@ -430,7 +512,7 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
     } else {
         let n = match code {
             ResultCode::Ok => 0,
-            ResultCode::Connect(_) | ResultCode::ConnectWifi => 1,
+            ResultCode::Connect(_) | ResultCode::ConnectLz(_) | ResultCode::ConnectWifi => 1,
             ResultCode::Ring => 2,
             ResultCode::NoCarrier => 3,
             ResultCode::Error => 4,
@@ -451,9 +533,17 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
 /// S30: SX1262 chip output power in dBm (signed, -9 to 22, default 2).
 pub const REG_TX_POWER: u8 = 30;
 
+/// S31: compression on the air, 1 on (default), 0 off. Used on a radio call
+/// only when both ends have it at 1 (see `lz.rs`).
+pub const REG_LZ: u8 = 31;
+
+/// S32: boot to menu, 1 opens the setup menu on the first host byte after
+/// boot, 0 (default) starts in plain AT command mode.
+pub const REG_MENU: u8 = 32;
+
 /// (register, min, max, default). Values are compared as i16; S30 is stored
 /// as the two's complement of its i16 value, the others are never negative.
-const REGS: [(u8, i16, i16, i16); 8] = [
+const REGS: [(u8, i16, i16, i16); 10] = [
     (0, 0, 255, 0),
     (2, 0, 127, 43),
     (7, 1, 255, 30),
@@ -462,11 +552,13 @@ const REGS: [(u8, i16, i16, i16); 8] = [
     (21, 0, 7, 7),
     (22, 1, 255, 20),
     (REG_TX_POWER, -9, 22, 2),
+    (REG_LZ, 0, 1, 1),
+    (REG_MENU, 0, 1, 0),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SRegs {
-    vals: [u16; 8],
+    vals: [u16; 10],
 }
 
 impl Default for SRegs {
@@ -477,10 +569,10 @@ impl Default for SRegs {
 
 impl SRegs {
     /// Register numbers present, for `AT&V`.
-    pub const NUMBERS: [u8; 8] = [0, 2, 7, 12, 20, 21, 22, 30];
+    pub const NUMBERS: [u8; 10] = [0, 2, 7, 12, 20, 21, 22, 30, 31, 32];
 
     pub const fn new() -> Self {
-        let mut vals = [0u16; 8];
+        let mut vals = [0u16; 10];
         let mut i = 0;
         while i < vals.len() {
             vals[i] = REGS[i].3 as u16;
@@ -684,7 +776,7 @@ mod tests {
             assert_eq!(s.get(n), None, "S{n} should not exist");
             assert!(!SRegs::new().set(n, 0));
         }
-        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30]);
+        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30, 31, 32]);
     }
 
     #[test]

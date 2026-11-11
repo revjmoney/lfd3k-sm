@@ -1,15 +1,16 @@
-//! Saved settings: hotspot, client network, forwards, publish, S registers.
+//! Saved settings: hotspot, client network, forwards, publish, S registers,
+//! station name.
 //!
 //! Pure data, no I/O. The platform stores the blob (`to_blob`) and hands it
 //! back at boot (`from_blob`); a blob with any problem is refused whole.
 //!
-//! Blob v1 (little endian, fixed offsets, 899 bytes used of `BLOB_LEN`):
+//! Blob v3 (little endian, fixed offsets, 917 bytes used of `BLOB_LEN`):
 //!
 //! | offset | size | field |
 //! |-------:|-----:|-------|
 //! | 0 | 4 | magic `LFS1` |
-//! | 4 | 1 | version (1) |
-//! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password |
+//! | 4 | 1 | version (3) |
+//! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password, bit4 S31 = 0 (compression off), bit5 S32 = 1 (boot to menu) |
 //! | 6 | 16 | S registers S0, S2, S7, S12, S20, S21, S22, S30 as u16 (S30 two's complement) |
 //! | 22 | 1 | published forward index, 0xFF none |
 //! | 23 | 33 | hotspot SSID: length byte, 32 bytes zero padded |
@@ -17,13 +18,37 @@
 //! | 120 | 33 | client SSID (length 0 = none) |
 //! | 153 | 64 | client password |
 //! | 217 | 680 | 8 forward records of 85 bytes |
-//! | 897 | 2 | CRC-16/CCITT-FALSE of bytes 0..897 |
+//! | 897 | 1 | beacon mode: 0 ON, 1 QUIET, 2 HIDDEN |
+//! | 898 | 17 | station name (AT+NAME): length byte 0 to 16, 16 bytes zero padded; length 0 = the firmware's default name |
+//! | 915 | 2 | CRC-16/CCITT-FALSE of bytes 0..915 |
+//!
+//! Blob v2 (phase 4 tasks 1 to 3) is the same up to byte 897 with version 2
+//! and the CRC at 898 (900 bytes, no name). Blob v1 (phase 3) is the same up
+//! to byte 896 with version 1 and the CRC at 897 (899 bytes, no beacon
+//! byte). `from_blob` still loads both (v1 with the beacon mode ON, both
+//! with no stored name); `to_blob` always writes v3, so the first save after
+//! an upgrade migrates the stored copy. A v1 blob is accepted only at
+//! exactly 899 bytes, v2 only at 900 and v3 only at 917.
+//!
+//! S31 (phase 4, compression) lives in flags bit 4, stored inverted: a clear
+//! bit is S31 = 1, the default. So the layout, the length and the version
+//! stay as they were, and every v2 blob saved before S31 existed loads with
+//! compression on. A v1 blob with bit 4 set is refused (v1 never wrote it).
+//! Every pre-v2 build (phase 3 and older) refuses any v2 or v3 blob (it
+//! accepts only 899 bytes, version 1) and falls back to factory settings, so
+//! the first save by this build already blocks a downgrade.
+//!
+//! S32 (phase 4, boot to menu) lives in flags bit 5, stored as is (set means
+//! S32 = 1; the default 0 leaves the bit clear), by the same rule: layout,
+//! length and version unchanged, every older v2 blob loads with S32 = 0, a
+//! v1 blob with bit 5 set is refused. Bits 4 and 5 are valid in v2 and v3.
 //!
 //! Forward record: used (0 or 1), name length, name\[16\], host length,
 //! host\[63\], port u16, mode (0 telnet, 1 raw). An unused record is all zero.
 
-use crate::at::SRegs;
-use crate::frame::valid_name;
+use crate::at::{SRegs, REG_LZ, REG_MENU};
+use crate::discovery::valid_station;
+use crate::frame::{valid_name, NAME_MAX};
 
 /// Forward slots.
 pub const MAX_FWD: usize = 8;
@@ -41,18 +66,34 @@ pub const PASS_MIN: usize = 8;
 pub const BLOB_LEN: usize = 1024;
 
 const MAGIC: [u8; 4] = *b"LFS1";
-const VERSION: u8 = 1;
+const VERSION: u8 = 3;
+const VERSION_V2: u8 = 2;
+const VERSION_V1: u8 = 1;
 const NO_PUB: u8 = 0xFF;
 const NREGS: usize = 8;
 const FWD_REC: usize = 85;
-const OFF_CRC: usize = 217 + MAX_FWD * FWD_REC;
+/// End of the forward records: the v1 CRC, the v2 beacon byte.
+const OFF_FWD_END: usize = 217 + MAX_FWD * FWD_REC;
+const OFF_CRC_V1: usize = OFF_FWD_END;
+const BLOB_USED_V1: usize = OFF_CRC_V1 + 2;
+const OFF_CRC_V2: usize = OFF_FWD_END + 1;
+const BLOB_USED_V2: usize = OFF_CRC_V2 + 2;
+/// v3: the station name field after the beacon byte.
+const OFF_CRC: usize = OFF_CRC_V2 + 1 + NAME_MAX;
 const BLOB_USED: usize = OFF_CRC + 2;
 const FLAG_AP: u8 = 1;
 const FLAG_ECHO: u8 = 2;
 const FLAG_VERBOSE: u8 = 4;
 const FLAG_SHOW: u8 = 8;
+/// S31 = 0 (inverted, so blobs from before S31 load with it on).
+const FLAG_NO_LZ: u8 = 16;
+/// S32 = 1 (boot to menu).
+const FLAG_MENU: u8 = 32;
+/// The registers in the 16 byte register field, in order. S31 and S32 are
+/// the flags bits above; every other register in `SRegs::NUMBERS` is here.
+const BLOB_REGS: [u8; NREGS] = [0, 2, 7, 12, 20, 21, 22, 30];
 
-const _: () = assert!(SRegs::NUMBERS.len() == NREGS);
+const _: () = assert!(SRegs::NUMBERS.len() == NREGS + 2);
 const _: () = assert!(BLOB_USED <= BLOB_LEN);
 
 fn printable(s: &str) -> bool {
@@ -130,6 +171,53 @@ impl WireMode {
             1 => Some(WireMode::Raw),
             _ => None,
         }
+    }
+}
+
+/// Privacy mode for discovery (`AT+BEACON`), saved in the blob.
+///
+/// ON sends beacons and answers scans; QUIET answers scans but sends no
+/// beacons; HIDDEN sends nothing at all except answering calls from pinned
+/// directory entries (`AT+DIR=+NAME`), and drops other callers silently.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BeaconMode {
+    On,
+    Quiet,
+    Hidden,
+}
+
+impl BeaconMode {
+    pub fn code(self) -> u8 {
+        match self {
+            BeaconMode::On => 0,
+            BeaconMode::Quiet => 1,
+            BeaconMode::Hidden => 2,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Option<BeaconMode> {
+        match c {
+            0 => Some(BeaconMode::On),
+            1 => Some(BeaconMode::Quiet),
+            2 => Some(BeaconMode::Hidden),
+            _ => None,
+        }
+    }
+
+    /// `ON`, `QUIET` or `HIDDEN`, as AT+BEACON takes and prints it.
+    pub fn name(self) -> &'static str {
+        match self {
+            BeaconMode::On => "ON",
+            BeaconMode::Quiet => "QUIET",
+            BeaconMode::Hidden => "HIDDEN",
+        }
+    }
+
+    /// The mode named `s` (any case).
+    pub fn parse(s: &str) -> Option<BeaconMode> {
+        [BeaconMode::On, BeaconMode::Quiet, BeaconMode::Hidden]
+            .into_iter()
+            .find(|m| m.name().eq_ignore_ascii_case(s))
     }
 }
 
@@ -225,6 +313,11 @@ pub struct Settings {
     pub verbose: bool,
     /// The hotspot password may still be shown on the OLED.
     pub show_ap_pass: bool,
+    /// Discovery privacy mode (AT+BEACON).
+    pub beacon: BeaconMode,
+    /// Station name set with AT+NAME; empty means the firmware's default.
+    name: [u8; NAME_MAX],
+    name_len: u8,
 }
 
 /// Passwords are never printed.
@@ -242,6 +335,8 @@ impl core::fmt::Debug for Settings {
             .field("echo", &self.echo)
             .field("verbose", &self.verbose)
             .field("show_ap_pass", &self.show_ap_pass)
+            .field("beacon", &self.beacon)
+            .field("name", &self.name())
             .finish()
     }
 }
@@ -265,6 +360,9 @@ impl Settings {
         echo: true,
         verbose: true,
         show_ap_pass: true,
+        beacon: BeaconMode::On,
+        name: [0; NAME_MAX],
+        name_len: 0,
     };
 
     /// Hotspot on, SSID = `name`, password `ap_pass` (8 to 63 characters),
@@ -290,6 +388,9 @@ impl Settings {
             echo: true,
             verbose: true,
             show_ap_pass: true,
+            beacon: BeaconMode::On,
+            name: [0; NAME_MAX],
+            name_len: 0,
         };
         s.ap_ssid_len = fill_lossy(&mut s.ap_ssid, name);
         s.ap_pass_len = fill_lossy(&mut s.ap_pass, ap_pass);
@@ -412,6 +513,57 @@ impl Settings {
         self.fwd.get(i)?.as_ref()
     }
 
+    /// The station name set with AT+NAME; empty: the firmware's default.
+    pub fn name(&self) -> &str {
+        text(&self.name, self.name_len)
+    }
+
+    /// Set the station name (a valid station name, the rule `Config::new`
+    /// uses), or empty for the firmware's default; false (nothing changed)
+    /// if invalid. The hotspot SSID does not follow.
+    pub fn set_name(&mut self, n: &str) -> bool {
+        if !(n.is_empty() || valid_station(n)) {
+            return false;
+        }
+        let mut b = [0; NAME_MAX];
+        let Some(len) = fill(&mut b, n) else {
+            return false;
+        };
+        (self.name, self.name_len) = (b, len);
+        true
+    }
+
+    /// Boot to menu (S32 = 1): the menu opens on the first host byte.
+    pub fn boot_menu(&self) -> bool {
+        self.sregs.get(REG_MENU) == Some(1)
+    }
+
+    /// Same profile as `o`: every field but `show_ap_pass` (whether the
+    /// generated hotspot password may still be shown is not a setting).
+    pub fn same_profile(&self, o: &Settings) -> bool {
+        self.ap_on == o.ap_on
+            && self.ap_ssid() == o.ap_ssid()
+            && self.ap_pass() == o.ap_pass()
+            && self.sta_ssid() == o.sta_ssid()
+            && self.sta_pass() == o.sta_pass()
+            && self.fwd == o.fwd
+            && self.publish == o.publish
+            && self.sregs == o.sregs
+            && self.echo == o.echo
+            && self.verbose == o.verbose
+            && self.beacon == o.beacon
+            && self.name() == o.name()
+    }
+
+    /// Hotspot or client network settings differ from `o`.
+    pub fn wifi_differs(&self, o: &Settings) -> bool {
+        self.ap_on != o.ap_on
+            || self.ap_ssid() != o.ap_ssid()
+            || self.ap_pass() != o.ap_pass()
+            || self.sta_ssid() != o.sta_ssid()
+            || self.sta_pass() != o.sta_pass()
+    }
+
     /// Serialise into `out` (zero filled first); returns the bytes used.
     pub fn to_blob(&self, out: &mut [u8; BLOB_LEN]) -> usize {
         *out = [0; BLOB_LEN];
@@ -424,13 +576,15 @@ impl Settings {
             (self.echo, FLAG_ECHO),
             (self.verbose, FLAG_VERBOSE),
             (self.show_ap_pass, FLAG_SHOW),
+            (self.sregs.get(REG_LZ) == Some(0), FLAG_NO_LZ),
+            (self.sregs.get(REG_MENU) == Some(1), FLAG_MENU),
         ] {
             if on {
                 flags |= bit;
             }
         }
         w.put(&[flags]);
-        for n in SRegs::NUMBERS {
+        for n in BLOB_REGS {
             w.put(&self.sregs.get(n).unwrap_or(0).to_le_bytes());
         }
         w.put(&[self.publish.unwrap_or(NO_PUB)]);
@@ -455,29 +609,40 @@ impl Settings {
                 None => w.put(&[0; FWD_REC]),
             }
         }
+        w.put(&[self.beacon.code()]);
+        w.put(&[self.name_len]);
+        w.put(&self.name);
         let end = w.pos;
         let crc = crc16(w.out.get(..end).unwrap_or(&[]));
         w.put(&crc.to_le_bytes());
         w.pos
     }
 
-    /// Parse a blob; `None` on wrong magic, version, length, CRC or any
-    /// field that fails validation.
+    /// Parse a blob (v3, or v2 or v1 migrated: no stored name, v1 with the
+    /// beacon mode ON); `None` on
+    /// wrong magic, version, length, CRC or any field that fails validation.
     pub fn from_blob(b: &[u8]) -> Option<Settings> {
-        if b.len() != BLOB_USED {
-            return None;
-        }
-        let body = b.get(..OFF_CRC)?;
-        let want = u16::from_le_bytes([*b.get(OFF_CRC)?, *b.get(OFF_CRC + 1)?]);
+        let (version, off_crc) = match b.len() {
+            BLOB_USED => (VERSION, OFF_CRC),
+            BLOB_USED_V2 => (VERSION_V2, OFF_CRC_V2),
+            BLOB_USED_V1 => (VERSION_V1, OFF_CRC_V1),
+            _ => return None,
+        };
+        let body = b.get(..off_crc)?;
+        let want = u16::from_le_bytes([*b.get(off_crc)?, *b.get(off_crc + 1)?]);
         if crc16(body) != want {
             return None;
         }
         let mut r = Rd { b: body, pos: 0 };
-        if r.take(4)? != MAGIC || r.u8()? != VERSION {
+        if r.take(4)? != MAGIC || r.u8()? != version {
             return None;
         }
         let flags = r.u8()?;
-        if flags & !(FLAG_AP | FLAG_ECHO | FLAG_VERBOSE | FLAG_SHOW) != 0 {
+        let mut known = FLAG_AP | FLAG_ECHO | FLAG_VERBOSE | FLAG_SHOW;
+        if version >= VERSION_V2 {
+            known |= FLAG_NO_LZ | FLAG_MENU;
+        }
+        if flags & !known != 0 {
             return None;
         }
         let mut s = Settings::defaults("", "");
@@ -485,10 +650,16 @@ impl Settings {
         s.echo = flags & FLAG_ECHO != 0;
         s.verbose = flags & FLAG_VERBOSE != 0;
         s.show_ap_pass = flags & FLAG_SHOW != 0;
-        for n in SRegs::NUMBERS {
+        for n in BLOB_REGS {
             if !s.sregs.set(n, r.u16()?) {
                 return None;
             }
+        }
+        if !s.sregs.set(REG_LZ, u16::from(flags & FLAG_NO_LZ == 0)) {
+            return None;
+        }
+        if !s.sregs.set(REG_MENU, u16::from(flags & FLAG_MENU != 0)) {
+            return None;
         }
         let publish = r.u8()?;
         (s.ap_ssid, s.ap_ssid_len) = r.field(valid_ssid)?;
@@ -518,6 +689,14 @@ impl Settings {
                 Some(i)
             }
         };
+        s.beacon = if version >= VERSION_V2 {
+            BeaconMode::from_code(r.u8()?)?
+        } else {
+            BeaconMode::On
+        };
+        if version == VERSION {
+            (s.name, s.name_len) = r.field(|t| t.is_empty() || valid_station(t))?;
+        }
         Some(s)
     }
 }
@@ -551,7 +730,8 @@ impl Forward {
 }
 
 /// CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no xorout.
-fn crc16(data: &[u8]) -> u16 {
+/// Also used by the directory blob.
+pub(crate) fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
     for &b in data {
         crc ^= u16::from(b) << 8;

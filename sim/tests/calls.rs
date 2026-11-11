@@ -8,8 +8,8 @@ use lfd3k_core::frame::{call_req_payload, encode, FrameType, Header};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 use lfd3k_sim::{Harness, Outcome, Rng, SimChannel, SnrProfile};
 
-const CONNECT_SF5: &str = "\r\nCONNECT LORA SF5 BW500 62500/ARQ\r\n";
-const CONNECT_SF12: &str = "\r\nCONNECT LORA SF12 BW500 1172/ARQ\r\n";
+const CONNECT_SF5: &str = "\r\nCONNECT LORA SF5 BW500 62500/ARQ/LZ\r\n";
+const CONNECT_SF12: &str = "\r\nCONNECT LORA SF12 BW500 1172/ARQ/LZ\r\n";
 const NO_CARRIER: &str = "\r\nNO CARRIER\r\n";
 const OK: &str = "\r\nOK\r\n";
 /// Escape guard (S12 = 50, so 1 s) plus a little.
@@ -680,7 +680,7 @@ fn capped_call(
         b,
     );
     connect(&mut h, 10_000);
-    let want = format!("\r\nCONNECT {} {}/ARQ\r\n", cap.name(), cap.air_bps());
+    let want = format!("\r\nCONNECT {} {}/ARQ/LZ\r\n", cap.name(), cap.air_bps());
     assert!(h.screen_a().contains(&want), "CALLER: {:?}", h.screen_a());
     assert!(h.screen_b().contains(&want), "AXIS: {:?}", h.screen_b());
     assert_eq!(h.a.lights(h.now_ms).tier, Some(cap));

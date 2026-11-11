@@ -5,9 +5,9 @@ seed 420, SNR +10.0 dB until 30 s, +0.0 dB from 30 s to 60 s, +10.0 dB after
   0.300 s  CALLER: ATDT AXIS
   1.464 s  both connected
   1.464 s  CALLER sends 4096 bytes
-  2.075 s  AXIS has 4096 bytes
+  1.720 s  AXIS has 4096 bytes
  35.000 s  SNR now +0.0 dB; AXIS sends 4096 bytes
- 35.709 s  CALLER has 4096 bytes
+ 35.311 s  CALLER has 4096 bytes
  45.000 s  CALLER: +++ (1 s guard before and after)
  48.000 s  CALLER: ATO
  85.000 s  CALLER: +++ (1 s guard before and after)
@@ -31,7 +31,7 @@ RINGING
 
 TRAINING SNR 10.0 dB
 
-CONNECT LORA SF5 BW500 62500/ARQ
+CONNECT LORA SF5 BW500 62500/ARQ/LZ
 [data mode: 4096 bytes received, ANSI color codes stripped below]
 ╔════════════════════════════════════════════════════════════╗
 ║              AXIS BBS ANSI SCREEN, SENT BACK               ║
@@ -56,7 +56,7 @@ OK
 
 RETRAIN LORA SF6 BW500 37500
 ATO
-CONNECT LORA SF6 BW500 37500/ARQ
+CONNECT LORA SF6 BW500 37500/ARQ/LZ
 [data mode: nothing received]
 [end of data mode]
 
@@ -65,7 +65,7 @@ OK
 RETRAIN LORA SF5 BW500 62500
 AT&V
 E1 V1 NAME CALLER
-S00=000 S02=043 S07=030 S12=050 S20=020 S21=007 S22=020 S30=002
+S00=000 S02=043 S07=030 S12=050 S20=020 S21=007 S22=020 S30=002 S31=001 S32=000
 
 TX POWER S30=2 dBm chip, about 14 dBm out
 
@@ -77,8 +77,14 @@ PUB NONE
 
 FWD 0
 
+BEACON ON
+
+DIR 1
+
 TIER LORA SF5 BW500 62500
 RETRAINS LORA SF6 BW500 37500, LORA SF5 BW500 62500
+
+LZ ON RATIO 2.9
 
 OK
 ATH
@@ -94,7 +100,7 @@ OK
 
 RING
 
-CONNECT LORA SF5 BW500 62500/ARQ
+CONNECT LORA SF5 BW500 62500/ARQ/LZ
 [data mode: 4096 bytes received, ANSI color codes stripped below]
 ╔════════════════════════════════════════════════════════════╗
 ║              LFD3K-SM TEST SCREEN FROM CALLER              ║
@@ -118,10 +124,10 @@ LFD3K-SM TEST SCREEN 13 ROWS, 4096 BYTES
 NO CARRIER
 
 ==== Summary ====
-Tiers used by CALLER, in order: SF5 (1.5 s) > SF6 (35.5 s) > SF5 (73.7 s)
-Tiers used by AXIS, in order: SF5 (1.5 s) > SF6 (35.5 s) > SF5 (73.7 s)
+Tiers used by CALLER, in order: SF5 (1.5 s) > SF6 (35.2 s) > SF5 (73.8 s)
+Tiers used by AXIS, in order: SF5 (1.5 s) > SF6 (35.2 s) > SF5 (73.8 s)
 CALLER to AXIS: 4096 bytes sent, 4096 received, intact
 AXIS to CALLER: 4096 bytes sent, 4096 received, intact
 Simulated time: 91.5 s
 Data frames: CALLER 21 (0 resent), AXIS 21 (0 resent)
-All frames: 468 sent, 466 delivered, 1 lost to SNR, 0 undetected, 0 collided, 0 missed while sending, 1 missed while not listening
+All frames: 472 sent, 470 delivered, 1 lost to SNR, 0 undetected, 0 collided, 0 missed while sending, 1 missed while not listening

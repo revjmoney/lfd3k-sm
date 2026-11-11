@@ -1,8 +1,34 @@
 //! Wire frame format. Header is 5 bytes: byte0 = AIR_ID, byte1 = type << 4 | flags,
 //! byte2 = call_id, byte3 = seq, byte4 = ack. A frame whose byte0 is not
 //! AIR_ID is somebody else's traffic and decodes as `Foreign`.
+//!
+//! Types 1 to 11 are call frames; 12 to 14 (Beacon, ScanReq, ScanResp) are
+//! discovery frames with call id 0 and payloads laid out in `discovery.rs`.
+//! Older builds drop 12 to 14 as `BadType`.
+//!
+//! Header flags (low nibble of byte1): bit 0 `FLAG_MORE` (another frame
+//! follows at once), bit 1 `FLAG_PING` (Keepalive: please reply), bit 2
+//! `FLAG_LZ` (Data: the payload is compressed, see `lz.rs`), bit 3 free.
+//!
+//! Capabilities: a CallReq payload may end with one capability byte after
+//! the two names (the caller's offer), and the answerer's CallAck payload
+//! may be that one byte and its Train payload may carry it as a 4th byte
+//! after tier and SNR (the agreed answer: set only when both offered). Bit 0
+//! is `CAP_LZ`. Bits 1 to 3 are for later capabilities and are ignored; a
+//! byte with any of bits 4 to 7 set makes a CallReq or Train malformed. No
+//! byte (the form older builds send) means no capabilities. Older builds
+//! refuse a CallReq that carries the byte, so it is only sent when it says
+//! something (S31 = 1), and a 4 byte Train, so it only goes to a caller that
+//! offered (a new build). TrainAck stays 3 bytes.
 
 use crate::tier::Tier;
+
+/// Header flag on Data: the payload is LZ compressed (see `lz.rs`).
+pub const FLAG_LZ: u8 = 4;
+/// Capability bit: the station can take LZ compressed Data frames.
+pub const CAP_LZ: u8 = 1;
+/// Bits a capability byte may use.
+const CAP_MASK: u8 = 0x0F;
 
 /// First byte of every frame: 0xD = LFD3K-SM, 1 = air protocol version 1.
 pub const AIR_ID: u8 = 0xD1;
@@ -25,6 +51,12 @@ pub enum FrameType {
     TierAck = 9,
     Hangup = 10,
     Keepalive = 11,
+    /// Discovery: "here I am" (see `discovery.rs`). Call id 0.
+    Beacon = 12,
+    /// Discovery: "who is out there?". Call id 0.
+    ScanReq = 13,
+    /// Discovery: the answer to a ScanReq. Call id 0.
+    ScanResp = 14,
 }
 
 impl FrameType {
@@ -41,6 +73,9 @@ impl FrameType {
             9 => FrameType::TierAck,
             10 => FrameType::Hangup,
             11 => FrameType::Keepalive,
+            12 => FrameType::Beacon,
+            13 => FrameType::ScanReq,
+            14 => FrameType::ScanResp,
             _ => return None,
         })
     }
@@ -102,13 +137,21 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
     let ftype = FrameType::from_u8(b0 >> 4).ok_or(FrameError::BadType)?;
     let shape_ok = match ftype {
         FrameType::CallReq => parse_call_req(payload).is_ok(),
-        FrameType::Train | FrameType::TrainAck => {
+        FrameType::Train => match payload {
+            [t, _, _] => Tier::from_index(*t).is_some(),
+            [t, _, _, c] => Tier::from_index(*t).is_some() && c & !CAP_MASK == 0,
+            _ => false,
+        },
+        FrameType::TrainAck => {
             matches!(payload, [t, _, _] if Tier::from_index(*t).is_some())
         }
         FrameType::TierSet | FrameType::TierAck => {
             matches!(payload, [t] if Tier::from_index(*t).is_some())
         }
         FrameType::Ack => payload.len() == 1,
+        FrameType::Beacon => crate::discovery::parse_beacon(payload).is_some(),
+        FrameType::ScanReq => crate::discovery::parse_scan_req(payload).is_some(),
+        FrameType::ScanResp => crate::discovery::parse_scan_resp(payload).is_some(),
         _ => true,
     };
     if !shape_ok {
@@ -148,21 +191,51 @@ pub fn call_req_payload(caller: &str, callee: &str, out: &mut [u8]) -> Result<us
     Ok(total)
 }
 
+/// Caller and callee names of a CallReq payload (with or without the
+/// capability byte).
 pub fn parse_call_req(p: &[u8]) -> Result<(&str, &str), FrameError> {
+    parse_call_req_caps(p).map(|(a, b, _)| (a, b))
+}
+
+/// Caller, callee and capability byte (0 when absent) of a CallReq payload.
+pub fn parse_call_req_caps(p: &[u8]) -> Result<(&str, &str, u8), FrameError> {
     let (&l1, rest) = p.split_first().ok_or(FrameError::BadPayload)?;
     let (n1, rest) = rest
         .split_at_checked(l1 as usize)
         .ok_or(FrameError::BadPayload)?;
     let (&l2, rest) = rest.split_first().ok_or(FrameError::BadPayload)?;
-    if rest.len() != l2 as usize {
-        return Err(FrameError::BadPayload);
-    }
+    let (n2, tail) = rest
+        .split_at_checked(l2 as usize)
+        .ok_or(FrameError::BadPayload)?;
+    let caps = match tail {
+        [] => 0,
+        [c] if c & !CAP_MASK == 0 => *c,
+        _ => return Err(FrameError::BadPayload),
+    };
     let a = core::str::from_utf8(n1).map_err(|_| FrameError::BadPayload)?;
-    let b = core::str::from_utf8(rest).map_err(|_| FrameError::BadPayload)?;
+    let b = core::str::from_utf8(n2).map_err(|_| FrameError::BadPayload)?;
     if !valid_name(a) || !valid_name(b) {
         return Err(FrameError::BadPayload);
     }
-    Ok((a, b))
+    Ok((a, b, caps))
+}
+
+/// Capability byte of a Train payload (`tier, snr lo, snr hi[, caps]`):
+/// 0 for the 3 byte form older builds send.
+pub fn parse_train_caps(p: &[u8]) -> u8 {
+    match p {
+        [_, _, _, c] if c & !CAP_MASK == 0 => *c,
+        _ => 0,
+    }
+}
+
+/// Capability byte of a CallAck payload: 0 for the empty payload older
+/// builds send, and for anything that is not one well-formed byte.
+pub fn parse_call_ack_caps(p: &[u8]) -> u8 {
+    match p {
+        [c] if c & !CAP_MASK == 0 => *c,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -267,10 +340,11 @@ mod tests {
         assert_eq!(decode(&[0xD1, 0x60, 1, 2]), Err(FrameError::TooShort));
         assert_eq!(decode(&[0xD1, 0x00, 1, 2, 3]), Err(FrameError::BadType));
         assert_eq!(decode(&[0xD1, 0xF0, 1, 2, 3]), Err(FrameError::BadType));
-        assert_eq!(decode(&[0xD1, 0xC0, 1, 2, 3]), Err(FrameError::BadType));
+        // Type 12 is Beacon since phase 4: a bare header is a bad payload.
+        assert_eq!(decode(&[0xD1, 0xC0, 1, 2, 3]), Err(FrameError::BadPayload));
         assert_eq!(decode(&[0x60; MAX_FRAME + 1]), Err(FrameError::TooLong));
         assert_eq!(FrameType::from_u8(0), None);
-        assert_eq!(FrameType::from_u8(12), None);
+        assert_eq!(FrameType::from_u8(12), Some(FrameType::Beacon));
         assert_eq!(FrameType::from_u8(15), None);
         // Wrong payload shapes for the types that have one.
         assert_eq!(decode(&[0xD1, 0x80, 1, 2, 3]), Err(FrameError::BadPayload));

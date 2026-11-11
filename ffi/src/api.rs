@@ -13,9 +13,11 @@
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int};
 
+use lfd3k_core::discovery::HEARD_WINDOW_MS;
+use lfd3k_core::frame::NAME_MAX;
 use lfd3k_core::modem::WIFI_STATUS_MAX;
 use lfd3k_core::settings::{valid_pass, BLOB_LEN, HOST_MAX, PASS_MAX, SSID_MAX};
-use lfd3k_core::{Config, Modem, Radio, RxInfo, Settings, SimNetRadio, Tier};
+use lfd3k_core::{Config, Modem, Radio, RxInfo, Settings, SimNetRadio, Tier, DIR_BLOB_LEN};
 use sx1262::{Error, Sx1262};
 
 use crate::hal::{HalBus, HalUdp};
@@ -548,8 +550,8 @@ pub extern "C" fn lfd3k_simnet_due_ms() -> u32 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct lfd3k_status_t {
-    /// Bit 0 OH, 1 CD, 2 SD, 3 RD, 4 HS, 5 EC, 6 DC (never set: the modem
-    /// has no compression), 7 AA.
+    /// Bit 0 OH, 1 CD, 2 SD, 3 RD, 4 HS, 5 EC, 6 DC (a radio call is up
+    /// and compresses, `/ARQ/LZ`), 7 AA.
     pub lights: u8,
     /// 0 idle, 1 dialing, 2 ringing, 3 training, 4 online, 5 command-online.
     pub state: u8,
@@ -566,7 +568,18 @@ pub struct lfd3k_status_t {
     /// 1 while AT+SIMNET has the simulated radio on (the OLED shows SI in
     /// place of HS).
     pub simnet: u8,
+    /// 1 while an AT+SCAN (or the menu's scan) runs: the OLED shows the
+    /// radar sweep.
+    pub scanning: u8,
+    /// Answers the running scan has counted so far (0 when none).
+    pub scan_hits: u8,
+    /// Directory entries heard in the last 15 minutes (the count a beacon
+    /// carries, `HEARD_WINDOW_MS`); 0 when none.
+    pub heard: u16,
 }
+
+// The C mirror in lfd3k.h has the same size (a static assert there too).
+const _: () = assert!(core::mem::size_of::<lfd3k_status_t>() == 16);
 
 /// Fills `out`. Before init it is all zeros with `tier` -1.
 ///
@@ -579,7 +592,7 @@ pub unsafe extern "C" fn lfd3k_status(now_ms: u32, out: *mut lfd3k_status_t) {
     }
     let st = with_device(|d| {
         let l = d.modem.lights(now_ms);
-        let bits = [l.oh, l.cd, l.sd, l.rd, l.hs, l.ec, false, l.aa];
+        let bits = [l.oh, l.cd, l.sd, l.rd, l.hs, l.ec, l.dc, l.aa];
         let lights = bits
             .iter()
             .enumerate()
@@ -594,6 +607,10 @@ pub unsafe extern "C" fn lfd3k_status(now_ms: u32, out: *mut lfd3k_status_t) {
             radio_ok: u8::from(d.radio.ok()),
             wire: d.modem.wire_state(),
             simnet: u8::from(d.radio.on_sim()),
+            scanning: u8::from(d.modem.scanning()),
+            scan_hits: d.modem.scan_hits(),
+            heard: u16::try_from(d.modem.directory().heard_count(now_ms, HEARD_WINDOW_MS))
+                .unwrap_or(u16::MAX),
         }
     })
     .unwrap_or(lfd3k_status_t {
@@ -720,6 +737,126 @@ pub unsafe extern "C" fn lfd3k_take_save(blob: *mut u8, cap: usize, len: *mut us
         true
     })
     .unwrap_or(false)
+}
+
+/// Loads the saved directory blob (NVS key `dir`), parsed straight into the
+/// modem's directory (no copy of the directory on this stack). Call after
+/// `lfd3k_load_settings`, so an AT+NAME name is in force when an entry with
+/// our own name is dropped. Returns 0 when accepted, -1 when rejected (the
+/// directory is then empty) or before init.
+///
+/// # Safety
+/// `blob` must be null or valid for reads of `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_load_directory(blob: *const u8, len: usize) -> c_int {
+    if blob.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller guarantees `blob` is valid for `len` bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(blob, len) };
+    with_device(|d| {
+        if d.modem.load_directory_blob(bytes) {
+            0
+        } else {
+            -1
+        }
+    })
+    .unwrap_or(-1)
+}
+
+/// True once when the directory should be saved (AT&W, or a change once 60 s
+/// passed since the last save): writes the directory blob to `blob` and its
+/// length to `len`. When `cap` is under 1024 (`LFD3K_DIR_BLOB_LEN`) it
+/// returns false and the request is kept.
+///
+/// # Safety
+/// `blob` must be null or valid for writes of `cap` bytes; `len` must be null
+/// or valid for one `size_t` write.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_take_dir_save(blob: *mut u8, cap: usize, len: *mut usize) -> bool {
+    if blob.is_null() || len.is_null() || cap < DIR_BLOB_LEN {
+        return false;
+    }
+    with_device(|d| {
+        if !d.modem.take_dir_save() {
+            return false;
+        }
+        // SAFETY: `cap >= DIR_BLOB_LEN` and `blob` is valid for `cap` bytes,
+        // so it is valid as one `[u8; DIR_BLOB_LEN]` (alignment 1); it is the
+        // caller's buffer, distinct from the device. Written in place, so no
+        // 1 KB temporary on the modem task stack.
+        let out = unsafe { &mut *blob.cast::<[u8; DIR_BLOB_LEN]>() };
+        let n = d.modem.directory().to_blob(out).min(DIR_BLOB_LEN);
+        // SAFETY: `len` is valid for one write (contract).
+        unsafe { len.write(n) };
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Copies `s` NUL terminated into `out` (`cap` bytes, cut to fit) and returns
+/// its length without the NUL; 0 and nothing written when `out` is null or
+/// `cap` is 0.
+///
+/// # Safety
+/// `out` must be null or valid for writes of `cap` bytes.
+unsafe fn write_cstr(out: *mut c_char, cap: usize, s: &str) -> usize {
+    if out.is_null() || cap == 0 {
+        return 0;
+    }
+    let n = s.len().min(cap - 1);
+    // SAFETY: `n + 1 <= cap` bytes of `out` are valid (contract); `s` is a
+    // distinct borrow.
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), out.cast::<u8>(), n);
+        out.add(n).write(0);
+    }
+    n
+}
+
+/// A name from the modem (at most 16 bytes) into `out` as `write_cstr`
+/// does; an empty string before init.
+///
+/// # Safety
+/// `out` must be null or valid for writes of `cap` bytes.
+unsafe fn name_out(out: *mut c_char, cap: usize, get: fn(&Modem) -> &str) -> usize {
+    let mut buf = [0u8; NAME_MAX];
+    let n = with_device(|d| {
+        let s = get(&d.modem).as_bytes();
+        let n = s.len().min(NAME_MAX);
+        if let (Some(b), Some(s)) = (buf.get_mut(..n), s.get(..n)) {
+            b.copy_from_slice(s);
+        }
+        n
+    })
+    .unwrap_or(0);
+    let s = core::str::from_utf8(buf.get(..n).unwrap_or(&[])).unwrap_or("");
+    // SAFETY: forwarded from this function's contract.
+    unsafe { write_cstr(out, cap, s) }
+}
+
+/// The live station name (AT+NAME can change it; the platform's name when
+/// none is set), NUL terminated into `out`; `cap` 17 holds any name. Returns
+/// the length; 0 with an empty string before init.
+///
+/// # Safety
+/// `out` must be null or valid for writes of `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_station_name(out: *mut c_char, cap: usize) -> usize {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { name_out(out, cap, Modem::station_name) }
+}
+
+/// The station that last called us over the radio (empty until one did since
+/// boot), NUL terminated into `out`; `cap` 17 holds any name. Returns the
+/// length.
+///
+/// # Safety
+/// `out` must be null or valid for writes of `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_last_caller(out: *mut c_char, cap: usize) -> usize {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { name_out(out, cap, Modem::last_caller) }
 }
 
 /// First boot (no or rejected blob): factory settings with the hotspot named

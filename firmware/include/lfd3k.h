@@ -57,7 +57,7 @@ size_t   lfd3k_host_out(uint8_t *buf, size_t len);
  * nothing for it; the firmware writes the dump and OK). */
 bool     lfd3k_take_fb_request(void);
 
-/* lights bits: OH 0, CD 1, SD 2, RD 3, HS 4, EC 5, DC 6 (never set), AA 7.
+/* lights bits: OH 0, CD 1, SD 2, RD 3, HS 4, EC 5, DC 6 (radio call compressing, /ARQ/LZ), AA 7.
  * state: 0 idle, 1 dialing, 2 ringing, 3 training, 4 online, 5 command-online.
  * tier: -1 when none, else 0 (SF12) to 7 (SF5).
  * rssi dBm and snr_x4 (quarter dB) are from the last frame heard, including
@@ -72,7 +72,11 @@ typedef struct {
     uint8_t radio_ok;
     uint8_t wire;      /* 0 none, 1 dialing, 2 online, 3 bridging a radio call */
     uint8_t simnet;    /* 1 while AT+SIMNET has the simulated radio on (OLED: SI for HS) */
+    uint8_t scanning;  /* 1 while an AT+SCAN (or the menu's scan) runs (OLED: radar sweep) */
+    uint8_t scan_hits; /* answers the running scan has counted; 0 when none */
+    uint16_t heard;    /* directory entries heard in the last 15 minutes (the beacon's count) */
 } lfd3k_status_t;
+_Static_assert(sizeof(lfd3k_status_t) == 16, "lfd3k_status_t must match ffi/src/api.rs");
 void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
 
 /* Channel trace for the idle scope: up to 64 samples taken every 50 ms in
@@ -128,6 +132,24 @@ bool     lfd3k_take_save(uint8_t *blob, size_t cap, size_t *len);
  * save. A bad password changes nothing. */
 void     lfd3k_default_settings(const char *ap_pass);
 void     lfd3k_get_wifi_config(lfd3k_wifi_cfg_t *out);
+
+/* ---- Directory (NVS key "dir") and names. ---- */
+
+/* Load the saved directory blob, parsed in place in the core. Call after
+ * lfd3k_load_settings. 0 accepted, -1 rejected or not initialised (the
+ * directory stays empty; nothing else to do). */
+int      lfd3k_load_directory(const uint8_t *blob, size_t len);
+/* True once when the directory should be saved (AT&W, or a change once 60 s
+ * passed since the last save): fills blob and *len. cap must be at least
+ * 1024 (LFD3K_DIR_BLOB_LEN), else false and the request is kept. */
+#define LFD3K_DIR_BLOB_LEN 1024
+bool     lfd3k_take_dir_save(uint8_t *blob, size_t cap, size_t *len);
+/* The live station name (AT+NAME can change it), NUL terminated, cut to cap;
+ * 17 holds any name. Returns the length; "" before init. */
+size_t   lfd3k_station_name(char *out, size_t cap);
+/* The station that last called us over the radio, NUL terminated ("" until
+ * one has since boot); 17 holds any name. Returns the length. */
+size_t   lfd3k_last_caller(char *out, size_t cap);
 /* True once after AT+WAP, AT+WSTA, ATZ or a load changed Wi-Fi settings. */
 bool     lfd3k_take_wifi_changed(void);
 /* Live status line for AT+WIFI? (up to 96 bytes kept). */

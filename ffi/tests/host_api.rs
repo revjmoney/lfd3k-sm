@@ -1,4 +1,4 @@
-﻿//! Host tests of the C ABI against the fake HAL. The fake HAL and the static
+//! Host tests of the C ABI against the fake HAL. The fake HAL and the static
 //! device are process globals, so every test takes `serial()` first.
 //!
 //! `Rig` wires the FFI modem to a second core modem ("PEER") by carrying
@@ -202,7 +202,7 @@ impl Rig {
 
     /// Bytes the peer printed after its CONNECT line (call data).
     fn peer_data(&self) -> &[u8] {
-        let marker = b"/ARQ\r\n";
+        let marker = b"/ARQ/LZ\r\n";
         let at = self
             .peer_out
             .windows(marker.len())
@@ -212,7 +212,7 @@ impl Rig {
     }
 
     fn ffi_data(&self) -> &[u8] {
-        let marker = b"/ARQ\r\n";
+        let marker = b"/ARQ/LZ\r\n";
         let at = self
             .ffi_out
             .windows(marker.len())
@@ -251,6 +251,9 @@ fn calls_before_init_are_safe() {
         radio_ok: 1,
         wire: 9,
         simnet: 9,
+        scanning: 9,
+        scan_hits: 9,
+        heard: 9,
     };
     unsafe { lfd3k_status(0, &mut st) };
     assert_eq!(
@@ -511,6 +514,7 @@ fn connected_status_reports_tier_and_last_rx() {
         (idle.state, idle.tier, idle.rssi, idle.radio_ok),
         (0, -1, 0, 1)
     );
+    assert_eq!(idle.lights & 0b0100_0000, 0, "DC dark while idle");
     rig.connect();
     let st = status(rig.now);
     assert_eq!(st.state, 4);
@@ -519,7 +523,12 @@ fn connected_status_reports_tier_and_last_rx() {
     assert_eq!(st.snr_x4, 48);
     assert_eq!(st.radio_ok, 1);
     assert_ne!(st.lights & 0b0000_0011, 0, "OH and CD");
-    assert_eq!(st.lights & 0b0100_0000, 0, "DC is never lit");
+    // The rig connects with /ARQ/LZ (both ends S31 = 1): DC follows LZ.
+    assert_ne!(
+        st.lights & 0b0100_0000,
+        0,
+        "DC lit while the call compresses"
+    );
 }
 
 #[test]
@@ -546,7 +555,13 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
         for (_, f) in tx {
             let fr = decode(&f).expect("a valid frame");
             if fr.header.ftype == FrameType::Data {
-                first = Some(fr.payload.len());
+                // With /LZ the chunk goes out compressed: count host bytes.
+                let mut plain = [0u8; CHUNK];
+                first = Some(if fr.header.flags & lfd3k_core::frame::FLAG_LZ != 0 {
+                    lfd3k_core::lz::decompress(fr.payload, &mut plain).expect("valid LZ")
+                } else {
+                    fr.payload.len()
+                });
                 break;
             }
         }
@@ -798,7 +813,7 @@ fn settings_load_save_roundtrip_c_abi() {
     unsafe { lfd3k_default_settings(cstr("hotspotpw234").as_ptr()) };
     let first = take_save().expect("defaults ask for a save");
     assert!(take_save().is_none(), "once");
-    assert_eq!(first.len(), 899);
+    assert_eq!(first.len(), 917);
     assert!(lfd3k_take_wifi_changed());
     let c = wifi_cfg();
     assert_eq!((c.ap_on, c.sta_set), (1, 0));
@@ -830,7 +845,7 @@ fn settings_load_save_roundtrip_c_abi() {
     assert!(!unsafe { lfd3k_take_save(ptr::null_mut(), 1024, &mut len) });
     assert!(!unsafe { lfd3k_take_save(small.as_mut_ptr(), 1024, ptr::null_mut()) });
     let blob = take_save().expect("the kept request");
-    assert_eq!(blob.len(), 899);
+    assert_eq!(blob.len(), 917);
     assert!(!lfd3k_show_ap_pass(), "saved once with a client network");
 
     // Power cycle: init, load the blob, and it all comes back.
@@ -1363,4 +1378,221 @@ fn rf_trace_marks_tx_on_the_chip() {
     lfd3k_poll(360);
     assert_eq!(newest(), (-100, 0), "listening again");
     assert!(spi_ops().contains(&0x15));
+}
+
+// ---- Phase 4: directory, scan fields, names ----
+
+fn take_dir_save() -> Option<Vec<u8>> {
+    let mut blob = [0u8; 1024];
+    let mut len = 0usize;
+    if unsafe { lfd3k_take_dir_save(blob.as_mut_ptr(), blob.len(), &mut len) } {
+        Some(blob[..len].to_vec())
+    } else {
+        None
+    }
+}
+
+fn load_dir(blob: &[u8]) -> i32 {
+    unsafe { lfd3k_load_directory(blob.as_ptr(), blob.len()) }
+}
+
+fn dir_blob(d: &lfd3k_core::Directory) -> Vec<u8> {
+    let mut b = [0u8; lfd3k_core::DIR_BLOB_LEN];
+    let n = d.to_blob(&mut b);
+    b[..n].to_vec()
+}
+
+fn name_now() -> String {
+    let mut buf = [0xAAu8; 17];
+    let n = unsafe { lfd3k_station_name(buf.as_mut_ptr().cast(), buf.len()) };
+    assert_eq!(buf[n], 0, "NUL terminated");
+    String::from_utf8(buf[..n].to_vec()).unwrap()
+}
+
+#[test]
+fn dir_blob_c_abi() {
+    let _g = serial();
+    let rx = |snr_x4: i16| RxInfo {
+        tier: Tier::Sf12,
+        rssi_dbm: -90,
+        snr_x4,
+    };
+    let mut d = lfd3k_core::Directory::new();
+    d.add_pinned("ROTATOCAM");
+    d.heard("AXIS", 0b011, rx(40), 1_000);
+    d.heard("CALLER", 0b001, rx(-20), 2_000);
+    let good = dir_blob(&d);
+    assert_eq!(good.len(), 6 + 3 * 20 + 2);
+
+    // Before init and after a failed init: refused, nothing to save, no names.
+    assert_eq!(init(""), -4);
+    assert_eq!(load_dir(&good), -1);
+    assert!(take_dir_save().is_none());
+    assert_eq!(name_now(), "");
+    let mut one = [0x55u8; 4];
+    assert_eq!(unsafe { lfd3k_last_caller(one.as_mut_ptr().cast(), 4) }, 0);
+
+    assert_eq!(init("AXISMODEM-1234"), 0);
+    cmd("ATE0", 0);
+    // The directory starts empty. A listing is just OK.
+    assert_eq!(cmd("AT+DIR?", 1), "\r\nOK\r\n");
+    // Garbage and bad pointers are refused and leave it empty.
+    assert_eq!(load_dir(&[]), -1);
+    assert_eq!(load_dir(&[0xFF; 1024]), -1, "erased flash");
+    assert_eq!(load_dir(&[0u8; 1024]), -1);
+    assert_eq!(load_dir(&good[..good.len() - 1]), -1);
+    assert_eq!(unsafe { lfd3k_load_directory(ptr::null(), 70) }, -1);
+    let mut bad = good.clone();
+    bad[10] ^= 0x01;
+    assert_eq!(load_dir(&bad), -1, "CRC");
+    assert_eq!(cmd("AT+DIR?", 2), "\r\nOK\r\n");
+    assert!(take_dir_save().is_none(), "a refused blob asks for nothing");
+
+    // The good one loads in place; the list shows the entries, the pin, and a
+    // dash for the age (not heard since boot).
+    assert_eq!(load_dir(&good), 0);
+    let t = cmd("AT+DIR?", 3);
+    assert!(t.contains("DIR ROTATOCAM NONE - PIN"), "{t:?}");
+    assert!(
+        t.contains("DIR AXIS LORA SF") && t.contains("DIR CALLER LORA SF"),
+        "{t:?}"
+    );
+    assert!(t.ends_with("\r\nOK\r\n"));
+    assert!(take_dir_save().is_none(), "loading is not a change to save");
+    // A refused blob after a good load empties it (the core's rule).
+    assert_eq!(load_dir(&bad), -1);
+    assert_eq!(cmd("AT+DIR?", 4), "\r\nOK\r\n");
+    assert_eq!(load_dir(&good), 0);
+
+    // A blob that holds our own name drops it and asks for a save.
+    let mut own = lfd3k_core::Directory::new();
+    own.add_pinned("AXISMODEM-1234");
+    own.add_pinned("KEEPER");
+    assert_eq!(load_dir(&dir_blob(&own)), 0);
+    let t = cmd("AT+DIR?", 5);
+    assert!(
+        !t.contains("AXISMODEM-1234") && t.contains("KEEPER"),
+        "{t:?}"
+    );
+    // The stored copy still has our name: a save is asked for, on the usual
+    // 60 s schedule, and what it writes no longer has the name.
+    assert!(take_dir_save().is_none(), "not at once");
+    lfd3k_poll(65_000);
+    let fixed = take_dir_save().expect("save asked for");
+    assert!(take_dir_save().is_none(), "once");
+    let fixed = lfd3k_core::Directory::from_blob(&fixed).expect("loads");
+    assert!(fixed.get("AXISMODEM-1234").is_none() && fixed.get("KEEPER").is_some());
+    assert_eq!(load_dir(&good), 0);
+
+    // A change is saved after 60 s, never sooner; AT&W saves at once.
+    assert_eq!(cmd("AT+DIR=+KD4REV", 70_000), "\r\nOK\r\n");
+    lfd3k_poll(90_000);
+    assert!(take_dir_save().is_none(), "within 60 s of the last save");
+    lfd3k_poll(131_000);
+    // Too small a buffer or null pointers: refused, the request is kept.
+    let mut small = [0u8; 1000];
+    let mut len = 0usize;
+    assert!(!unsafe { lfd3k_take_dir_save(small.as_mut_ptr(), small.len(), &mut len) });
+    assert!(!unsafe { lfd3k_take_dir_save(ptr::null_mut(), 1024, &mut len) });
+    assert!(!unsafe { lfd3k_take_dir_save(small.as_mut_ptr(), 1024, ptr::null_mut()) });
+    let saved = take_dir_save().expect("the kept request");
+    assert!(take_dir_save().is_none(), "once");
+    let back = lfd3k_core::Directory::from_blob(&saved).expect("what the platform stores loads");
+    assert!(back.get("KD4REV").is_some_and(|e| e.pinned));
+    assert!(back.get("ROTATOCAM").is_some_and(|e| e.pinned));
+    assert!(back.get("AXIS").is_some() && back.get("CALLER").is_some());
+    // The stored blob round-trips through the C ABI to the same list.
+    assert_eq!(load_dir(&saved), 0);
+    assert_eq!(dir_blob(&back), saved);
+    assert_eq!(cmd("AT&W", 132_000), "\r\nOK\r\n");
+    assert!(take_save().is_some());
+    assert!(
+        take_dir_save().is_some(),
+        "AT&W also asks for a directory save"
+    );
+    assert!(take_dir_save().is_none());
+}
+
+#[test]
+fn status_scan_fields() {
+    let _g = serial();
+    // Before init: zeros.
+    assert_eq!(init(""), -4);
+    let st = status(0);
+    assert_eq!((st.scanning, st.scan_hits, st.heard), (0, 0, 0));
+
+    // A scan from the FFI modem, answered by the peer through the rig.
+    let mut rig = Rig::new();
+    rig.ffi_in(b"ATE0\r");
+    rig.run_ms(5);
+    let st = status(rig.now);
+    assert_eq!((st.scanning, st.scan_hits, st.heard), (0, 0, 0));
+    assert_eq!(rig.ffi_in(b"AT+SCAN\r"), 8);
+    rig.run_ms(100);
+    let st = status(rig.now);
+    assert_eq!(st.scanning, 1, "the radar runs while the scan collects");
+    assert_eq!(st.state, 0, "still idle: a scan is not a call");
+    // Wait for the answer: the count goes up, the heard count too.
+    assert!(
+        rig.run_until(4_000, |r| status(r.now).scan_hits == 1),
+        "no answer: {:?} / {:?}",
+        text(&rig.ffi_out),
+        text(&rig.peer_out)
+    );
+    let st = status(rig.now);
+    assert_eq!((st.scanning, st.scan_hits, st.heard), (1, 1, 1));
+    // The window ends: scanning and the hit count go back to 0, heard stays.
+    assert!(rig.run_until(6_000, |r| status(r.now).scanning == 0));
+    let st = status(rig.now);
+    assert_eq!((st.scanning, st.scan_hits, st.heard), (0, 0, 1));
+    let shown = text(&rig.ffi_out);
+    assert!(shown.contains("\r\nSCAN PEER SNR "), "{shown:?}");
+    assert!(shown.ends_with("\r\nOK\r\n"), "{shown:?}");
+    // The heard count is "in the last 15 minutes": it drops to 0 on its own.
+    assert_eq!(status(rig.now + 890_000).heard, 1);
+    assert_eq!(status(rig.now + 905_000).heard, 0);
+    // The peer heard us too.
+    assert!(rig.peer.directory().get("CALLER").is_some());
+    // A scan is refused during a call, and HIDDEN refuses it too: no radar.
+    cmd("AT+BEACON=HIDDEN", rig.now);
+    assert_eq!(cmd("AT+SCAN", rig.now + 1), "\r\nERROR\r\n");
+    assert_eq!(status(rig.now + 2).scanning, 0);
+}
+
+#[test]
+fn station_name_and_last_caller_c_abi() {
+    let _g = serial();
+    let mut b = [0xAAu8; 20];
+    assert_eq!(unsafe { lfd3k_station_name(b.as_mut_ptr().cast(), 0) }, 0);
+    assert_eq!(unsafe { lfd3k_station_name(ptr::null_mut(), 8) }, 0);
+    let mut rig = Rig::new();
+    assert_eq!(name_now(), "CALLER");
+    // Cut to the buffer, always NUL terminated.
+    let mut small = [0xAAu8; 4];
+    let n = unsafe { lfd3k_station_name(small.as_mut_ptr().cast(), small.len()) };
+    assert_eq!((n, &small[..4]), (3, &b"CAL\0"[..]));
+    // AT+NAME is live.
+    rig.ffi_in(b"ATE0\r");
+    rig.run_ms(5);
+    let t = cmd("AT+NAME=REV:J", rig.now);
+    assert_eq!(t, "\r\nERROR\r\n");
+    let t = cmd("AT+NAME=REVJ", rig.now + 1);
+    assert_eq!(t, "\r\nOK\r\n");
+    assert_eq!(name_now(), "REVJ");
+    // Nobody has called yet.
+    let mut who = [0xAAu8; 17];
+    let n = unsafe { lfd3k_last_caller(who.as_mut_ptr().cast(), who.len()) };
+    assert_eq!((n, who[0]), (0, 0));
+    // PEER calls: the ring says who.
+    rig.run_ms(20);
+    let now = rig.now;
+    assert_eq!(rig.peer.host_input(b"ATDT REVJ\r", &mut rig.pr, now), 10);
+    assert!(
+        rig.run_until(20_000, |r| status(r.now).state == 2),
+        "{:?}",
+        text(&rig.peer_out)
+    );
+    let n = unsafe { lfd3k_last_caller(who.as_mut_ptr().cast(), who.len()) };
+    assert_eq!(n, 4);
+    assert_eq!(&who[..5], b"PEER\0");
 }

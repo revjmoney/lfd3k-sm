@@ -1,9 +1,13 @@
 /* LFD3K-SM firmware: the modem task glues the USB stream, the Rust core and
  * the radio together. Only this task ever calls lfd3k_*. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include "driver/temperature_sensor.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_netif_sntp.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
@@ -32,12 +36,18 @@ static const char *TAG = "lfd3k";
 #define DUMP_TAIL     6
 #define DUMP_TOTAL    (DUMP_HEAD + DUMP_HEX + DUMP_TAIL)
 
-/* Settings save: held until no call is active, then written to NVS. */
-static uint8_t s_blob[LFD3K_BLOB_LEN];
-static size_t s_blob_len;
-static bool s_save_held;
-static bool s_save_failed;       /* last write failed; retry 5 s after s_save_failed_ms */
-static uint32_t s_save_failed_ms;
+/* A blob waiting for NVS: held until no call is active, then written. The settings and
+ * the directory (key "dir") each have their own, so one never overwrites the other. */
+typedef struct {
+    uint8_t blob[LFD3K_BLOB_LEN]; /* LFD3K_DIR_BLOB_LEN is the same 1024 */
+    size_t len;
+    bool held;
+    bool failed;                  /* last write failed; retry 5 s after failed_ms */
+    uint32_t failed_ms;
+} pending_save_t;
+
+static pending_save_t s_set_save; /* settings; its blob is also the boot load buffer */
+static pending_save_t s_dir_save; /* directory; its blob is also the boot load buffer */
 static bool s_nvs_ok;
 static char s_boot_pass[13];     /* drawn in app_main before the Wi-Fi driver exists */
 
@@ -137,8 +147,8 @@ static bool drain_host_out(void)
 static void load_or_default_settings(void)
 {
     size_t len = 0;
-    if (s_nvs_ok && settings_store_load(s_blob, sizeof(s_blob), &len) &&
-        lfd3k_load_settings(s_blob, len) == 0) {
+    if (s_nvs_ok && settings_store_load(s_set_save.blob, sizeof(s_set_save.blob), &len) &&
+        lfd3k_load_settings(s_set_save.blob, len) == 0) {
         ESP_LOGI(TAG, "settings loaded (%u bytes)", (unsigned)len);
         return;
     }
@@ -146,23 +156,48 @@ static void load_or_default_settings(void)
     ESP_LOGI(TAG, "first boot: factory settings");
 }
 
-/* Saves wait for the call to end (a flash write must not stall a live call). */
-static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
+/* Boot, after the settings (so an AT+NAME name is in force): the saved directory, parsed
+ * in place by the core. None yet (first boot) or a refused blob leaves it empty. */
+static void load_directory(void)
 {
-    if (lfd3k_take_save(s_blob, sizeof(s_blob), &s_blob_len)) {
-        s_save_held = s_nvs_ok; /* a newer blob replaces a held one; no NVS, no saves */
-        s_save_failed = false;
+    size_t len = 0;
+    if (!s_nvs_ok || !settings_store_load_dir(s_dir_save.blob, sizeof(s_dir_save.blob), &len)) {
+        ESP_LOGI(TAG, "no saved directory");
+        return;
     }
-    bool wait = s_save_failed && (uint32_t)(now_ms - s_save_failed_ms) < 5000;
-    if (s_save_held && st->state == 0 && st->wire == 0 && !wait) {
-        if (settings_store_save(s_blob, s_blob_len)) {
-            s_save_held = false;
-            s_save_failed = false;
+    int rc = lfd3k_load_directory(s_dir_save.blob, len);
+    ESP_LOGI(TAG, "directory %s (%u bytes)", rc == 0 ? "loaded" : "refused", (unsigned)len);
+}
+
+/* Writes a held blob once no call is up (a flash write must not stall a live call). */
+static void save_pending(pending_save_t *p, bool (*store)(const uint8_t *, size_t), uint32_t now_ms,
+                         const lfd3k_status_t *st)
+{
+    bool wait = p->failed && (uint32_t)(now_ms - p->failed_ms) < 5000;
+    if (p->held && st->state == 0 && st->wire == 0 && st->scanning == 0 && !wait) {
+        if (store(p->blob, p->len)) {
+            p->held = false;
+            p->failed = false;
         } else {
-            s_save_failed = true;
-            s_save_failed_ms = now_ms;
+            p->failed = true;
+            p->failed_ms = now_ms;
         }
     }
+}
+
+/* Settings and directory saves; a newer blob replaces a held one; no NVS, no saves. */
+static void save_step(uint32_t now_ms, const lfd3k_status_t *st)
+{
+    if (lfd3k_take_save(s_set_save.blob, sizeof(s_set_save.blob), &s_set_save.len)) {
+        s_set_save.held = s_nvs_ok;
+        s_set_save.failed = false;
+    }
+    if (lfd3k_take_dir_save(s_dir_save.blob, sizeof(s_dir_save.blob), &s_dir_save.len)) {
+        s_dir_save.held = s_nvs_ok;
+        s_dir_save.failed = false;
+    }
+    save_pending(&s_set_save, settings_store_save, now_ms, st);
+    save_pending(&s_dir_save, settings_store_save_dir, now_ms, st);
 }
 
 /* Wi-Fi strings for the OLED rows, once a second. The hotspot password goes along only
@@ -187,6 +222,91 @@ static void publish_net(void)
     memset(&n, 0, sizeof(n));
 }
 
+/* Idle show facts. The clock: SNTP from pool.ntp.org, started once the client side has
+ * an address, shown in Rev's local time (South Carolina, US Eastern: EST, daylight time
+ * from the second Sunday of March to the first Sunday of November). */
+#define LOCAL_TZ   "EST5EDT,M3.2.0,M11.1.0"
+#define NTP_SERVER "pool.ntp.org"
+
+static bool s_sntp_started;
+static temperature_sensor_handle_t s_tsens; /* NULL when the sensor did not start */
+
+/* SNTP's callback (lwIP task): only sets a flag under the panel lock. */
+static void sntp_synced(struct timeval *tv)
+{
+    (void)tv;
+    panel_note_time_synced();
+}
+
+static void sntp_start_once(void)
+{
+    if (s_sntp_started) {
+        return;
+    }
+    char ip[16];
+    bool up = false;
+    wifi_link_get_ip(ip, &up);
+    if (!up) {
+        return;
+    }
+    s_sntp_started = true; /* one try per boot; SNTP keeps polling by itself */
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER);
+    cfg.sync_cb = sntp_synced;
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    ESP_LOGI(TAG, "SNTP %s (%s)", NTP_SERVER, esp_err_to_name(err));
+}
+
+static void tsens_start(void)
+{
+    temperature_sensor_config_t tc = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    temperature_sensor_handle_t h = NULL;
+    if (temperature_sensor_install(&tc, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "temperature sensor did not start");
+        return;
+    }
+    if (temperature_sensor_enable(h) != ESP_OK) {
+        temperature_sensor_uninstall(h);
+        ESP_LOGW(TAG, "temperature sensor did not start");
+        return;
+    }
+    s_tsens = h;
+}
+
+/* Clock, uptime, chip temperature, the heard count (directory entries heard in the last
+ * 15 minutes, from the status) and the last caller for the idle show, once a second.
+ * GPS stays empty for now (later tasks); the location stays hidden. */
+static void publish_info(const lfd3k_status_t *st)
+{
+    panel_info_t in = PANEL_INFO_INIT;
+    in.uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    in.heard = st->heard;
+    lfd3k_last_caller(in.last_caller, sizeof(in.last_caller));
+    if (panel_time_synced()) {
+        time_t now = time(NULL);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        in.time_valid = 1;
+        in.hour = (uint8_t)lt.tm_hour;
+        in.minute = (uint8_t)lt.tm_min;
+    }
+    float c;
+    if (s_tsens && temperature_sensor_get_celsius(s_tsens, &c) == ESP_OK) {
+        int v = (int)(c < 0 ? c - 0.5f : c + 0.5f);
+        in.temp_valid = 1;
+        in.temp_c = (int8_t)(v < -99 ? -99 : (v > 127 ? 127 : v));
+    }
+    panel_publish_info(&in);
+}
+
+/* The live station name for the panel's name row (the boot name until settings load). */
+static void publish_name(void)
+{
+    char nm[17];
+    if (lfd3k_station_name(nm, sizeof(nm)) > 0) {
+        panel_set_name(nm);
+    }
+}
+
 static void modem_task(void *arg)
 {
     (void)arg;
@@ -209,6 +329,8 @@ static void modem_task(void *arg)
 
     load_or_default_settings();
     memset(s_boot_pass, 0, sizeof(s_boot_pass));
+    load_directory();
+    publish_name(); /* a saved AT+NAME name shows from the first idle frame */
     tcp_link_init(xTaskGetCurrentTaskHandle());
     udp_link_init(xTaskGetCurrentTaskHandle());
     {
@@ -218,6 +340,10 @@ static void modem_task(void *arg)
         wifi_link_apply(&wc);
         memset(&wc, 0, sizeof(wc));
     }
+
+    setenv("TZ", LOCAL_TZ, 1);
+    tzset();
+    tsens_start();
 
     esp_task_wdt_add(NULL);
     uint32_t last_second = (uint32_t)(esp_timer_get_time() / 1000);
@@ -291,6 +417,9 @@ static void modem_task(void *arg)
             }
             lfd3k_set_wifi_status(line);
             publish_net();
+            sntp_start_once();
+            publish_info(&st);
+            publish_name(); /* AT+NAME can change it */
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
             lfd3k_set_heap_min(esp_get_minimum_free_heap_size());
         }
