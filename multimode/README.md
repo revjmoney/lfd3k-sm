@@ -51,15 +51,20 @@ Why this address:
   reset): only the digital core and CPU are reset, the RTC domain is not, and
   neither the ROM nor the bootloader clears it.
 * After **power on** its contents are random, which the magic plus CRC rejects.
-* 0x600FFFC0 is 64 bytes below the top. The top 24 bytes hold every IDF app's
-  RTC timer data and IDF's optional bootloader retain area sits just under the
-  top; apps link their RTC code and data from the bottom up. The picker turns
-  RTC FAST heap off (`sdkconfig.defaults`) so nothing in the picker can land on
-  the token; the build map is checked for that.
+* 0x600FFFC0 is 64 bytes below the top. In the **picker** nothing owns it:
+  its RTC FAST code and data end at 0x600FE11C, its RTC timer data is the top
+  24 bytes (0x600FFFE8), and RTC FAST heap is off (`sdkconfig.defaults`, and
+  `main.c` refuses to build if it or an IDF RTC reserve option is turned on).
+* The **other modes** do use that memory: Arduino 2.x (Simian, RNode), the
+  LFD3K-SM modem and Meshtastic all keep RTC FAST in their heap, and Arduino
+  reserves only the top 16 bytes. So the address is not free in those modes, and
+  it does not need to be: the token is only trusted on the boot right after the
+  picker wrote it, the bootloader consumes it there, and stray heap data never
+  forms a valid token (magic, zero pad, slot 0..15 and a matching CRC-32).
 * We do **not** use IDF's `BOOTLOADER_CUSTOM_RESERVE_RTC`: with it the
-  bootloader rewrites the top of RTC FAST on every boot, which would clobber
-  the RTC timer data of the other modes (Meshtastic keeps time across deep
-  sleep there). This bootloader writes RTC FAST only to clear a valid token,
+  bootloader rewrites the top of RTC FAST on every boot, deep sleep wakes
+  included, which would overwrite whatever the running mode keeps there across
+  a deep sleep. This bootloader writes RTC FAST only to clear a valid token,
   which exists only on the boot right after the picker.
 
 Other modes may scribble anything over that address; they never write a valid
@@ -76,9 +81,13 @@ token (magic, zero pad, CRC), and the token is consumed on the boot that sees it
 `esp_restart()` on the S3 ends in a CPU0 software reset (reason 0x0C), so both
 0x03 and 0x0C count as software resets.
 
-Consequences: a mode that reboots itself (crash, watchdog, its own restart)
-comes back through the picker, which starts it again after 5 s unless PRG is
-pressed. The override keeps the stock steps (`bootloader_init`, partition table,
+On the token path the bootloader also checks that otadata selects the slot the
+token names and that its image verifies; otherwise it boots the picker, so the
+stock loader never falls back to a neighbouring mode.
+
+Consequences: a mode that reboots itself comes back through the picker. After a
+normal restart the picker starts it again after 5 s unless PRG is pressed; after
+a crash (panic, watchdog, brownout) the picker opens the list instead (see below). The override keeps the stock steps (`bootloader_init`, partition table,
 `bootloader_utility_get_selected_boot_partition`, `bootloader_utility_load_boot_image`)
 and only changes the index. If the chosen image fails verification the stock
 loader tries the other slots.
@@ -89,15 +98,21 @@ loader tries the other slots.
   up from interlaced scan lines, a glint crosses them, a sweep runs along the
   B B S rule, a 5 dot countdown runs at the bottom, "PRESS PRG FOR MODES".
 * PRG during the logo: mode list (LFD3K-SM, SIMIAN RADAR, RNODE, MESH). The arrow
-  marks the last used mode. Tap: next. Hold about 0.8 s: start. 15 s with no
-  press: the highlighted mode starts.
+  marks the last used mode. Tap: next. Hold about 0.8 s, then release: start
+  (the mode starts only once PRG is up, so it never boots with GPIO0 low).
+  15 s with no press: the highlighted mode starts.
+* After a crash (the picker sees a panic, task or interrupt watchdog, or
+  brownout reset reason) nothing starts by itself: the logo ends in the list with
+  the line LAST MODE CRASHED, and the 15 s idle start is off for that boot. The
+  next normal boot (power on, RST button) behaves as usual.
 * No press during the logo: the last mode starts (stored in `picker_nvs`,
   namespace `picker`, key `last`); on the first ever boot: LFD3K-SM.
 * Slots without an app image (image magic 0xE9, S3 chip id, app descriptor magic
   0xABCD5432 at offset 0x20, read with `esp_partition_read`) show NO IMAGE and
   cannot be started. If a start fails anyway, NO IMAGE shows and the list stays.
-* Starting a mode: `esp_ota_set_boot_partition` (skipped when otadata already
-  points there), save the last mode, write the token, `esp_restart()`.
+* Starting a mode: a full `esp_image_verify` of the slot every time (a failure
+  shows NO IMAGE and stays), `esp_ota_set_boot_partition` (skipped when otadata
+  already points there), save the last mode, write the token, `esp_restart()`.
 * Console and logs on UART0 only; nothing on the native USB port. The picker
   only ever opens its own `picker_nvs`, never the shared `nvs`.
 

@@ -403,8 +403,8 @@ void pk_draw_list(uint8_t fb[PK_FB_BYTES], const pk_state_t *s, uint32_t now)
         if (sel) {
             fill(fb, 0, y, W, ROW_H - 2, 1);
             /* hold progress: the bar's bottom edge empties as PRG is held */
-            if (s->phase == PK_LIST && s->down && s->armed && !s->long_done) {
-                uint32_t held = now - s->down_ms;
+            if (s->phase == PK_LIST && s->down && s->armed) {
+                uint32_t held = s->hold_fired ? PK_LONG_MS : now - s->down_ms;
                 if (held > PK_LONG_MS) {
                     held = PK_LONG_MS;
                 }
@@ -433,14 +433,19 @@ void pk_draw_list(uint8_t fb[PK_FB_BYTES], const pk_state_t *s, uint32_t now)
         } else {
             text_c(fb, FOOT_Y, "NO IMAGE", 1);
         }
+    } else if (s->phase == PK_LIST && s->hold_fired) {
+        text_c(fb, FOOT_Y, "RELEASE TO START", 1);
+    } else if (pk_crash_note(s)) {
+        text_c(fb, FOOT_Y, "LAST MODE CRASHED", 1);
+        hline(fb, 4, W - 5, H - 1, 1); /* a solid rule marks it as a warning */
     } else if (s->valid[s->sel]) {
         text_c(fb, FOOT_Y, "TAP NEXT  HOLD START", 1);
     } else {
         text_c(fb, FOOT_Y, "NO IMAGE  TAP NEXT", 1);
     }
 
-    /* idle bar: the last row of pixels runs out over 15 s */
-    if (s->phase == PK_LIST && !s->down) {
+    /* idle bar: the last row of pixels runs out over 15 s (off after a crash) */
+    if (s->phase == PK_LIST && !s->down && !s->crashed) {
         uint32_t idle = now - s->input_ms;
         if (idle > PK_IDLE_MS) {
             idle = PK_IDLE_MS;

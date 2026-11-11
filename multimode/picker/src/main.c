@@ -11,6 +11,7 @@
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -22,7 +23,20 @@
 #include "nvs_flash.h"
 #include "picker_draw.h"
 #include "picker_menu.h"
+#include "sdkconfig.h"
 #include "ssd1306.h"
+
+/* The launch token is written to a fixed RTC FAST address; nothing in the
+ * picker may own that memory (multimode/README.md). */
+#if CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP
+#error "picker: RTC FAST heap must stay off, it could hand out the launch token address"
+#endif
+#if CONFIG_BOOTLOADER_RESERVE_RTC_MEM || CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC || CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP
+#error "picker: the IDF RTC reserve area must stay off (it moves into the top of RTC FAST)"
+#endif
+#if CONFIG_ESP32S3_RTCDATA_IN_FAST_MEM
+#error "picker: RTC data must not be placed in RTC FAST"
+#endif
 
 static const char *TAG = "picker";
 
@@ -150,6 +164,15 @@ static void launch(int mode, int stored)
         ESP_LOGW(TAG, "%s: no image", pk_mode_name(mode));
         return;
     }
+    /* Full verify (header, segments, SHA-256) every time, even when otadata
+     * already points here: a broken slot must never reach the bootloader,
+     * whose fallback would boot a neighbouring mode instead. */
+    esp_image_metadata_t md;
+    const esp_partition_pos_t pos = {.offset = p->address, .size = p->size};
+    if (esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &md) != ESP_OK) {
+        ESP_LOGW(TAG, "%s: image does not verify", pk_mode_name(mode));
+        return;
+    }
     const esp_partition_t *cur = esp_ota_get_boot_partition();
     if (cur != p) { /* skip the otadata write when it already points there */
         esp_err_t e = esp_ota_set_boot_partition(p); /* verifies the whole image */
@@ -188,12 +211,19 @@ void app_main(void)
         ESP_LOGI(TAG, "%-12s ota_%d %s", pk_mode_name(i), pk_mode_ota(i), valid[i] ? "image" : "NO IMAGE");
     }
 
+    /* A mode that crashed (panic, watchdog, brownout) is not restarted
+     * automatically: the list opens instead. Normal boots behave as usual. */
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool crashed = rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT ||
+                   rr == ESP_RST_WDT || rr == ESP_RST_BROWNOUT;
+    ESP_LOGI(TAG, "reset reason %d%s", (int)rr, crashed ? ", last mode crashed" : "");
+
     bool level = gpio_get_level(PIN_PRG) == 0;
     bool raw_last = level;
     int same = 0;
     uint32_t t0 = now_ms();
     pk_state_t st;
-    pk_init(&st, stored, valid, level, t0);
+    pk_init(&st, stored, valid, level, crashed, t0);
     uint32_t last_frame = 0;
     bool first = true;
 

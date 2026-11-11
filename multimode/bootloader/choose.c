@@ -51,3 +51,11 @@ boot_choice_t choose_boot(uint32_t reset_reason, const boot_token_t *token, bool
     }
     return BOOT_PICKER;
 }
+
+boot_choice_t choose_token_target(int otadata_index, const boot_token_t *token, bool image_ok)
+{
+    if (!lfmp_token_valid(token) || otadata_index < 0 || otadata_index != (int)token->slot) {
+        return BOOT_PICKER;
+    }
+    return image_ok ? BOOT_OTADATA : BOOT_PICKER;
+}

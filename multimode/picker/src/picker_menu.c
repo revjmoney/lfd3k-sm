@@ -19,7 +19,7 @@ static void to_list(pk_state_t *s, uint32_t now)
     s->phase_ms = now;
     s->input_ms = now;
     s->armed = false; /* a press already held (the one that opened the list) never counts */
-    s->long_done = false;
+    s->hold_fired = false;
 }
 
 static void no_image(pk_state_t *s, uint32_t now)
@@ -42,7 +42,8 @@ static void start(pk_state_t *s, int mode, uint32_t now)
     }
 }
 
-void pk_init(pk_state_t *s, int last, const bool valid[PK_MODES], bool down, uint32_t now_ms)
+void pk_init(pk_state_t *s, int last, const bool valid[PK_MODES], bool down, bool crashed,
+             uint32_t now_ms)
 {
     if (last < 0 || last >= PK_MODES) {
         last = PK_LFD3K;
@@ -57,10 +58,12 @@ void pk_init(pk_state_t *s, int last, const bool valid[PK_MODES], bool down, uin
     }
     s->down = down;
     s->armed = false;
-    s->long_done = false;
+    s->hold_fired = false;
     s->down_ms = now_ms;
     s->noimg_until = 0;
     s->launch = -1;
+    s->crashed = crashed;
+    s->touched = false;
     if (down) {
         to_list(s, now_ms);
     }
@@ -82,7 +85,9 @@ void pk_update(pk_state_t *s, bool down, uint32_t now)
             s->sel = s->last;
         } else if (now - s->phase_ms >= PK_LOGO_MS) {
             s->sel = s->last;
-            if (s->valid[s->last]) {
+            if (s->crashed) {
+                to_list(s, now); /* never restart a mode that just crashed */
+            } else if (s->valid[s->last]) {
                 start(s, s->last, now);
             } else {
                 to_list(s, now);
@@ -94,19 +99,29 @@ void pk_update(pk_state_t *s, bool down, uint32_t now)
     case PK_LIST:
         if (pressed) {
             s->armed = true;
-            s->long_done = false;
+            s->hold_fired = false;
             s->down_ms = now;
             s->input_ms = now;
+            s->touched = true;
         } else if (released) {
-            if (s->armed && !s->long_done) {
-                s->sel = (uint8_t)((s->sel + 1) % PK_MODES);
+            if (s->armed) {
+                if (s->hold_fired) {
+                    start(s, s->sel, now); /* launch only once PRG is up */
+                } else {
+                    s->sel = (uint8_t)((s->sel + 1) % PK_MODES);
+                }
             }
             s->armed = false;
+            s->hold_fired = false;
             s->input_ms = now;
-        } else if (down && s->armed && !s->long_done && now - s->down_ms >= PK_LONG_MS) {
-            s->long_done = true;
-            start(s, s->sel, now);
-        } else if (!down && now - s->input_ms >= PK_IDLE_MS) {
+        } else if (down && s->armed && !s->hold_fired && now - s->down_ms >= PK_LONG_MS) {
+            if (s->valid[s->sel]) {
+                s->hold_fired = true; /* wait for the release */
+            } else {
+                no_image(s, now);
+                s->armed = false; /* the release of this press does nothing */
+            }
+        } else if (!down && !s->crashed && now - s->input_ms >= PK_IDLE_MS) {
             s->input_ms = now; /* restart the idle timer whatever happens */
             start(s, s->sel, now);
         }
@@ -125,10 +140,13 @@ void pk_launch_failed(pk_state_t *s, uint32_t now_ms)
         s->sel = (uint8_t)m;
     }
     s->launch = -1;
-    to_list(s, now_ms);
-    s->armed = false;
-    s->long_done = s->down; /* a press still held must be released first */
+    to_list(s, now_ms); /* a press still held must be released first (armed off) */
     no_image(s, now_ms);
+}
+
+bool pk_crash_note(const pk_state_t *s)
+{
+    return s->crashed && !s->touched;
 }
 
 bool pk_noimg(const pk_state_t *s, uint32_t now_ms)

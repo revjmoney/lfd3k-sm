@@ -50,4 +50,12 @@ bool lfmp_token_valid(const boot_token_t *t);
  * too, so it can never fire later. */
 boot_choice_t choose_boot(uint32_t reset_reason, const boot_token_t *token, bool *clear_token);
 
+/* Second check on the token path (software reset with a valid token), after
+ * otadata was read: otadata_index is the ota slot otadata selects (-1 for none
+ * or factory), image_ok whether that slot's image verified. Boots otadata only
+ * when the slot is the one the token names and its image is good; anything
+ * else goes to the picker, so the stock loader never falls back to a
+ * neighbouring mode. Pure. */
+boot_choice_t choose_token_target(int otadata_index, const boot_token_t *token, bool image_ok);
+
 #endif

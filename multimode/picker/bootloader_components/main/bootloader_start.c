@@ -21,6 +21,7 @@
 #include "bootloader_init.h"
 #include "bootloader_utility.h"
 #include "bootloader_common.h"
+#include "esp_image_format.h"
 #include "choose.h"
 
 #if CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP || CONFIG_BOOTLOADER_RESERVE_RTC_MEM
@@ -44,6 +45,10 @@ static const char *TAG = "boot";
 
 static int select_partition_number(bootloader_state_t *bs, boot_choice_t choice);
 
+/* The token as read, kept for the slot check after otadata is known. */
+static boot_token_t s_tok;
+static bool s_token_used;
+
 /* Reads the token with 32 bit accesses and decides; clears it when told to. */
 static boot_choice_t read_and_consume_token(void)
 {
@@ -51,10 +56,12 @@ static boot_choice_t read_and_consume_token(void)
     uint32_t w[3] = {rtc[0], rtc[1], rtc[2]};
     boot_token_t tok;
     __builtin_memcpy(&tok, w, sizeof(tok));
+    s_tok = tok;
 
     uint32_t reason = (uint32_t)esp_rom_get_reset_reason(0);
     bool clear = false;
     boot_choice_t choice = choose_boot(reason, &tok, &clear);
+    s_token_used = clear && choice == BOOT_OTADATA;
     if (clear) {
         rtc[0] = 0;
         rtc[1] = 0;
@@ -101,7 +108,25 @@ static int select_partition_number(bootloader_state_t *bs, boot_choice_t choice)
         }
         ESP_LOGE(TAG, "multimode: no factory (picker) partition, using otadata");
     }
-    return bootloader_utility_get_selected_boot_partition(bs);
+    int idx = bootloader_utility_get_selected_boot_partition(bs);
+    if (!s_token_used || idx == INVALID_INDEX) {
+        return idx; /* deep-sleep wake: the stock path */
+    }
+
+    // 3. Token path: boot only the slot the picker chose, and only if it verifies.
+    //    Otherwise the picker, never the stock fallback to a neighbouring slot.
+    int ota = (idx >= 0 && idx < (int)bs->app_count) ? idx : -1;
+    bool ok = false;
+    if (ota >= 0 && ota == (int)s_tok.slot && bs->ota[ota].offset != 0) {
+        esp_image_metadata_t md;
+        ok = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &bs->ota[ota], &md) == ESP_OK;
+    }
+    if (choose_token_target(ota, &s_tok, ok) == BOOT_OTADATA) {
+        return idx;
+    }
+    ESP_LOGE(TAG, "multimode: token slot %u, otadata %d, image %s: picker", (unsigned)s_tok.slot, idx,
+             ok ? "ok" : "bad");
+    return bs->factory.offset != 0 ? FACTORY_INDEX : idx;
 }
 
 // Return global reent struct if any newlib functions are linked to bootloader

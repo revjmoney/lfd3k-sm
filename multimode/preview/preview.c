@@ -36,7 +36,7 @@ int main(int argc, char **argv)
     bool valid[PK_MODES] = {true, false, true, true};
     pk_state_t s;
     uint32_t now = 1000;
-    pk_init(&s, PK_RNODE, valid, false, now);
+    pk_init(&s, PK_RNODE, valid, false, false, now);
     pk_update(&s, true, now += 20); /* PRG during the logo opens the list */
     pk_update(&s, false, now += 80);
     pk_update(&s, false, now += 2000);
@@ -76,6 +76,27 @@ int main(int argc, char **argv)
     pk_draw_launch(fb, s.launch, 300); /* 6: idle start of RNODE */
     put(mf);
     pk_draw_launch(fb, PK_SIMIAN, 600); /* 7: long name card */
+    put(mf);
+
+    /* 8: held past 0.8 s on a good slot: nothing starts until release */
+    pk_init(&s, PK_LFD3K, valid, false, false, now);
+    pk_update(&s, true, now += 20);
+    pk_update(&s, false, now += 100);
+    pk_update(&s, true, now += 300);
+    pk_update(&s, true, now += 900);
+    fprintf(stderr, "held: phase %d (1 = still list)\n", (int)s.phase);
+    pk_draw_list(fb, &s, now);
+    put(mf);
+    pk_update(&s, false, now += 30);
+    fprintf(stderr, "released: phase %d launch %d\n", (int)s.phase, s.launch);
+
+    /* 9: boot after a crash: the logo ends in the list, no idle start */
+    pk_init(&s, PK_MESH, valid, false, true, now);
+    for (int i = 0; i < 60; i++) {
+        pk_update(&s, false, now += 500);
+    }
+    fprintf(stderr, "crashed after 30 s: phase %d (1 = list)\n", (int)s.phase);
+    pk_draw_list(fb, &s, now);
     put(mf);
 
     fclose(lf);
