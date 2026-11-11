@@ -29,6 +29,12 @@ core and ffi have no dependencies outside the workspace. The only third-party cr
 | ESP-IDF (via PlatformIO `framework-espidf`) | 5.4.1 (platform espressif32 6.11.0) | Apache-2.0 (bundled components carry their own permissive licenses) | firmware |
 | FreeRTOS kernel (part of ESP-IDF) | as bundled | MIT | firmware |
 
+## Fonts (rendered glyph bitmaps only)
+
+| Font | License | Used in |
+|------|---------|---------|
+| Noto Sans SC, Noto Sans JP, Noto Sans Devanagari, Noto Sans Bengali, Noto Sans Arabic | SIL Open Font License 1.1 | rendered glyph bitmaps only: the idle show words in `firmware/src/idle_words.h`, made on the PC by `tools/gen_idle_words.py`; the font files stay in `vendor/fonts/` (git-ignored, not in the repo or the firmware) |
+
 ## PC tools (not shipped)
 
 These run on Rev's PC only and are never built into the firmware or the core. Installed by Rev, not vendored in the repo.
@@ -36,4 +42,5 @@ These run on Rev's PC only and are never built into the firmware or the core. In
 | Tool | Version | License | Used in |
 |------|---------|---------|---------|
 | pyserial | 3.5 | BSD-3-Clause | `tools/lfd3k_term.py` (bench terminal), installed with pip |
+| Pillow with libraqm | 12.3 | MIT-CMU (Pillow; its bundled libraqm, FreeType, HarfBuzz and FriBiDi carry their own licenses; PC only, nothing of it is linked into the firmware) | `tools/gen_idle_words.py` (shapes and renders the script words) and `tools/idle_preview.py` (GIF and contact sheet) |
 | MinGW gcc | as installed (MSYS2 mingw64) | GPL with the GCC runtime library exception | builds `tools/panel_check` only; nothing it produces is shipped |

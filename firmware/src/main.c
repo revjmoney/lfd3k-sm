@@ -1,9 +1,13 @@
 /* LFD3K-SM firmware: the modem task glues the USB stream, the Rust core and
  * the radio together. Only this task ever calls lfd3k_*. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include "driver/temperature_sensor.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_netif_sntp.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
@@ -187,6 +191,79 @@ static void publish_net(void)
     memset(&n, 0, sizeof(n));
 }
 
+/* Idle show facts. The clock: SNTP from pool.ntp.org, started once the client side has
+ * an address, shown in Rev's local time (South Carolina, US Eastern: EST, daylight time
+ * from the second Sunday of March to the first Sunday of November). */
+#define LOCAL_TZ   "EST5EDT,M3.2.0,M11.1.0"
+#define NTP_SERVER "pool.ntp.org"
+
+static bool s_sntp_started;
+static temperature_sensor_handle_t s_tsens; /* NULL when the sensor did not start */
+
+/* SNTP's callback (lwIP task): only sets a flag under the panel lock. */
+static void sntp_synced(struct timeval *tv)
+{
+    (void)tv;
+    panel_note_time_synced();
+}
+
+static void sntp_start_once(void)
+{
+    if (s_sntp_started) {
+        return;
+    }
+    char ip[16];
+    bool up = false;
+    wifi_link_get_ip(ip, &up);
+    if (!up) {
+        return;
+    }
+    s_sntp_started = true; /* one try per boot; SNTP keeps polling by itself */
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER);
+    cfg.sync_cb = sntp_synced;
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    ESP_LOGI(TAG, "SNTP %s (%s)", NTP_SERVER, esp_err_to_name(err));
+}
+
+static void tsens_start(void)
+{
+    temperature_sensor_config_t tc = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    temperature_sensor_handle_t h = NULL;
+    if (temperature_sensor_install(&tc, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "temperature sensor did not start");
+        return;
+    }
+    if (temperature_sensor_enable(h) != ESP_OK) {
+        temperature_sensor_uninstall(h);
+        ESP_LOGW(TAG, "temperature sensor did not start");
+        return;
+    }
+    s_tsens = h;
+}
+
+/* Clock, uptime and chip temperature for the idle show, once a second. Heard count,
+ * last caller and GPS stay empty for now (later tasks); the location stays hidden. */
+static void publish_info(void)
+{
+    panel_info_t in = PANEL_INFO_INIT;
+    in.uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    if (panel_time_synced()) {
+        time_t now = time(NULL);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        in.time_valid = 1;
+        in.hour = (uint8_t)lt.tm_hour;
+        in.minute = (uint8_t)lt.tm_min;
+    }
+    float c;
+    if (s_tsens && temperature_sensor_get_celsius(s_tsens, &c) == ESP_OK) {
+        int v = (int)(c < 0 ? c - 0.5f : c + 0.5f);
+        in.temp_valid = 1;
+        in.temp_c = (int8_t)(v < -99 ? -99 : (v > 127 ? 127 : v));
+    }
+    panel_publish_info(&in);
+}
+
 static void modem_task(void *arg)
 {
     (void)arg;
@@ -218,6 +295,10 @@ static void modem_task(void *arg)
         wifi_link_apply(&wc);
         memset(&wc, 0, sizeof(wc));
     }
+
+    setenv("TZ", LOCAL_TZ, 1);
+    tzset();
+    tsens_start();
 
     esp_task_wdt_add(NULL);
     uint32_t last_second = (uint32_t)(esp_timer_get_time() / 1000);
@@ -291,6 +372,8 @@ static void modem_task(void *arg)
             }
             lfd3k_set_wifi_status(line);
             publish_net();
+            sntp_start_once();
+            publish_info();
             lfd3k_set_stack_free((uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
             lfd3k_set_heap_min(esp_get_minimum_free_heap_size());
         }

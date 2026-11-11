@@ -1,7 +1,9 @@
 /* Front panel layout (128x64). Pure C, no ESP-IDF.
  *
  *  y  0..10   eight light boxes, 15 wide at x = 16*i: OH CD SD RD HS EC DC AA
- *  y 14..27   state word or tier name, 2x text, centred (Wi-Fi call: WIFI TCP, BRIDGE)
+ *  y 14..27   state word or tier name, 2x text, centred (Wi-Fi call: WIFI TCP, BRIDGE).
+ *             While idle: the idle show (idle_show.c), y 12..29: the word changes every
+ *             8 s loop into another language or a fact, with a transition each time
  *  y 30..36   rate line, 1x text, centred (online) / carrier pulse (idle, y 33..35)
  *  y 39..43   tier ladder, 8 cells 14 wide at x = 16*i (training, online)
  *  y 46..52   board name (up to 16 chars) at x 0; LFD3K-SM when none given. While idle it
@@ -14,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "font5x7.h"
+#include "idle_show.h"
 #include "panel_render.h"
 
 #define W 128
@@ -132,6 +135,24 @@ static void name_row(char *out, size_t cap, const char *nm, uint32_t now_ms)
     snprintf(out, cap, "%s", rows[(now_ms / NET_ROW_MS) % (uint32_t)n]);
 }
 
+/* ---- Facts for the idle show ---- */
+static panel_info_t s_info = PANEL_INFO_INIT;
+
+void panel_render_set_info(const panel_info_t *info)
+{
+    if (info == NULL) {
+        panel_info_t none = PANEL_INFO_INIT;
+        s_info = none;
+        return;
+    }
+    s_info = *info;
+    s_info.last_caller[sizeof(s_info.last_caller) - 1] = 0;
+    s_info.gps[sizeof(s_info.gps) - 1] = 0;
+    if (s_info.hide_location) {
+        memset(s_info.gps, 0, sizeof(s_info.gps)); /* never kept, never drawn */
+    }
+}
+
 static const char *const LIGHT[8] = {"OH", "CD", "SD", "RD", "HS", "EC", "DC", "AA"};
 static const uint16_t TIER_SF[8] = {12, 11, 10, 9, 8, 7, 6, 5};
 static const uint32_t TIER_BPS[8] = {1172, 2148, 3906, 7031, 12500, 21875, 37500, 62500};
@@ -168,27 +189,7 @@ static void bar(uint8_t *fb, int x, int y, int w, int h, int filled)
     fill(fb, x + 1, y + 1, clampi(filled, 0, w - 2), h - 2, 1);
 }
 
-/* ---- Idle word: digital disintegrate and reintegrate ----
- * An 8 s loop, a pure function of now_ms (same picture on the PC and the V4):
- *   0..4000 ms     "IDLE" solid
- *   4000..5000     it breaks into its 2x2 pixel cells, left to right with jitter;
- *                  each cell shrinks to one dot and flies off
- *   ..6000         the dots bounce around the open band, little 0 and 1 bits fly too
- *   6000..7000     each dot homes back to its cell (eased), the bits vanish
- *   7000..8000     solid again
- * Dots and bits fly inside x 0..127, y 13..44, between the lights and the name row. */
-#define DIS_LOOP_MS   8000u
-#define DIS_START_MS  4000u
-#define DIS_SPREAD_MS 600u  /* left to right stagger of the break */
-#define DIS_HOME_MS   6000u
-#define DIS_BACK_MS   500u  /* each dot's trip home */
-#define DIS_JITTER_MS 400u  /* stagger of the trips home */
-#define FLY_X0 0
-#define FLY_X1 127
-#define FLY_Y0 13
-#define FLY_Y1 44
-#define NBITS 7
-
+/* Hash for the lights shuffle. */
 static uint32_t mix(uint32_t v)
 {
     v ^= v >> 16;
@@ -197,49 +198,6 @@ static uint32_t mix(uint32_t v)
     v *= 0x846CA68Bu;
     v ^= v >> 16;
     return v;
-}
-
-/* Position along one axis bouncing between lo and hi: start + speed * dt, folded.
- * Units: 1/256 pixel; speed in 1/256 pixel per ms. */
-static int bounce(int start_q, int speed_q, int dt, int lo, int hi)
-{
-    int lo_q = lo * 256, span = (hi - lo) * 256;
-    if (span <= 0) {
-        return lo;
-    }
-    long long raw = (long long)start_q - lo_q + (long long)speed_q * dt;
-    long long per = 2LL * span;
-    long long p = raw % per;
-    if (p < 0) {
-        p += per;
-    }
-    if (p > span) {
-        p = per - p;
-    }
-    return (int)((lo_q + p) / 256);
-}
-
-/* Signed speed from a hash: 10..30 (1/256 px per ms, about 40 to 120 px/s). */
-static int speed_from(uint32_t h)
-{
-    int s = 10 + (int)(h % 21);
-    return (h & 0x100u) ? s : -s;
-}
-
-/* 3x5 bits, our own: rows top to bottom, bit 2 = left column. */
-static const uint8_t BIT0[5] = {7, 5, 5, 5, 7};
-static const uint8_t BIT1[5] = {2, 6, 2, 2, 7};
-
-static void tiny_bit(uint8_t *fb, int x, int y, int one)
-{
-    const uint8_t *g = one ? BIT1 : BIT0;
-    for (int r = 0; r < 5; r++) {
-        for (int c = 0; c < 3; c++) {
-            if (g[r] & (4u >> c)) {
-                px(fb, x + c, y + r, 1);
-            }
-        }
-    }
 }
 
 /* ---- Idle line: breathing scope of the real channel ----
@@ -329,79 +287,6 @@ static void idle_line(uint8_t *fb, uint32_t now_ms)
     }
 }
 
-static void idle_word(uint8_t *fb, uint32_t now_ms)
-{
-    static const char word[] = "IDLE";
-    const int sc = 2, y0 = 14;
-    const int x0 = (W - text_w(word, sc)) / 2;
-    uint32_t t = now_ms % DIS_LOOP_MS;
-
-    if (t < DIS_START_MS || t >= DIS_HOME_MS + DIS_BACK_MS + DIS_JITTER_MS) {
-        text(fb, x0, y0, word, sc, 1);
-        return;
-    }
-
-    int ndx = 0;
-    for (int ci = 0; word[ci]; ci++) {
-        unsigned c = (unsigned char)word[ci];
-        const uint8_t *g = &font5x7[(c - FONT_FIRST) * 5];
-        for (int col = 0; col < 5; col++) {
-            for (int row = 0; row < 7; row++) {
-                if (!(g[col] & (1u << row))) {
-                    continue;
-                }
-                int hx = x0 + ci * 6 * sc + col * sc;
-                int hy = y0 + row * sc;
-                uint32_t h1 = mix((uint32_t)ndx * 2654435761u + 0x1F3Du);
-                uint32_t h2 = mix(h1 ^ 0xA5A5A5A5u);
-                ndx++;
-
-                /* when this cell breaks: left to right plus jitter */
-                uint32_t brk = DIS_START_MS + (uint32_t)(hx - x0) * DIS_SPREAD_MS / 64u + (h1 % 120u);
-                if (t < brk) {
-                    fill(fb, hx, hy, sc, sc, 1);
-                    continue;
-                }
-                int dt = (int)(t - brk);
-                int vx = speed_from(h1), vy = speed_from(h2) * 2 / 3;
-                int fx = bounce(hx * 256, vx, dt, FLY_X0, FLY_X1);
-                int fy = bounce(hy * 256, vy, dt, FLY_Y0, FLY_Y1);
-
-                uint32_t back = DIS_HOME_MS + (h2 % DIS_JITTER_MS);
-                if (t >= back) {
-                    uint32_t k = t - back; /* 0..DIS_BACK_MS */
-                    if (k >= DIS_BACK_MS) {
-                        fill(fb, hx, hy, sc, sc, 1);
-                        continue;
-                    }
-                    /* ease out: e = 1 - (1 - k)^2, in 1/1024 */
-                    int u = (int)((DIS_BACK_MS - k) * 1024u / DIS_BACK_MS);
-                    int e = 1024 - u * u / 1024;
-                    fx = fx + (hx - fx) * e / 1024;
-                    fy = fy + (hy - fy) * e / 1024;
-                }
-                px(fb, fx, fy, 1);
-            }
-        }
-    }
-
-    /* the bits: born as the word breaks, gone before it is whole again */
-    if (t >= DIS_START_MS + 200u && t < DIS_HOME_MS + 300u) {
-        int dt = (int)(t - DIS_START_MS);
-        for (int b = 0; b < NBITS; b++) {
-            uint32_t h1 = mix((uint32_t)(b + 101) * 40503u);
-            uint32_t h2 = mix(h1 + 0x9E3779B9u);
-            int sx = (x0 + (int)(h1 % 46u)) * 256;
-            int sy = (y0 + (int)(h2 % 10u)) * 256;
-            int x = bounce(sx, speed_from(h2) * 3 / 2, dt, FLY_X0, FLY_X1 - 2);
-            int y = bounce(sy, speed_from(h1), dt, FLY_Y0, FLY_Y1 - 4);
-            /* flip between 0 and 1 now and then */
-            int one = (int)((h1 >> 3) + (uint32_t)dt / (180u + h2 % 200u)) & 1;
-            tiny_bit(fb, x, y, one);
-        }
-    }
-}
-
 /* ---- Idle lights shuffle ----
  * While idle the eight light boxes slide into a new order once per 8 s loop, between
  * 1000 and 2200 ms of the loop; every fourth loop they sort back to OH CD SD RD HS EC
@@ -434,8 +319,9 @@ static void light_layout(int idle, uint32_t now_ms, int lx[8], int ly[8], int mo
 {
     uint32_t k = now_ms / SHUF_LOOP_MS, t = now_ms % SHUF_LOOP_MS;
     int cur[8], prev[8];
-    light_order(k, cur);
-    light_order(k == 0u ? 0u : k - 1u, prev);
+    /* the lights hold still while the idle show runs its scroller */
+    light_order(idle_show_light_slot(k), cur);
+    light_order(k == 0u ? 0u : idle_show_light_slot(k - 1u), prev);
     for (int i = 0; i < 8; i++) {
         lx[i] = i * 16;
         ly[i] = 0;
@@ -566,7 +452,7 @@ void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, ui
             }
             break;
         default: {
-            idle_word(fb, now_ms);
+            idle_show_draw(fb, &s_info, now_ms); /* words, facts, transitions */
             idle_line(fb, now_ms); /* breathing scope of the channel */
             break;
         }

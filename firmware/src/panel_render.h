@@ -36,6 +36,26 @@ typedef struct {
 /* Hand the renderer the latest Wi-Fi strings (NULL: none, the name row stays). */
 void panel_render_set_net(const panel_net_t *n);
 
+/* Facts for the idle show's info items (the idle word rotates through languages and
+ * these). Each item is shown only while its field is set. Strings NUL terminated. */
+typedef struct {
+    uint8_t time_valid;     /* 1 once SNTP synced: hour and minute are local time */
+    uint8_t hour, minute;   /* 24 h */
+    uint32_t uptime_s;      /* 0: no uptime item */
+    uint8_t temp_valid;
+    int8_t temp_c;          /* chip temperature */
+    uint16_t heard;         /* modems heard; 0: no HEARD item */
+    char last_caller[17];   /* empty: none */
+    char gps[24];           /* coordinates as text; empty: none */
+    uint8_t hide_location;  /* 1 (default): the gps text is never drawn */
+} panel_info_t;
+
+/* Start every panel_info_t from this so the location stays hidden unless asked. */
+#define PANEL_INFO_INIT {.hide_location = 1}
+
+/* Hand the renderer the latest facts (NULL: back to none, location hidden). */
+void panel_render_set_info(const panel_info_t *info);
+
 /* Draws the front panel for status s (name: board name, NULL or empty shows LFD3K-SM) at time now_ms. Keeps a little animation
  * memory (last state) in statics; call it with non-decreasing now_ms. */
 void panel_render(const lfd3k_status_t *s, const char *name, uint32_t now_ms, uint8_t fb[PANEL_FB_BYTES]);

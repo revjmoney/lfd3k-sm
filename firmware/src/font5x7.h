@@ -109,4 +109,24 @@ static const uint8_t font5x7[(FONT_LAST - FONT_FIRST + 1) * 5] = {
     0x08, 0x04, 0x08, 0x10, 0x08, /* ~ */
 };
 
+/* A few letters beyond ASCII for the idle show words, drawn here in the same face.
+ * Same column format; bit 7 is one row below the baseline (the cedilla). Cyrillic
+ * Р О С Т share their shape with Latin P O C T. Text that needs a code point not in
+ * either table draws '?'. */
+typedef struct {
+    uint16_t cp; /* Unicode code point */
+    uint8_t col[5];
+} font5x7_ext_t;
+
+static const font5x7_ext_t font5x7_ext[] = {
+    {0x041F, {0x7F, 0x01, 0x01, 0x01, 0x7F}}, /* Cyrillic PE */
+    {0x0420, {0x7F, 0x09, 0x09, 0x09, 0x06}}, /* Cyrillic ER */
+    {0x041E, {0x7F, 0x41, 0x41, 0x41, 0x7F}}, /* Cyrillic O */
+    {0x0421, {0x3E, 0x41, 0x41, 0x41, 0x41}}, /* Cyrillic ES */
+    {0x0422, {0x01, 0x01, 0x7F, 0x01, 0x01}}, /* Cyrillic TE */
+    {0x0419, {0x7C, 0x23, 0x12, 0x0B, 0x7C}}, /* Cyrillic SHORT I: cup breve over a short I */
+    {0x015E, {0x46, 0xC9, 0xC9, 0x49, 0x31}}, /* Turkish S with cedilla */
+};
+#define FONT_EXT_N ((int)(sizeof(font5x7_ext) / sizeof(font5x7_ext[0])))
+
 #endif
