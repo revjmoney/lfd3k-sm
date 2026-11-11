@@ -86,6 +86,10 @@ counts as a crash for the picker, so the first boot would show LAST MODE CRASHED
   Done on Rev's V4 (2026-11-11, rnodeconf 1.3.5): `rnodeconf COMn -i` (read only), then
   `rnodeconf COMn -r --product c3 --model c8 --hwrev 1` (Heltec LoRa32 v4 with PA), then
   `rnodeconf COMn -L` (must print the hash above), then `rnodeconf COMn -H <that hash>`.
+  TRAP: on the V4's native USB, `-H` closes the port right after sending and only the first 4 bytes
+  got saved (`-K` showed f312de7dffff...), so RNode said the firmware was corrupt. Fix: send the same
+  KISS frame (C0 58 <escaped hash> C0) with DTR and RTS held False and keep the port open about 10 s,
+  then check `rnodeconf COMn -K` shows the full hash.
 * **Do not long-press PRG in RNODE mode.** It may start RNode's console, which may mount and format the
   first SPIFFS partition, Meshtastic's data (unverified against the 1.86 source).
 * **First launch check.** The first start from the picker must reach LFD3K-SM (the modem screen, not the
