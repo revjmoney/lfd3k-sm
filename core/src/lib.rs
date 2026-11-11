@@ -7,6 +7,7 @@ pub mod directory;
 pub mod discovery;
 pub mod frame;
 pub mod link;
+pub mod lz;
 pub mod modem;
 pub mod radio;
 pub mod settings;

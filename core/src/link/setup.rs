@@ -10,15 +10,25 @@ impl Link {
         self.enq(t, FrameType::Keepalive, FLAG_PING, &p, true, false);
     }
 
-    /// Start a call. False if busy or a name is invalid.
-    pub fn dial(&mut self, me: &str, callee: &str, now: u32) -> bool {
+    /// Start a call. False if busy or a name is invalid. The CallReq offers
+    /// compression (capability byte) when S31 is 1.
+    pub fn dial(&mut self, me: &str, callee: &str, sregs: &SRegs, now: u32) -> bool {
         if self.state != State::Idle {
             return false;
         }
         let mut p = [0u8; QBUF];
-        let Ok(plen) = frame::call_req_payload(me, callee, &mut p) else {
+        let Ok(mut plen) = frame::call_req_payload(me, callee, &mut p) else {
             return false;
         };
+        let lz = lz_wanted(sregs);
+        if lz {
+            // Two 16 byte names plus the byte still fit a QBUF frame.
+            let Some(c) = p.get_mut(plen) else {
+                return false;
+            };
+            *c = frame::CAP_LZ;
+            plen += 1;
+        }
         let call_id = (now as u8) | 1;
         let h = Header {
             ftype: FrameType::CallReq,
@@ -33,6 +43,7 @@ impl Link {
         self.callreq_len = n as u8;
         self.call_id = call_id;
         self.reset_call(Role::Caller, now);
+        self.lz_mine = lz;
         self.state = State::Dialing;
         self.send_callreq(now);
         true
@@ -56,9 +67,12 @@ impl Link {
         }
         let call_id = self.call_id;
         let snr = self.my_snr;
+        let peer_lz = self.lz_peer;
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
+        self.lz_peer = peer_lz;
+        self.lz_mine = lz_wanted(sregs);
         self.own_cap = cap_tier(sregs);
         self.cap = self.own_cap;
         self.state = State::AwaitTierSet;
@@ -69,7 +83,9 @@ impl Link {
     pub(super) fn send_train(&mut self) {
         let s = self.my_snr.to_le_bytes();
         let p = [self.cap.index(), s[0], s[1]];
-        self.enq(Tier::ROBUST, FrameType::CallAck, 0, &[], false, false);
+        // The capability byte only when we offer LZ; empty is the old form.
+        let caps: &[u8] = if self.lz_mine { &[frame::CAP_LZ] } else { &[] };
+        self.enq(Tier::ROBUST, FrameType::CallAck, 0, caps, false, false);
         self.enq(Tier::ROBUST, FrameType::Train, 0, &p, false, false);
     }
 
@@ -122,6 +138,7 @@ impl Link {
         self.need_listen = true;
         self.turn = true;
         self.burst = 0;
+        self.lz = self.lz_mine && self.lz_peer;
         self.emit(Event::Connect(self.tier));
     }
 
@@ -134,14 +151,16 @@ impl Link {
         sregs: &SRegs,
         now: u32,
     ) {
-        let Ok((_, callee)) = frame::parse_call_req(p) else {
+        let Ok((_, callee, caps)) = frame::parse_call_req_caps(p) else {
             return;
         };
         if !callee.eq_ignore_ascii_case(me) || call_id == 0 {
             return;
         }
+        let peer_lz = caps & frame::CAP_LZ != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
+            self.lz_peer = peer_lz;
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;
             self.start = now;
@@ -152,6 +171,9 @@ impl Link {
         } else if call_id == self.call_id {
             self.last_req = now;
             self.my_snr = info.snr_x4;
+            if !self.is_connected() {
+                self.lz_peer = peer_lz;
+            }
             if self.state == State::AwaitTierSet && !self.got_tierset {
                 self.send_train();
                 self.last_periodic = now;

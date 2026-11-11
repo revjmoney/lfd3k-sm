@@ -202,7 +202,7 @@ impl Rig {
 
     /// Bytes the peer printed after its CONNECT line (call data).
     fn peer_data(&self) -> &[u8] {
-        let marker = b"/ARQ\r\n";
+        let marker = b"/ARQ/LZ\r\n";
         let at = self
             .peer_out
             .windows(marker.len())
@@ -212,7 +212,7 @@ impl Rig {
     }
 
     fn ffi_data(&self) -> &[u8] {
-        let marker = b"/ARQ\r\n";
+        let marker = b"/ARQ/LZ\r\n";
         let at = self
             .ffi_out
             .windows(marker.len())
@@ -546,7 +546,13 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
         for (_, f) in tx {
             let fr = decode(&f).expect("a valid frame");
             if fr.header.ftype == FrameType::Data {
-                first = Some(fr.payload.len());
+                // With /LZ the chunk goes out compressed: count host bytes.
+                let mut plain = [0u8; CHUNK];
+                first = Some(if fr.header.flags & lfd3k_core::frame::FLAG_LZ != 0 {
+                    lfd3k_core::lz::decompress(fr.payload, &mut plain).expect("valid LZ")
+                } else {
+                    fr.payload.len()
+                });
                 break;
             }
         }

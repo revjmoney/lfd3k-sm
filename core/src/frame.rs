@@ -5,8 +5,27 @@
 //! Types 1 to 11 are call frames; 12 to 14 (Beacon, ScanReq, ScanResp) are
 //! discovery frames with call id 0 and payloads laid out in `discovery.rs`.
 //! Older builds drop 12 to 14 as `BadType`.
+//!
+//! Header flags (low nibble of byte1): bit 0 `FLAG_MORE` (another frame
+//! follows at once), bit 1 `FLAG_PING` (Keepalive: please reply), bit 2
+//! `FLAG_LZ` (Data: the payload is compressed, see `lz.rs`), bit 3 free.
+//!
+//! Capabilities: a CallReq payload may end with one capability byte after
+//! the two names, and a CallAck payload may be that one byte. Bit 0 is
+//! `CAP_LZ`. Bits 1 to 3 are for later capabilities and are ignored; a byte
+//! with any of bits 4 to 7 set makes the CallReq malformed. No byte (the
+//! form older builds send) means no capabilities. Older builds refuse a
+//! CallReq that carries the byte, so it is only sent when it says something
+//! (S31 = 1).
 
 use crate::tier::Tier;
+
+/// Header flag on Data: the payload is LZ compressed (see `lz.rs`).
+pub const FLAG_LZ: u8 = 4;
+/// Capability bit: the station can take LZ compressed Data frames.
+pub const CAP_LZ: u8 = 1;
+/// Bits a capability byte may use.
+const CAP_MASK: u8 = 0x0F;
 
 /// First byte of every frame: 0xD = LFD3K-SM, 1 = air protocol version 1.
 pub const AIR_ID: u8 = 0xD1;
@@ -164,21 +183,42 @@ pub fn call_req_payload(caller: &str, callee: &str, out: &mut [u8]) -> Result<us
     Ok(total)
 }
 
+/// Caller and callee names of a CallReq payload (with or without the
+/// capability byte).
 pub fn parse_call_req(p: &[u8]) -> Result<(&str, &str), FrameError> {
+    parse_call_req_caps(p).map(|(a, b, _)| (a, b))
+}
+
+/// Caller, callee and capability byte (0 when absent) of a CallReq payload.
+pub fn parse_call_req_caps(p: &[u8]) -> Result<(&str, &str, u8), FrameError> {
     let (&l1, rest) = p.split_first().ok_or(FrameError::BadPayload)?;
     let (n1, rest) = rest
         .split_at_checked(l1 as usize)
         .ok_or(FrameError::BadPayload)?;
     let (&l2, rest) = rest.split_first().ok_or(FrameError::BadPayload)?;
-    if rest.len() != l2 as usize {
-        return Err(FrameError::BadPayload);
-    }
+    let (n2, tail) = rest
+        .split_at_checked(l2 as usize)
+        .ok_or(FrameError::BadPayload)?;
+    let caps = match tail {
+        [] => 0,
+        [c] if c & !CAP_MASK == 0 => *c,
+        _ => return Err(FrameError::BadPayload),
+    };
     let a = core::str::from_utf8(n1).map_err(|_| FrameError::BadPayload)?;
-    let b = core::str::from_utf8(rest).map_err(|_| FrameError::BadPayload)?;
+    let b = core::str::from_utf8(n2).map_err(|_| FrameError::BadPayload)?;
     if !valid_name(a) || !valid_name(b) {
         return Err(FrameError::BadPayload);
     }
-    Ok((a, b))
+    Ok((a, b, caps))
+}
+
+/// Capability byte of a CallAck payload: 0 for the empty payload older
+/// builds send, and for anything that is not one well-formed byte.
+pub fn parse_call_ack_caps(p: &[u8]) -> u8 {
+    match p {
+        [c] if c & !CAP_MASK == 0 => *c,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]

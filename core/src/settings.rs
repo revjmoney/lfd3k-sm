@@ -9,7 +9,7 @@
 //! |-------:|-----:|-------|
 //! | 0 | 4 | magic `LFS1` |
 //! | 4 | 1 | version (2) |
-//! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password |
+//! | 5 | 1 | flags: bit0 hotspot on, bit1 echo, bit2 verbose, bit3 show AP password, bit4 S31 = 0 (compression off) |
 //! | 6 | 16 | S registers S0, S2, S7, S12, S20, S21, S22, S30 as u16 (S30 two's complement) |
 //! | 22 | 1 | published forward index, 0xFF none |
 //! | 23 | 33 | hotspot SSID: length byte, 32 bytes zero padded |
@@ -26,10 +26,17 @@
 //! upgrade migrates the stored copy. A v1 blob is accepted only at exactly
 //! 899 bytes and a v2 blob only at exactly 900.
 //!
+//! S31 (phase 4, compression) lives in flags bit 4, stored inverted: a clear
+//! bit is S31 = 1, the default. So the layout, the length and the version
+//! stay as they were, and every v2 blob saved before S31 existed loads with
+//! compression on. A v1 blob with bit 4 set is refused (v1 never wrote it).
+//! An older build refuses a blob with bit 4 set (unknown flag) and falls
+//! back to its defaults; that only happens after a downgrade with S31 = 0.
+//!
 //! Forward record: used (0 or 1), name length, name\[16\], host length,
 //! host\[63\], port u16, mode (0 telnet, 1 raw). An unused record is all zero.
 
-use crate::at::SRegs;
+use crate::at::{SRegs, REG_LZ};
 use crate::frame::valid_name;
 
 /// Forward slots.
@@ -63,8 +70,13 @@ const FLAG_AP: u8 = 1;
 const FLAG_ECHO: u8 = 2;
 const FLAG_VERBOSE: u8 = 4;
 const FLAG_SHOW: u8 = 8;
+/// S31 = 0 (inverted, so blobs from before S31 load with it on).
+const FLAG_NO_LZ: u8 = 16;
+/// The registers in the 16 byte register field, in order. S31 is the
+/// flags bit above; every other register in `SRegs::NUMBERS` is here.
+const BLOB_REGS: [u8; NREGS] = [0, 2, 7, 12, 20, 21, 22, 30];
 
-const _: () = assert!(SRegs::NUMBERS.len() == NREGS);
+const _: () = assert!(SRegs::NUMBERS.len() == NREGS + 1);
 const _: () = assert!(BLOB_USED <= BLOB_LEN);
 
 fn printable(s: &str) -> bool {
@@ -488,13 +500,14 @@ impl Settings {
             (self.echo, FLAG_ECHO),
             (self.verbose, FLAG_VERBOSE),
             (self.show_ap_pass, FLAG_SHOW),
+            (self.sregs.get(REG_LZ) == Some(0), FLAG_NO_LZ),
         ] {
             if on {
                 flags |= bit;
             }
         }
         w.put(&[flags]);
-        for n in SRegs::NUMBERS {
+        for n in BLOB_REGS {
             w.put(&self.sregs.get(n).unwrap_or(0).to_le_bytes());
         }
         w.put(&[self.publish.unwrap_or(NO_PUB)]);
@@ -544,7 +557,11 @@ impl Settings {
             return None;
         }
         let flags = r.u8()?;
-        if flags & !(FLAG_AP | FLAG_ECHO | FLAG_VERBOSE | FLAG_SHOW) != 0 {
+        let mut known = FLAG_AP | FLAG_ECHO | FLAG_VERBOSE | FLAG_SHOW;
+        if version == VERSION {
+            known |= FLAG_NO_LZ;
+        }
+        if flags & !known != 0 {
             return None;
         }
         let mut s = Settings::defaults("", "");
@@ -552,10 +569,13 @@ impl Settings {
         s.echo = flags & FLAG_ECHO != 0;
         s.verbose = flags & FLAG_VERBOSE != 0;
         s.show_ap_pass = flags & FLAG_SHOW != 0;
-        for n in SRegs::NUMBERS {
+        for n in BLOB_REGS {
             if !s.sregs.set(n, r.u16()?) {
                 return None;
             }
+        }
+        if !s.sregs.set(REG_LZ, u16::from(flags & FLAG_NO_LZ == 0)) {
+            return None;
         }
         let publish = r.u8()?;
         (s.ap_ssid, s.ap_ssid_len) = r.field(valid_ssid)?;

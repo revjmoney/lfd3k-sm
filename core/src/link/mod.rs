@@ -15,9 +15,20 @@
 //! Radio contract assumed: `busy()` is true from the start of an inbound
 //! frame and during TX; after TX the core calls `listen` again (never while
 //! busy) before expecting to hear anything.
+//!
+//! Compression (see `lz.rs`): the caller appends a capability byte to its
+//! CallReq and the answerer one to its CallAck, each only when its own S31
+//! is 1. At CONNECT the call uses LZ when both said so. It sits between ARQ
+//! and the air: ArqTx keeps chunks plain (sequence numbers, the window and
+//! CHUNK all count host bytes), and a Data frame is compressed when it is
+//! built from a staged chunk, so a resend compresses the same chunk again
+//! to the same bytes. A received Data frame with `FLAG_LZ` is decompressed
+//! before ArqRx sees it; one that fails to decompress is dropped unacked,
+//! so the sender resends it. Receiving does not depend on the agreement:
+//! any `FLAG_LZ` frame is decoded (a peer only sends one after we offered).
 
 use crate::arq::{ArqRx, ArqTx, CHUNK};
-use crate::at::SRegs;
+use crate::at::{SRegs, REG_LZ};
 use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
@@ -162,6 +173,11 @@ fn cap_tier(s: &SRegs) -> Tier {
     Tier::from_index(reg(s, 21, 7).min(7) as u8).unwrap_or(Tier::Sf5)
 }
 
+/// S31 = 1: offer compression on this call.
+fn lz_wanted(s: &SRegs) -> bool {
+    reg(s, REG_LZ, 1) == 1
+}
+
 pub struct Link {
     state: State,
     role: Role,
@@ -228,6 +244,17 @@ pub struct Link {
     /// The modem is busy with a Wi-Fi call: an incoming CallReq is
     /// rejected (the caller sees BUSY) even while the link is idle.
     engaged: bool,
+    /// We offered compression on this call (own S31 at dial or answer).
+    lz_mine: bool,
+    /// The peer offered compression (CallReq or CallAck capability byte).
+    lz_peer: bool,
+    /// Both offered: Data frames go out compressed when that saves enough.
+    /// Kept after the call ends, for AT&V.
+    lz: bool,
+    /// Data payload bytes of this (or the last) call, both directions:
+    /// host bytes before compression and bytes on the air.
+    lz_raw: u32,
+    lz_air: u32,
 }
 
 impl Default for Link {
@@ -294,7 +321,35 @@ impl Link {
             ev_head: 0,
             ev_len: 0,
             engaged: false,
+            lz_mine: false,
+            lz_peer: false,
+            lz: false,
+            lz_raw: 0,
+            lz_air: 0,
         }
+    }
+
+    /// Compression is on for the current (or last) call.
+    pub fn lz(&self) -> bool {
+        self.lz
+    }
+
+    /// Host payload bytes over air payload bytes for the current (or last)
+    /// call, both directions summed, times 10 and rounded; 10 when nothing
+    /// was sent.
+    pub fn lz_ratio_x10(&self) -> u32 {
+        if self.lz_air == 0 {
+            return 10;
+        }
+        let r = (u64::from(self.lz_raw) * 10 + u64::from(self.lz_air) / 2) / u64::from(self.lz_air);
+        u32::try_from(r).unwrap_or(u32::MAX)
+    }
+
+    /// Count one Data payload for the ratio.
+    fn lz_count(&mut self, raw: usize, air: usize) {
+        let (raw, air) = (raw as u32, air as u32);
+        self.lz_raw = self.lz_raw.saturating_add(raw);
+        self.lz_air = self.lz_air.saturating_add(air);
     }
 
     /// While true, an idle link answers every CallReq with CallReject.
@@ -504,6 +559,11 @@ impl Link {
         self.rng = (u32::from(self.call_id).wrapping_mul(0x0101_0101) ^ mix) | 1;
         self.tx.reset();
         self.rx.reset();
+        self.lz_mine = false;
+        self.lz_peer = false;
+        self.lz = false;
+        self.lz_raw = 0;
+        self.lz_air = 0;
         self.staged = None;
         self.pending = None;
         self.ack_owed = false;
@@ -551,6 +611,17 @@ impl Link {
             }
             self.go_idle();
             return;
+        }
+        // The answerer's capabilities ride on every CallAck (it is resent
+        // with each Train), so a late one still counts until CONNECT.
+        if h.ftype == FrameType::CallAck
+            && self.role == Role::Caller
+            && matches!(
+                self.state,
+                State::Dialing | State::AwaitTrain | State::AwaitTierAck | State::Probe
+            )
+        {
+            self.lz_peer = frame::parse_call_ack_caps(f.payload) & frame::CAP_LZ != 0;
         }
         let tier_arg = f.payload.first().and_then(|&i| Tier::from_index(i));
         match self.state {

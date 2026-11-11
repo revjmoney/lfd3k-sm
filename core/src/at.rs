@@ -408,6 +408,9 @@ pub enum ResultCode {
     Busy,
     NoAnswer,
     Connect(Tier),
+    /// A radio call with compression on: `CONNECT <tier> <bps>/ARQ/LZ`,
+    /// numeric 1.
+    ConnectLz(Tier),
     /// A Wi-Fi (TCP) call: `CONNECT WIFI TCP`, numeric 1.
     ConnectWifi,
     Retrain(Tier),
@@ -470,12 +473,15 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
             ResultCode::NoCarrier => b.put(b"NO CARRIER"),
             ResultCode::Busy => b.put(b"BUSY"),
             ResultCode::NoAnswer => b.put(b"NO ANSWER"),
-            ResultCode::Connect(t) => {
+            ResultCode::Connect(t) | ResultCode::ConnectLz(t) => {
                 b.put(b"CONNECT ");
                 b.put(t.name().as_bytes());
                 b.put(b" ");
                 b.put_u32(t.air_bps());
                 b.put(b"/ARQ");
+                if matches!(code, ResultCode::ConnectLz(_)) {
+                    b.put(b"/LZ");
+                }
             }
             ResultCode::ConnectWifi => b.put(b"CONNECT WIFI TCP"),
             ResultCode::Retrain(t) => {
@@ -489,7 +495,7 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
     } else {
         let n = match code {
             ResultCode::Ok => 0,
-            ResultCode::Connect(_) | ResultCode::ConnectWifi => 1,
+            ResultCode::Connect(_) | ResultCode::ConnectLz(_) | ResultCode::ConnectWifi => 1,
             ResultCode::Ring => 2,
             ResultCode::NoCarrier => 3,
             ResultCode::Error => 4,
@@ -510,9 +516,13 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
 /// S30: SX1262 chip output power in dBm (signed, -9 to 22, default 2).
 pub const REG_TX_POWER: u8 = 30;
 
+/// S31: compression on the air, 1 on (default), 0 off. Used on a radio call
+/// only when both ends have it at 1 (see `lz.rs`).
+pub const REG_LZ: u8 = 31;
+
 /// (register, min, max, default). Values are compared as i16; S30 is stored
 /// as the two's complement of its i16 value, the others are never negative.
-const REGS: [(u8, i16, i16, i16); 8] = [
+const REGS: [(u8, i16, i16, i16); 9] = [
     (0, 0, 255, 0),
     (2, 0, 127, 43),
     (7, 1, 255, 30),
@@ -521,11 +531,12 @@ const REGS: [(u8, i16, i16, i16); 8] = [
     (21, 0, 7, 7),
     (22, 1, 255, 20),
     (REG_TX_POWER, -9, 22, 2),
+    (REG_LZ, 0, 1, 1),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SRegs {
-    vals: [u16; 8],
+    vals: [u16; 9],
 }
 
 impl Default for SRegs {
@@ -536,10 +547,10 @@ impl Default for SRegs {
 
 impl SRegs {
     /// Register numbers present, for `AT&V`.
-    pub const NUMBERS: [u8; 8] = [0, 2, 7, 12, 20, 21, 22, 30];
+    pub const NUMBERS: [u8; 9] = [0, 2, 7, 12, 20, 21, 22, 30, 31];
 
     pub const fn new() -> Self {
-        let mut vals = [0u16; 8];
+        let mut vals = [0u16; 9];
         let mut i = 0;
         while i < vals.len() {
             vals[i] = REGS[i].3 as u16;
@@ -743,7 +754,7 @@ mod tests {
             assert_eq!(s.get(n), None, "S{n} should not exist");
             assert!(!SRegs::new().set(n, 0));
         }
-        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30]);
+        assert_eq!(SRegs::NUMBERS, [0, 2, 7, 12, 20, 21, 22, 30, 31]);
     }
 
     #[test]

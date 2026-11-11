@@ -1434,7 +1434,9 @@ impl Modem {
                 } else if self.mode != Mode::Command
                     || name.contains(':')
                     || self.wire_active()
-                    || !self.link.dial(name_of(&self.cfg), name, now)
+                    || !self
+                        .link
+                        .dial(name_of(&self.cfg), name, &self.cfg.sregs, now)
                 {
                     self.result(ResultCode::Error);
                 } else {
@@ -1491,7 +1493,7 @@ impl Modem {
                     self.esc = 0;
                     self.esc_dead = false;
                     self.last_host = now;
-                    self.result(ResultCode::Connect(t));
+                    self.result(self.connect_code(t));
                 }
                 _ => self.result(ResultCode::NoCarrier),
             },
@@ -1637,6 +1639,13 @@ impl Modem {
                 if !any {
                     t.put(b" NONE");
                 }
+                self.info(t.bytes());
+                // Compression on the current or last radio call: host bytes
+                // over air bytes of the Data payloads, both directions.
+                let r = self.link.lz_ratio_x10();
+                let mut t = Txt::new();
+                t.put(b"LZ ").put(onoff(self.link.lz())).put(b" RATIO ");
+                t.num(r / 10, 1).put(b".").num(r % 10, 1);
                 self.info(t.bytes());
                 self.result(ResultCode::Ok);
             }
@@ -1867,6 +1876,15 @@ impl Modem {
     }
 
     /// `\r\n<text>\r\n`.
+    /// The radio CONNECT for tier `t`: `/ARQ/LZ` when the call compresses.
+    fn connect_code(&self, t: Tier) -> ResultCode {
+        if self.link.lz() {
+            ResultCode::ConnectLz(t)
+        } else {
+            ResultCode::Connect(t)
+        }
+    }
+
     fn info(&mut self, text: &[u8]) {
         let mut t = Txt::new();
         t.put(b"\r\n").put(text).put(b"\r\n");
@@ -1914,7 +1932,7 @@ impl Modem {
                         self.esc = 0;
                         self.esc_dead = false;
                         self.last_host = now;
-                        self.result(ResultCode::Connect(t));
+                        self.result(self.connect_code(t));
                     }
                 }
                 Event::Retrain(t) => {

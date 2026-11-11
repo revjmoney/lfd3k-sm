@@ -1,6 +1,7 @@
 //! Data phase: ARQ glue, frame queue pump, turn taking and keepalive jitter.
 
 use super::*;
+use crate::lz;
 
 impl Link {
     pub(super) fn on_connected(
@@ -58,7 +59,18 @@ impl Link {
         let tier_arg = f.payload.first().and_then(|&i| Tier::from_index(i));
         match h.ftype {
             FrameType::Data => {
-                self.rx.on_data(h.seq, f.payload);
+                let mut plain = [0u8; CHUNK];
+                let data = if h.flags & frame::FLAG_LZ != 0 {
+                    match lz::decompress(f.payload, &mut plain) {
+                        Ok(n) => plain.get(..n).unwrap_or(&[]),
+                        // Treated as lost: no ack, so the sender resends.
+                        Err(_) => return,
+                    }
+                } else {
+                    f.payload
+                };
+                self.lz_count(data.len(), f.payload.len());
+                self.rx.on_data(h.seq, data);
                 // Ack every Data frame, whatever on_data said.
                 self.ack_owed = true;
                 self.data_rx = Some(now);
@@ -241,15 +253,22 @@ impl Link {
         if self.stage(now) {
             let (seq, len) = self.staged.take()?;
             self.ka_reply = false;
-            let n = mk(
-                FrameType::Data,
-                0,
-                seq,
-                0,
-                self.staged_buf.get(..len as usize)?,
-                out,
-                self.call_id,
-            )?;
+            // The staged chunk stays plain; compressing it here each time
+            // it is sent gives the same bytes on every resend.
+            let raw = self.staged_buf.get(..len as usize)?;
+            let mut packed = [0u8; CHUNK];
+            let z = if self.lz {
+                lz::compress(raw, &mut packed)
+            } else {
+                None
+            };
+            let (flags, p) = match z {
+                Some(m) => (frame::FLAG_LZ, packed.get(..m)?),
+                None => (0, raw),
+            };
+            let (raw_len, air_len) = (raw.len(), p.len());
+            let n = mk(FrameType::Data, flags, seq, 0, p, out, self.call_id)?;
+            self.lz_count(raw_len, air_len);
             return Some((n, t, false, true));
         }
         if self.ka_reply {

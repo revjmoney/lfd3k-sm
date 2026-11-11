@@ -29,6 +29,7 @@
 | Phase 3 task 4, firmware Wi-Fi, NVS and TCP: settings blob saved in NVS (namespace lfd3k, key settings; first boot generates a 12 character hotspot password with the hardware RNG and saves it; a save asked during a call waits until the call ends); WPA2 hotspot on channel 6 (max 4 clients, only when on) and client mode with 1, 2, 4 up to 30 s retry backoff, driver storage in RAM so the client password is never kept by the Wi-Fi driver; live `WIFI AP .. CLIENTS .. STA ..` status line once a second; one TCP client task (DNS, 15 s non-blocking connect, NODELAY, 2 KB stream buffers each way) joined to the wire call path with a socket generation counter; STACK FREE reported once a second | done (flashed, build 549746d on the V4 since 2026-11-10) | 2026-11-10 |
 | Phase 3 task 4c, SimNet test mode (call the V4 from the PC over Wi-Fi with a simulated radio): `AT+SIMNET=<pc ip>` puts the SX1262 in standby and runs the radio over UDP port 4210 (`SimNetRadio` in core/src/simnet.rs, datagram `'L' 'S' 1 tier snr_x4 rssi` plus the frame, sender busy for the frame's airtime, receiver holds each frame for its airtime), `AT+SIMNET=0` back to the SX1262, never saved (every boot is on the real radio), AT&V `RADIO SIMNET <ip>`, OLED shows `SI` in place of `HS`; firmware UDP task (udp_link.c); PC far modem `cargo run -p lfd3k-sim --bin lfd3k-pcmodem` (real core, line mode terminal, `--snr`, `--profile dip`, `--fwd`, real TCP for Wi-Fi calls and bridges, `--script` mode). See docs/simnet.md | done (flashed, build 549746d on the V4 since 2026-11-10) | 2026-11-10 |
 | Phase 4 task 1, discovery: Beacon (12), ScanReq (13) and ScanResp (14) frames on SF12 with call id 0; beacons every 300 s plus 0 to 60 s (about 0.4 s on air, never during a call, first one a full interval after start and again after each call); AT+SCAN (one ScanReq, 4 s of answers, `SCAN <name> SNR <x.x> dB <tier>` lines, OK); scan answers in one of 11 slots of 250 ms with listen before talk; at most one discovery frame per 10 s; a 32 entry directory (heard stations and pinned names, oldest unpinned replaced when full, never our own name) with AT+DIR and a 1 KB blob (magic LFD1) for the platform; privacy modes AT+BEACON=ON, QUIET, HIDDEN (HIDDEN drops every caller that is not pinned in the directory without a sound); settings blob v2 (900 bytes, beacon mode) loads v1 blobs too | done (core only; NVS and the OLED come in task 4) | 2026-11-10 |
+| Phase 4 task 2, LZ compression on the air: each Data frame compressed on its own (LZ77 against a fixed 567 byte preset of ANSI, CP437 box and block runs, CRLF and spaces; core/src/lz.rs documents the format), sent compressed only when it saves at least 8 bytes (header flag FLAG_LZ, bit 2); negotiated with one capability byte on CallReq and CallAck (bit 0 = LZ, only sent when S31 = 1); `CONNECT ... /ARQ/LZ` when both ends agree; AT&V `LZ ON|OFF RATIO <n.n>`; S31 saved in the settings blob (flags bit 4, blob stays v2 at 900 bytes) | done (core only, not flashed) | 2026-11-10 |
 | Phase 3 task 5, Wi-Fi on the front panel: idle name row rotates every 3 s between the board name, `AP <ssid>`, `PW <pass>` (only while `PWSHOW 1`) and `IP <a.b.c.d>` (only with a client address); wire call screens `WIFI TCP` and `BRIDGE`; AT&V `PWSHOW <0|1>`; bench terminal redacts passwords and takes safe screenshots; docs/phase3-bench.md | done (flashed, build 549746d on the V4 since 2026-11-10) | 2026-11-10 |
 
 ## Settings
@@ -43,6 +44,7 @@
 | S21 tier cap, tier index (7 = SF5) | 7 | 0 to 7 |
 | S22 resync timeout seconds | 20 | 1 to 255 |
 | S30 TX power, dBm at the SX1262 chip (the V4 GC1109 adds about 12 dB, so the default is about 14 dBm out) | 2 | -9 to 22 |
+| S31 compression on the air (used on a radio call only when both ends have 1), saved by AT&W | 1 (on) | 0 off, 1 on |
 | Hotspot on or off (AT+WAP=1 / AT+WAP=0) | on | on, off |
 | Hotspot name and password (AT+WAP=ssid,pass) | modem name, generated | name 1 to 32 printable, password 8 to 63 printable, neither may contain a comma |
 | Client network (AT+WSTA=ssid,pass) | none | same limits; AT+WSTA=0 forgets it |
@@ -94,7 +96,7 @@ One command per line, case-insensitive. Out-of-range S register writes are rejec
 | ATZ | Reset |
 
 Result codes: OK 0, CONNECT 1, RING 2, NO CARRIER 3, ERROR 4, BUSY 7, NO ANSWER 8.
-Verbose CONNECT reads CONNECT <tier name> <air bps>/ARQ on radio and CONNECT WIFI TCP on a Wi-Fi call. RETRAIN lines are verbose only.
+Verbose CONNECT reads CONNECT <tier name> <air bps>/ARQ on radio (CONNECT <tier name> <air bps>/ARQ/LZ when the call compresses) and CONNECT WIFI TCP on a Wi-Fi call. RETRAIN lines are verbose only.
 
 Notes:
 - ATD strips one leading T or P, as Hayes does. To dial a name that starts with T or P, use the full prefix: ATDT TOM or ATDP PAT (ATDTOM would dial OM).
@@ -135,6 +137,9 @@ Notes:
 - Beacon services byte: bit 0 auto-answer on (S0 above 0), bit 1 a forward is published, bit 2 the hotspot is on. A beacon also carries how many stations this modem heard in the last 15 minutes.
 - AT&V adds `BEACON <mode>` and `DIR <entries>` after the FWD line.
 - Settings blob v2 is 900 bytes (the beacon mode byte at 897, CRC at 898). A v1 blob (899 bytes) from phase 3 still loads, with the mode ON, and the next save writes v2.
+- Compression (S31): the caller adds one capability byte to its CallReq and the answerer one to its CallAck, each only when its own S31 is 1 (no byte means no compression, the form older builds send; an older build cannot take a CallReq that has the byte, so set S31=0 to call one). The call compresses when both offered; CONNECT then ends in `/ARQ/LZ` (also on ATO). S31 is read when the call starts; changing it during a call takes effect on the next call. Each 200 byte ARQ chunk is compressed on its own when its Data frame is built (a resend compresses the same chunk to the same bytes) and goes out compressed only when that saves at least 8 bytes. A received compressed frame that does not decode is dropped without an ack, so it is sent again. Wi-Fi calls are not compressed.
+- AT&V ends with `LZ ON|OFF RATIO <n.n>` for the current or last radio call: Data payload bytes before compression over Data payload bytes on the air, both directions and resends included, one decimal, `1.0` when nothing was sent. The S register line now ends with `S31=<n>`.
+- S31 is stored in the settings blob as flags bit 4, inverted (set means S31 = 0), so the blob stays v2 at 900 bytes and every saved v2 blob loads with compression on.
 
 ## Front panel (OLED)
 
@@ -153,6 +158,8 @@ Notes:
 - Own hand-made 5x7 ASCII font (font5x7.h), no library fonts.
 
 ## Change log
+
+- 2026-11-10: Phase 4 task 2, LZ compression on the air (core/src/lz.rs): per frame LZ77 against a fixed preset dictionary, FLAG_LZ on Data frames, capability byte on CallReq and CallAck, S31, `/ARQ/LZ` in CONNECT, AT&V LZ line. No new tests (task 6); the existing 150 pass, with expectations moved only where the change requires it (CONNECT strings gain `/LZ` in sim/tests/calls.rs and the CONNECT marker in ffi/tests/host_api.rs, the S register list in at.rs gains 31, and the FFI full chunk test counts the chunk's bytes before compression). phase1-demo.txt regenerated (`/LZ` in CONNECT, S31 and LZ RATIO 2.9 in AT&V). `Modem` grows from 12,768 to 12,784 bytes (host build).
 
 - 2026-11-10: Phase 4 task 1, discovery in the core (core/src/discovery.rs, core/src/directory.rs): Beacon, ScanReq and ScanResp frames (types 12 to 14), the beacon and scan scheduler in `tick`, AT+SCAN, AT+DIR, AT+BEACON with the ON, QUIET and HIDDEN privacy modes, the directory with its blob and save hook, settings blob v2 with v1 migration, AT&V BEACON and DIR lines. No new tests (task 6); the existing 150 pass, with expectations moved only where the change requires it (type 12 now decodes as Beacon, the settings blob is 900 bytes and version 2 is valid). phase1-demo.txt regenerated (two new AT&V lines). `Modem` grows from 11,512 to 12,768 bytes (host build).
 
