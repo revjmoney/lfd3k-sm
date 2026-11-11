@@ -511,6 +511,7 @@ fn connected_status_reports_tier_and_last_rx() {
         (idle.state, idle.tier, idle.rssi, idle.radio_ok),
         (0, -1, 0, 1)
     );
+    assert_eq!(idle.lights & 0b0100_0000, 0, "DC dark while idle");
     rig.connect();
     let st = status(rig.now);
     assert_eq!(st.state, 4);
@@ -519,7 +520,12 @@ fn connected_status_reports_tier_and_last_rx() {
     assert_eq!(st.snr_x4, 48);
     assert_eq!(st.radio_ok, 1);
     assert_ne!(st.lights & 0b0000_0011, 0, "OH and CD");
-    assert_eq!(st.lights & 0b0100_0000, 0, "DC is never lit");
+    // The rig connects with /ARQ/LZ (both ends S31 = 1): DC follows LZ.
+    assert_ne!(
+        st.lights & 0b0100_0000,
+        0,
+        "DC lit while the call compresses"
+    );
 }
 
 #[test]

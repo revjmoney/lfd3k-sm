@@ -11,12 +11,15 @@
 //! `FLAG_LZ` (Data: the payload is compressed, see `lz.rs`), bit 3 free.
 //!
 //! Capabilities: a CallReq payload may end with one capability byte after
-//! the two names, and a CallAck payload may be that one byte. Bit 0 is
-//! `CAP_LZ`. Bits 1 to 3 are for later capabilities and are ignored; a byte
-//! with any of bits 4 to 7 set makes the CallReq malformed. No byte (the
-//! form older builds send) means no capabilities. Older builds refuse a
-//! CallReq that carries the byte, so it is only sent when it says something
-//! (S31 = 1).
+//! the two names (the caller's offer), and the answerer's CallAck payload
+//! may be that one byte and its Train payload may carry it as a 4th byte
+//! after tier and SNR (the agreed answer: set only when both offered). Bit 0
+//! is `CAP_LZ`. Bits 1 to 3 are for later capabilities and are ignored; a
+//! byte with any of bits 4 to 7 set makes a CallReq or Train malformed. No
+//! byte (the form older builds send) means no capabilities. Older builds
+//! refuse a CallReq that carries the byte, so it is only sent when it says
+//! something (S31 = 1), and a 4 byte Train, so it only goes to a caller that
+//! offered (a new build). TrainAck stays 3 bytes.
 
 use crate::tier::Tier;
 
@@ -134,7 +137,12 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
     let ftype = FrameType::from_u8(b0 >> 4).ok_or(FrameError::BadType)?;
     let shape_ok = match ftype {
         FrameType::CallReq => parse_call_req(payload).is_ok(),
-        FrameType::Train | FrameType::TrainAck => {
+        FrameType::Train => match payload {
+            [t, _, _] => Tier::from_index(*t).is_some(),
+            [t, _, _, c] => Tier::from_index(*t).is_some() && c & !CAP_MASK == 0,
+            _ => false,
+        },
+        FrameType::TrainAck => {
             matches!(payload, [t, _, _] if Tier::from_index(*t).is_some())
         }
         FrameType::TierSet | FrameType::TierAck => {
@@ -210,6 +218,15 @@ pub fn parse_call_req_caps(p: &[u8]) -> Result<(&str, &str, u8), FrameError> {
         return Err(FrameError::BadPayload);
     }
     Ok((a, b, caps))
+}
+
+/// Capability byte of a Train payload (`tier, snr lo, snr hi[, caps]`):
+/// 0 for the 3 byte form older builds send.
+pub fn parse_train_caps(p: &[u8]) -> u8 {
+    match p {
+        [_, _, _, c] if c & !CAP_MASK == 0 => *c,
+        _ => 0,
+    }
 }
 
 /// Capability byte of a CallAck payload: 0 for the empty payload older

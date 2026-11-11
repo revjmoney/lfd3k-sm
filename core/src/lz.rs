@@ -188,7 +188,12 @@ impl Chains {
                 break;
             }
             let mut l = 0;
-            while l < max && at(input, c + l).is_some() && at(input, c + l) == at(input, v + l) {
+            // `v + l` is always in the input (l < max <= n - i).
+            while l < max {
+                let x = at(input, c + l);
+                if x.is_none() || x != input.get(i + l).copied() {
+                    break;
+                }
                 l += 1;
             }
             if l > best {

@@ -548,8 +548,8 @@ pub extern "C" fn lfd3k_simnet_due_ms() -> u32 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct lfd3k_status_t {
-    /// Bit 0 OH, 1 CD, 2 SD, 3 RD, 4 HS, 5 EC, 6 DC (never set: the modem
-    /// has no compression), 7 AA.
+    /// Bit 0 OH, 1 CD, 2 SD, 3 RD, 4 HS, 5 EC, 6 DC (a radio call is up
+    /// and compresses, `/ARQ/LZ`), 7 AA.
     pub lights: u8,
     /// 0 idle, 1 dialing, 2 ringing, 3 training, 4 online, 5 command-online.
     pub state: u8,
@@ -579,7 +579,7 @@ pub unsafe extern "C" fn lfd3k_status(now_ms: u32, out: *mut lfd3k_status_t) {
     }
     let st = with_device(|d| {
         let l = d.modem.lights(now_ms);
-        let bits = [l.oh, l.cd, l.sd, l.rd, l.hs, l.ec, false, l.aa];
+        let bits = [l.oh, l.cd, l.sd, l.rd, l.hs, l.ec, l.dc, l.aa];
         let lights = bits
             .iter()
             .enumerate()

@@ -17,8 +17,11 @@
 //! busy) before expecting to hear anything.
 //!
 //! Compression (see `lz.rs`): the caller appends a capability byte to its
-//! CallReq and the answerer one to its CallAck, each only when its own S31
-//! is 1. At CONNECT the call uses LZ when both said so. It sits between ARQ
+//! CallReq when its own S31 is 1. The answerer agrees when its own S31 is 1
+//! too, and then says so with CAP_LZ on its CallAck and as a 4th Train byte;
+//! the caller reads the answer from the Train (the frame it cannot connect
+//! without), so both ends always agree. At CONNECT the call uses LZ when we
+//! offered and the peer said yes. It sits between ARQ
 //! and the air: ArqTx keeps chunks plain (sequence numbers, the window and
 //! CHUNK all count host bytes), and a Data frame is compressed when it is
 //! built from a staged chunk, so a resend compresses the same chunk again
@@ -612,17 +615,6 @@ impl Link {
             self.go_idle();
             return;
         }
-        // The answerer's capabilities ride on every CallAck (it is resent
-        // with each Train), so a late one still counts until CONNECT.
-        if h.ftype == FrameType::CallAck
-            && self.role == Role::Caller
-            && matches!(
-                self.state,
-                State::Dialing | State::AwaitTrain | State::AwaitTierAck | State::Probe
-            )
-        {
-            self.lz_peer = frame::parse_call_ack_caps(f.payload) & frame::CAP_LZ != 0;
-        }
         let tier_arg = f.payload.first().and_then(|&i| Tier::from_index(i));
         match self.state {
             State::Dialing | State::AwaitTrain => match h.ftype {
@@ -630,9 +622,12 @@ impl Link {
                 FrameType::CallReject => self.fail(Event::Busy, false),
                 FrameType::Train => {
                     let peer_snr = match f.payload {
-                        [_, a, b] => i16::from_le_bytes([*a, *b]),
+                        [_, a, b] | [_, a, b, _] => i16::from_le_bytes([*a, *b]),
                         _ => return,
                     };
+                    // The caller cannot connect without a Train, so its 4th
+                    // byte is the one place the agreed LZ answer is read.
+                    self.lz_peer = frame::parse_train_caps(f.payload) & frame::CAP_LZ != 0;
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
                     self.own_cap = cap_tier(sregs);
                     self.cap = self.own_cap.min(peer_cap);

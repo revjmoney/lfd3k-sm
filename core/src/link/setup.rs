@@ -82,11 +82,18 @@ impl Link {
 
     pub(super) fn send_train(&mut self) {
         let s = self.my_snr.to_le_bytes();
-        let p = [self.cap.index(), s[0], s[1]];
-        // The capability byte only when we offer LZ; empty is the old form.
-        let caps: &[u8] = if self.lz_mine { &[frame::CAP_LZ] } else { &[] };
+        // CallAck and Train carry the agreed answer: CAP_LZ only when we
+        // offer LZ and the caller did (so it is a new build that takes the
+        // extra byte). Without it they are the old forms (empty, 3 bytes).
+        let agreed = self.lz_mine && self.lz_peer;
+        let p = [self.cap.index(), s[0], s[1], frame::CAP_LZ];
+        let (caps, train): (&[u8], &[u8]) = if agreed {
+            (&[frame::CAP_LZ], &p)
+        } else {
+            (&[], p.get(..3).unwrap_or(&[]))
+        };
         self.enq(Tier::ROBUST, FrameType::CallAck, 0, caps, false, false);
-        self.enq(Tier::ROBUST, FrameType::Train, 0, &p, false, false);
+        self.enq(Tier::ROBUST, FrameType::Train, 0, train, false, false);
     }
 
     /// Hang up. True if a call (or call attempt) was up.

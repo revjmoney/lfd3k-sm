@@ -142,6 +142,8 @@ pub struct Lights {
     pub rd: bool,
     pub hs: bool,
     pub ec: bool,
+    /// Data compression: a radio call is up and compresses (`/ARQ/LZ`).
+    pub dc: bool,
     pub aa: bool,
     pub tier: Option<Tier>,
 }
@@ -1278,6 +1280,7 @@ impl Modem {
                 rd: up && recent(self.wire.last_rx),
                 hs: false,
                 ec: false,
+                dc: false,
                 aa: self.cfg.sregs.get(0).unwrap_or(0) > 0,
                 tier: None,
             };
@@ -1291,6 +1294,7 @@ impl Modem {
             rd: cd && recent(self.link.last_data_rx()),
             hs: tier.is_some_and(|t| t >= Tier::Sf7),
             ec: cd,
+            dc: cd && self.link.lz(),
             aa: self.cfg.sregs.get(0).unwrap_or(0) > 0,
             tier,
         }
@@ -1875,7 +1879,6 @@ impl Modem {
         self.out.push(b.get(..n).unwrap_or(&[]));
     }
 
-    /// `\r\n<text>\r\n`.
     /// The radio CONNECT for tier `t`: `/ARQ/LZ` when the call compresses.
     fn connect_code(&self, t: Tier) -> ResultCode {
         if self.link.lz() {
@@ -1885,6 +1888,7 @@ impl Modem {
         }
     }
 
+    /// `\r\n<text>\r\n`.
     fn info(&mut self, text: &[u8]) {
         let mut t = Txt::new();
         t.put(b"\r\n").put(text).put(b"\r\n");

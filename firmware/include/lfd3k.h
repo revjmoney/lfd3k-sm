@@ -57,7 +57,7 @@ size_t   lfd3k_host_out(uint8_t *buf, size_t len);
  * nothing for it; the firmware writes the dump and OK). */
 bool     lfd3k_take_fb_request(void);
 
-/* lights bits: OH 0, CD 1, SD 2, RD 3, HS 4, EC 5, DC 6 (never set), AA 7.
+/* lights bits: OH 0, CD 1, SD 2, RD 3, HS 4, EC 5, DC 6 (radio call compressing, /ARQ/LZ), AA 7.
  * state: 0 idle, 1 dialing, 2 ringing, 3 training, 4 online, 5 command-online.
  * tier: -1 when none, else 0 (SF12) to 7 (SF5).
  * rssi dBm and snr_x4 (quarter dB) are from the last frame heard, including
