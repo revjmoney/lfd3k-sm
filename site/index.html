@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LFD3K-SM: LoRa dial-up modem</title>
-<meta name="description" content="LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM: a Hayes-style dial-up modem over LoRa radio and Wi-Fi for the Heltec V4, by Rev. J. Money / jmscnc.com.">
+<meta name="description" content="LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM: a Hayes-style dial-up modem over LoRa radio and Wi-Fi for the Heltec V4 and V3, by Rev. J. Money / jmscnc.com.">
 <meta property="og:title" content="LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM">
-<meta property="og:description" content="Type ATDT, hear the BBS answer over the air. A Hayes-style modem over LoRa and Wi-Fi for the Heltec V4.">
+<meta property="og:description" content="Type ATDT, hear the BBS answer over the air. A Hayes-style modem over LoRa and Wi-Fi for the Heltec V4 and V3.">
 <meta property="og:image" content="docs/img/simian-logo.png">
 <meta name="theme-color" content="#050505">
 <link rel="icon" href="docs/img/simian-logo.png">
@@ -53,7 +53,7 @@
     </div>
 
     <p class="lede">A Hayes-style dial-up modem that talks over <b>LoRa radio</b> and <b>Wi-Fi</b>, built for the
-      Heltec V4 (ESP32-S3 plus SX1262). Plug it into any terminal program, type <code>ATDT</code>, and you get
+      Heltec V4 and V3 (ESP32-S3 plus SX1262). Plug it into any terminal program, type <code>ATDT</code>, and you get
       <code>DIALING</code>, <code>RINGING</code>, <code>CONNECT</code>, retrains and <code>NO CARRIER</code>, the way BBS
       calling used to feel, except the call goes over the air with no phone line and no internet. It is the radio side
       of the <a href="https://github.com/revjmoney/axis-bbs">AXIS BBS</a> telnet BBS firmware: a caller with a modem can
@@ -330,6 +330,7 @@
           <tr><td>PC modem (the real core over UDP)</td><td><code>sim/</code></td><td><code>cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --peer &lt;V4 ip&gt;</code></td></tr>
           <tr><td>SX1262 driver</td><td><code>sx1262/</code></td><td>built into the firmware</td></tr>
           <tr><td>Firmware (ESP-IDF 5.4 via PlatformIO)</td><td><code>firmware/</code></td><td><code>firmware\build_core.ps1</code>, then <code>pio run -d firmware -e heltec_v4</code></td></tr>
+          <tr><td>Firmware for the Heltec V3 (the modem alone)</td><td><code>firmware/</code></td><td><code>firmware\build_core.ps1</code>, then <code>pio run -d firmware -e heltec_v3_single -t upload --upload-port COMn</code> (see <a href="docs.html#heltec-v3">the V3 guide</a>)</td></tr>
           <tr><td>Multimode bootloader and picker</td><td><code>multimode/</code></td><td>see <a href="docs.html#multimode-readme">multimode/README.md</a></td></tr>
         </tbody>
       </table>
@@ -346,6 +347,12 @@
       <span class="label">Heltec WiFi LoRa 32 V4</span>
       <p>ESP32-S3R2, 16 MB flash, SX1262 with the GC1109 front end. 918.5 MHz calling channel, 500 kHz bandwidth.
         Check the rules for your region before you transmit; the default TX power (S30) is low on purpose.</p>
+    </div>
+    <div class="box">
+      <span class="label">Heltec WiFi LoRa 32 V3</span>
+      <p>ESP32-S3, 8 MB flash, SX1262 straight to the antenna (no front end, so S30 is the power at the antenna).
+        Runs the modem alone with the AXIS boot logo at power on; its USB-C is a CP2102 serial port at 115200.
+        Open it with DTR and RTS off. Everything else is the same modem. <a href="docs.html#heltec-v3">The V3 guide</a>.</p>
     </div>
   </div>
 </section>

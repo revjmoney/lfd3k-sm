@@ -1,5 +1,7 @@
 ﻿# Phase 2 bench sheet
 
+> Written for the Heltec V4. On a Heltec V3 the steps are the same except the port and the flashing: see [heltec-v3.md](heltec-v3.md).
+
 For Rev. This is the list you follow to back up the V4, flash the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM onto it, check it on the air, and put Radar back.
 
 Nobody but you runs these commands. The tools in this repo never flash anything.

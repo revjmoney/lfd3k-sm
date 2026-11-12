@@ -1,5 +1,8 @@
 # SimNet: call the V4 from the PC over Wi-Fi
 
+Everything here works the same on a Heltec V3: use its CP2102 COM port, opened with DTR and RTS off
+(see [heltec-v3.md](heltec-v3.md)).
+
 You have one V4 and no second LoRa radio. SimNet lets the PC be the far
 modem. The PC runs the same modem core as the V4 (`lfd3k-pcmodem`), and the
 two talk over Wi-Fi (UDP port 4210) instead of over the air. Everything else

@@ -25,7 +25,7 @@ cp "$root"/multimode/preview/logo.gif "$root"/multimode/preview/menu.png "$out/m
 
 # the markdown docs.html renders
 cp "$root"/README.md "$root"/NOTICE.md "$root"/THIRD_PARTY.md "$out/"
-cp "$root"/docs/FEATURES.md "$root"/docs/2026-11-09-lfd3k-sm-design.md "$root"/docs/multimode.md \
+cp "$root"/docs/FEATURES.md "$root"/docs/2026-11-09-lfd3k-sm-design.md "$root"/docs/multimode.md "$root"/docs/heltec-v3.md \
    "$root"/docs/simnet.md "$root"/docs/phase2-bench.md "$root"/docs/phase3-bench.md \
    "$root"/docs/phase4-bench.md "$out/docs/"
 cp "$root"/multimode/README.md "$out/multimode/"

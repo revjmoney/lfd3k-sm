@@ -1,5 +1,7 @@
 # Phase 4 bench sheet (discovery, compression, the menu)
 
+> Written for the Heltec V4. On a Heltec V3 the steps are the same except the port and the flashing: see [heltec-v3.md](heltec-v3.md).
+
 For Rev. This is the list you follow to try the phase 4 features of the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM on the V4: beacons, `AT+SCAN`, the directory, privacy modes, calling by name, `/LZ` compression, the `AT+MENU` screen, `AT+NAME`, the idle show and the scan radar.
 
 You have one LoRa radio. So the second station is the PC modem over SimNet (see `docs\simnet.md`). The PC runs the same modem core as the V4. Only the radio between them is simulated.

@@ -1,5 +1,7 @@
 # Phase 3 bench sheet (Wi-Fi)
 
+> Written for the Heltec V4. On a Heltec V3 the steps are the same except the port and the flashing: see [heltec-v3.md](heltec-v3.md).
+
 For Rev. This is the list you follow to try the Wi-Fi side of the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM on the V4.
 
 The radio caller path is simulated. You have one LoRa radio, so a "radio call" in steps e and f comes from the PC over Wi-Fi (SimNet, see `docs\simnet.md`). Everything after the radio (the modem, the bridge, TCP, the AXIS board) is real. A call from a second real LoRa radio waits until you have one.

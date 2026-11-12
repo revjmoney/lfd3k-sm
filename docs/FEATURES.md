@@ -50,7 +50,7 @@
 | S20 training margin, dB x4 | 20 (5 dB) | 0 to 200 |
 | S21 tier cap, tier index (7 = SF5) | 7 | 0 to 7 |
 | S22 resync timeout seconds | 20 | 1 to 255 |
-| S30 TX power, dBm at the SX1262 chip (the V4 GC1109 adds about 12 dB, so the default is about 14 dBm out) | 2 | -9 to 22 |
+| S30 TX power, dBm at the SX1262 chip (the V4 GC1109 adds about 12 dB, so the default is about 14 dBm out; the V3 has no front end, so on a V3 it is the power at the antenna) | 2 | -9 to 22 |
 | S31 compression on the air (used on a radio call only when both ends have 1), saved by AT&W | 1 (on) | 0 off, 1 on |
 | S32 boot to menu (1 opens the setup menu on the first host byte after boot), saved by AT&W | 0 (off) | 0 off, 1 on |
 | Station name (AT+NAME), saved by AT&W | the name the firmware gives (AXISMODEM-xxxx) | 1 to 16 printable ASCII, no `:`; empty goes back to the firmware's name |

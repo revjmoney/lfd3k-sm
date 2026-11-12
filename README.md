@@ -22,7 +22,7 @@
 </p>
 
 A Hayes-style dial-up modem that talks over **LoRa radio** and **Wi-Fi**, built for the Heltec V4
-(ESP32-S3 plus SX1262). Plug it into any terminal program, type `ATDT`, and you get `DIALING`,
+and V3 (ESP32-S3 plus SX1262). Plug it into any terminal program, type `ATDT`, and you get `DIALING`,
 `RINGING`, `CONNECT`, retrains and `NO CARRIER`, the way BBS calling used to feel, except the call
 goes over the air with no phone line and no internet. It is the radio side of the
 [AXIS BBS](https://github.com/revjmoney/axis-bbs) telnet BBS firmware: a caller with a modem can dial a BBS
@@ -121,8 +121,9 @@ ESP-IDF and takes a while; later builds take seconds.
 - [The website](https://revjmoney.github.io/lfd3k-sm/): screenshots, animations and every doc below, [rendered](https://revjmoney.github.io/lfd3k-sm/docs.html)
 - [Design](docs/2026-11-09-lfd3k-sm-design.md): the protocol, tiers, frames, ARQ, training and retrain
 - [Features, settings and AT commands](docs/FEATURES.md)
-- [Multimode](docs/multimode.md): four firmwares on one radio
-- [SimNet](docs/simnet.md): call a real V4 from the PC over Wi-Fi with a simulated radio
+- [Heltec V3](docs/heltec-v3.md): the modem on a V3, what differs from the V4, build and flash
+- [Multimode](docs/multimode.md): four firmwares on one radio (V4)
+- [SimNet](docs/simnet.md): call a real V4 or V3 from the PC over Wi-Fi with a simulated radio
 - Bench sheets: [phase 2](docs/phase2-bench.md), [phase 3](docs/phase3-bench.md), [phase 4](docs/phase4-bench.md)
 - [A full demo call transcript](docs/phase1-demo.txt)
 
@@ -133,7 +134,7 @@ calling channel, 500 kHz bandwidth. Check the rules for your region before you t
 TX power (S30) is low on purpose.
 
 The **Heltec WiFi LoRa 32 V3** runs it too, as the modem alone (env `heltec_v3_single`, 8 MB flash),
-with the AXIS boot logo at power on. Differences from the V4:
+with the AXIS boot logo at power on. Differences from the V4 (full guide: [docs/heltec-v3.md](docs/heltec-v3.md)):
 
 * No front end amplifier: S30 is the power at the antenna (22 dBm at most), and AT&V says so.
 * Its USB-C port is a CP2102 bridge, so the modem talks on that COM port at 115200 baud, 8N1, no flow

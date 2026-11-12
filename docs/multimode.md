@@ -1,6 +1,7 @@
 # Multimode: four firmwares on one Heltec V4
 
-One board, four firmwares, one small program in front that lets you pick. This is the plain
+One board, four firmwares, one small program in front that lets you pick. Multimode is for the Heltec V4
+(16 MB flash). The Heltec V3 runs the modem alone; see [heltec-v3.md](heltec-v3.md). This is the plain
 language guide. The engineering details are in `multimode/README.md`, and the install steps
 (backup, erase, write) are in `multimode/INSTALL.md`.
 
