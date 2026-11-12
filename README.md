@@ -14,6 +14,13 @@
   <b>Website: <a href="https://revjmoney.github.io/lfd3k-sm/">revjmoney.github.io/lfd3k-sm</a></b>
 </p>
 
+<p align="center">
+  <a href="https://revjmoney.github.io/lfd3k-sm/#call"><img src="docs/video/lfd3k-radio-call-poster.jpg" alt="Watch a real LoRa call into the AXIS BBS" width="640"></a><br>
+  <b>&#9654; <a href="https://revjmoney.github.io/lfd3k-sm/#call">Watch a real call</a></b>: a Heltec V3 dials a Heltec V4 over LoRa on 918.5 MHz,
+  the V4 bridges it into the AXIS BBS, and the caller walks around the board (real time, 3 minutes,
+  <a href="docs/video/lfd3k-radio-call.mp4">MP4</a>).
+</p>
+
 A Hayes-style dial-up modem that talks over **LoRa radio** and **Wi-Fi**, built for the Heltec V4
 (ESP32-S3 plus SX1262). Plug it into any terminal program, type `ATDT`, and you get `DIALING`,
 `RINGING`, `CONNECT`, retrains and `NO CARRIER`, the way BBS calling used to feel, except the call

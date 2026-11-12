@@ -17,7 +17,8 @@
 //!
 //! Terminal, default: line mode. Each line typed is sent with a CR; a line
 //! that is exactly the escape (`+++`) is sent without one, so wait a second
-//! before and after it. Host output goes to stdout as is (UTF-8 where valid,
+//! before and after it. A line ending in `\` is sent without the `\` and
+//! without a CR (hotkeys for a BBS menu: `m\` is just `m`). Host output goes to stdout as is (UTF-8 where valid,
 //! other bytes as CP437).
 //!
 //! Terminal, `--raw` (the `crossterm` crate): every key goes to the modem as
@@ -667,7 +668,9 @@ fn main() -> ExitCode {
                 let Ok(l) = l else { break };
                 let l = l.trim_end_matches(['\r', '\n']).to_string();
                 let mut b = l.into_bytes();
-                if b != b"+++" {
+                if b.last() == Some(&b'\\') {
+                    b.pop(); // "x\": the keys alone, no CR (a BBS hotkey menu)
+                } else if b != b"+++" {
                     b.push(b'\r');
                 }
                 if tx.send(b).is_err() {
