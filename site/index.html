@@ -8,301 +8,318 @@
 <meta property="og:title" content="LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM">
 <meta property="og:description" content="Type ATDT, hear the BBS answer over the air. A Hayes-style modem over LoRa and Wi-Fi for the Heltec V4 and V3.">
 <meta property="og:image" content="docs/img/simian-logo.png">
-<meta name="theme-color" content="#050505">
+<meta name="theme-color" content="#e2ddd0">
 <link rel="icon" href="docs/img/simian-logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=VT323&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=IBM+Plex+Mono:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,800;1,8..60,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="ad-page">
 
-<header class="topbar">
-  <div class="wrap">
-    <a class="brand" href="./">LFD3K-SM</a>
-    <nav aria-label="Sections">
-      <a href="#call">Real call</a>
-      <a href="#why">Why</a>
-      <a href="#animations">Animations</a>
-      <a href="#menu">Menu</a>
-      <a href="#panel">Front panel</a>
-      <a href="#air">On the air</a>
-      <a href="#quickstart">Quick start</a>
-      <a href="#build">Build</a>
-      <a href="docs.html">Docs</a>
-      <a href="https://github.com/revjmoney/lfd3k-sm">GitHub</a>
-    </nav>
+<main class="ad" id="ad">
+  <div class="folio">
+    <span>Advertisement</span>
+    <span>Circle 420 on Reader Service Card</span>
   </div>
-</header>
 
-<main>
-<div class="hero">
-  <div class="wrap">
-    <img class="hero-logo pixel" src="multimode/preview/logo.gif" width="512" height="256"
-         alt="The AXIS BBS boot logo animation: the letters build up from scan lines, a sweep runs along the rule under them, and five dots count down">
-    <p class="hero-cap">The boot logo, live: the letters build up from scan lines, a sweep runs along the rule, five dots count down.</p>
+  <header class="ad-head">
+    <h1 class="headline">Dial a BBS across town.<br>No phone line.</h1>
+    <a class="burst" href="#why" data-card="why" data-focus="f2">
+      <span>62,500 bps<br>over the air!</span>
+    </a>
+  </header>
 
-    <div class="ident">
-      <img class="monkey" src="docs/img/simian-logo.png" width="512" height="548" alt="Simian Tactical Unit monkey logo">
-      <div>
-        <h1>LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM <span class="short">- LFD3K-SM</span></h1>
-        <p class="release">v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M</p>
-        <p class="tagline">S0N1C B00M R4D10 PR0 MAX<span class="blink" aria-hidden="true">_</span></p>
-        <p class="byline">by Rev. J. Money / <a href="https://jmscnc.com">jmscnc.com</a></p>
-      </div>
-    </div>
-
-    <p class="lede">A Hayes-style dial-up modem that talks over <b>LoRa radio</b> and <b>Wi-Fi</b>, built for the
-      Heltec V4 and V3 (ESP32-S3 plus SX1262). Plug it into any terminal program, type <code>ATDT</code>, and you get
-      <code>DIALING</code>, <code>RINGING</code>, <code>CONNECT</code>, retrains and <code>NO CARRIER</code>, the way BBS
-      calling used to feel, except the call goes over the air with no phone line and no internet. It is the radio side
-      of the <a href="https://github.com/revjmoney/axis-bbs">AXIS BBS</a> telnet BBS firmware: a caller with a modem can
-      dial a BBS across town on 918.5 MHz.</p>
-
-    <div class="cta">
-      <a class="btn" href="docs.html">Read the docs</a>
-      <a class="btn alt" href="https://github.com/revjmoney/lfd3k-sm">Source on GitHub</a>
-    </div>
-  </div>
-</div>
-
-<section id="call">
-  <div class="wrap">
-    <h2>A real call, over the air</h2>
-    <p>Recorded live on 2026-11-12. The PC types into a Heltec V3, the V3 dials a Heltec V4 over LoRa on 918.5 MHz
-    (it trained at SF5, 62,500 bps on the air, with ARQ and LZ compression), and the V4 answers and bridges the call over
-    Wi-Fi into the AXIS BBS. Then a walk around the board: log in, read a message, look at a file area, the system stats,
-    the ANSI pack viewer, and log off. Real time, nothing sped up: left is the caller's screen, right is the V4's own terminal.</p>
-    <video controls preload="metadata" playsinline poster="docs/video/lfd3k-radio-call-poster.jpg" style="width:100%;max-width:1280px;display:block;margin:1rem auto;border:2px solid #333">
-      <source src="docs/video/lfd3k-radio-call.mp4" type="video/mp4">
-      Your browser cannot play this video. <a href="docs/video/lfd3k-radio-call.mp4">Download it (MP4, 3 MB)</a>.
-    </video>
-  </div>
-</section>
-
-<section id="why">
-  <div class="wrap">
-    <h2>Why it is badass</h2>
-    <p class="intro">Ten reasons. Full details live in the
-      <a href="docs.html#features">features log</a> and the <a href="docs.html#design">design doc</a>.</p>
-
-    <div class="features">
-      <div class="box">
-        <span class="label">01</span>
-        <h3>Real modem manners</h3>
-        <p><code>ATD</code>, <code>ATA</code>, <code>ATH</code>, <code>ATO</code>, <code>ATI</code>, <code>AT&amp;V</code>,
-          <code>ATZ</code>, S registers, <code>+++</code> with guard time, verbose and numeric result codes, auto-answer.
-          Your old terminal scripts just work.</p>
-      </div>
-      <div class="box">
-        <span class="label">02</span>
-        <h3>8 speed tiers, picked live</h3>
-        <p>SF12 to SF5 at 500 kHz, about 1.2 to 62.5 kbps on the air. The modems train on the measured SNR, start at the
-          best tier the link can hold, step down when the signal fades, and climb back up when it clears. You see it
-          happen: <code>RETRAIN</code>.</p>
-      </div>
-      <div class="box">
-        <span class="label">03</span>
-        <h3>Nothing gets lost</h3>
-        <p>Selective-repeat ARQ (window 8, SACK bitmap), half-duplex burst manners, keepalives, resync to SF12 when the
-          link dies for a moment, and <code>NO CARRIER</code> only when it is really gone.</p>
-      </div>
-      <div class="box">
-        <span class="label">04</span>
-        <h3>LZ compression on the air</h3>
-        <p>Each frame is squeezed against a preset tuned for ANSI art, CP437 boxes and blocks, so BBS screens fly.
-          The <code>CONNECT</code> line says so: <code>/ARQ/LZ</code>, and the DC light comes on.</p>
-      </div>
-      <div class="box">
-        <span class="label">05</span>
-        <h3>Wi-Fi too</h3>
-        <p>Its own WPA2 hotspot, a client network, up to 8 named forwards (<code>ATDT AXIS</code> opens a telnet call),
-          and a published forward so radio callers reach a telnet BBS.</p>
-      </div>
-      <div class="box">
-        <span class="label">06</span>
-        <h3>Find your friends</h3>
-        <p>Beacons, <code>AT+SCAN</code>, a station directory with pinning, dial by name, and a privacy mode
-          (ON, QUIET or HIDDEN).</p>
-      </div>
-      <div class="box">
-        <span class="label">07</span>
-        <h3>A full-screen setup menu</h3>
-        <p><code>AT+MENU</code> opens an 80x24 ANSI lightbar menu (CP437, 16 colors) for SyncTERM: directory and scan,
-          live link status, settings, forwards, Wi-Fi.</p>
-      </div>
-      <div class="box">
-        <span class="label">08</span>
-        <h3>A front panel with attitude</h3>
-        <p>The OLED shows modem lights, the call state, tier, RSSI and SNR, a radar sweep while scanning, and an idle
-          show in 17 languages with 12 transitions.</p>
-        <div class="lights" aria-label="The eight modem lights">
-          <span>OH</span><span>CD</span><span class="off">SD</span><span>RD</span><span class="off">HS</span><span>EC</span><span>DC</span><span class="off">AA</span>
+  <div class="ad-body">
+    <figure class="product">
+      <a class="photo shot" href="multimode/preview/logo.gif">
+        <img class="pixel" src="multimode/preview/logo.gif" width="512" height="256"
+             alt="The AXIS BBS boot logo on the modem's OLED: the letters build up from scan lines, a sweep runs along the rule, five dots count down">
+      </a>
+      <figcaption>The boot screen, live from the OLED. Heltec V4 shown; the V3 runs it too.</figcaption>
+      <div class="wordmark">
+        <img src="docs/img/simian-logo.png" width="512" height="548" alt="Simian Tactical Unit monkey logo">
+        <div>
+          <p class="model">LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM</p>
+          <p class="release">v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M</p>
+          <p class="tagline">S0N1C B00M R4D10 PR0 MAX</p>
         </div>
       </div>
-      <div class="box">
-        <span class="label">09</span>
-        <h3>Four modes in one radio</h3>
-        <p>A custom bootloader and picker carry LFD3K-SM, Simian Radar, RNode and Meshtastic in their own slots:
-          <code>AT+MODE=RNODE</code> and the board comes back up as an RNode.</p>
-      </div>
-      <div class="box">
-        <span class="label">10</span>
-        <h3>Tested hard</h3>
-        <p>A <code>no_std</code>, no-heap Rust core with a seeded LoRa channel simulator, two-modem call scenarios (SNR
-          dips, lost frames, collisions, resyncs) and proptest fuzzing of frames and AT lines. The simulator found real
-          bugs before any radio did.</p>
-      </div>
-    </div>
+    </figure>
 
-    <h3 id="tiers">The tier ladder</h3>
-    <p class="intro">Eight LoRa tiers at 500 kHz bandwidth, coding rate 4/5. Air rates, fastest first. The
-      <code>CONNECT</code> string always shows the real tier, for example <code>CONNECT LORA SF7 BW500 21875/ARQ/LZ</code>.</p>
-    <div class="ladder">
-      <div><b>SF5</b><span>62,500 bps</span></div>
-      <div><b>SF6</b><span>37,500 bps</span></div>
-      <div><b>SF7</b><span>21,875 bps</span></div>
-      <div><b>SF8</b><span>12,500 bps</span></div>
-      <div><b>SF9</b><span>7,031 bps</span></div>
-      <div><b>SF10</b><span>3,906 bps</span></div>
-      <div><b>SF11</b><span>2,148 bps</span></div>
-      <div><b>SF12</b><span>1,172 bps</span></div>
-    </div>
-  </div>
-</section>
-
-<section id="animations">
-  <div class="wrap">
-    <h2>Animations</h2>
-    <p class="intro">The front panel never sits still. These are the real renderer's frames, drawn by the same pure C
-      code the firmware runs, previewed on the PC. Click any of them to see it big.</p>
-    <ul class="gallery anim" data-gallery="anim">
-      <li><figure>
-        <a class="shot" href="docs/phase2-bench/mockups/idle-show.gif"><img class="pixel n256" src="docs/phase2-bench/mockups/idle-show.gif" width="512" height="284" alt="The idle text show cycling through languages and transitions"></a>
-        <figcaption><b>Idle show.</b> One item every 8 seconds: IDLE in 17 languages, the clock, uptime, chip temperature, stations heard and the last caller, through one of 12 transitions (explode, blocks, sine scroll, split flap, typewriter, drip melt, glitch, matrix rain, starfield warp, CRT power, venetian blinds, pixelate). The preview names each transition under the panel.</figcaption>
-      </figure></li>
-      <li><figure>
-        <a class="shot" href="docs/phase2-bench/mockups/idle-scope.gif"><img class="pixel n384" src="docs/phase2-bench/mockups/idle-scope.gif" width="384" height="192" alt="The breathing scope drawing the radio channel"></a>
-        <figcaption><b>Radar scope.</b> A breathing scope draws the live radio channel: one RSSI sample every 50 ms from the SX1262, 64 samples, transmit samples marked.</figcaption>
-      </figure></li>
-      <li><figure>
-        <a class="shot" href="docs/phase2-bench/mockups/idle-disintegrate.gif"><img class="pixel n384" src="docs/phase2-bench/mockups/idle-disintegrate.gif" width="384" height="192" alt="The idle word disintegrating into flying bits"></a>
-        <figcaption><b>Disintegrate.</b> The idle word breaks up into flying bits and pulls itself back together.</figcaption>
-      </figure></li>
-      <li><figure>
-        <a class="shot" href="docs/phase2-bench/mockups/idle-full.gif"><img class="pixel n384" src="docs/phase2-bench/mockups/idle-full.gif" width="384" height="192" alt="The full idle loop of the OLED front panel"></a>
-        <figcaption><b>The full idle loop.</b> The lights slide into a new order each loop and go home every fourth, the scope breathes, the meters show the live channel level.</figcaption>
-      </figure></li>
-      <li><figure>
-        <a class="shot" href="multimode/preview/logo.gif"><img class="pixel n512" src="multimode/preview/logo.gif" width="512" height="256" alt="The AXIS BBS boot logo animation"></a>
-        <figcaption><b>Boot logo.</b> Every boot shows the AXIS BBS logo for 5 seconds. Press PRG during it and the mode list opens.</figcaption>
-      </figure></li>
-    </ul>
-  </div>
-</section>
-
-<section id="menu">
-  <div class="wrap">
-    <h2>The setup menu</h2>
-    <p class="intro"><code>AT+MENU</code> opens a full-screen 80x24 ANSI lightbar menu. Best in SyncTERM with the CP437
-      font. Up, Down and Tab move, Enter opens or edits, a letter jumps, Esc goes back. Every edit is checked the same
-      way the AT command checks it. These screens are rendered from the menu code by the PC preview tool, replayed on a
-      strict 80x24 terminal.</p>
-    <ul class="gallery menu" data-gallery="menu">
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/01-main.png"><img src="docs/phase4-bench/menu/01-main.png" width="1280" height="768" loading="lazy" alt="Main menu"></a><figcaption><b>Main menu.</b> Directory and Scan, Link Status, Settings, Forwards, Wi-Fi, About, Save settings, Exit.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/02-directory.png"><img src="docs/phase4-bench/menu/02-directory.png" width="1280" height="768" loading="lazy" alt="Directory and Scan screen"></a><figcaption><b>Directory.</b> Enter dials the selected name, S scans, P pins, A adds, D deletes.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/03-directory-add.png"><img src="docs/phase4-bench/menu/03-directory-add.png" width="1280" height="768" loading="lazy" alt="Adding a name to the directory"></a><figcaption><b>Add a name</b> to the directory.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/13-scan.png"><img src="docs/phase4-bench/menu/13-scan.png" width="1280" height="768" loading="lazy" alt="Scanning the air for other modems"></a><figcaption><b>Scanning the air</b> for other modems.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/14-link-call.png"><img src="docs/phase4-bench/menu/14-link-call.png" width="1280" height="768" loading="lazy" alt="Live link status during a call"></a><figcaption><b>Live link status in a call:</b> tier, SNR and compression, live.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/11-link-idle.png"><img src="docs/phase4-bench/menu/11-link-idle.png" width="1280" height="768" loading="lazy" alt="Link status while idle"></a><figcaption><b>Link status,</b> idle.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/04-settings.png"><img src="docs/phase4-bench/menu/04-settings.png" width="1280" height="768" loading="lazy" alt="Settings screen"></a><figcaption><b>Settings.</b> Station name, privacy mode, TX power, tier cap, auto-answer, compression, boot to menu.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/05-settings-edit.png"><img src="docs/phase4-bench/menu/05-settings-edit.png" width="1280" height="768" loading="lazy" alt="Editing a setting"></a><figcaption><b>Editing a setting.</b> A bad value shows a red line.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/06-forwards.png"><img src="docs/phase4-bench/menu/06-forwards.png" width="1280" height="768" loading="lazy" alt="Forwards screen"></a><figcaption><b>Forwards.</b> Up to 8 named telnet destinations.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/07-forwards-delete.png"><img src="docs/phase4-bench/menu/07-forwards-delete.png" width="1280" height="768" loading="lazy" alt="Deleting a forward"></a><figcaption><b>Deleting a forward.</b></figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/08-wifi.png"><img src="docs/phase4-bench/menu/08-wifi.png" width="1280" height="768" loading="lazy" alt="Wi-Fi screen"></a><figcaption><b>Wi-Fi.</b> Passwords always hidden.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/09-wifi-password.png"><img src="docs/phase4-bench/menu/09-wifi-password.png" width="1280" height="768" loading="lazy" alt="Typing a new Wi-Fi password, shown as stars"></a><figcaption><b>New password:</b> each character shows as a star.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/15-ring.png"><img src="docs/phase4-bench/menu/15-ring.png" width="1280" height="768" loading="lazy" alt="RING shown in the bottom line while in the menu"></a><figcaption><b>RING</b> while you are in the menu.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/12-unsaved-esc.png"><img src="docs/phase4-bench/menu/12-unsaved-esc.png" width="1280" height="768" loading="lazy" alt="Unsaved changes question on leaving the menu"></a><figcaption><b>Unsaved changes.</b> Y discards and leaves, S saves and leaves, N stays.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase4-bench/menu/10-about.png"><img src="docs/phase4-bench/menu/10-about.png" width="1280" height="768" loading="lazy" alt="About screen"></a><figcaption><b>About.</b></figcaption></figure></li>
-    </ul>
-  </div>
-</section>
-
-<section id="panel">
-  <div class="wrap">
-    <h2>The front panel</h2>
-    <p class="intro">A 0.96 inch 128x64 OLED drawn at up to 20 fps by its own task, with a hand-made 5x7 font. Top row:
-      eight lights, OH CD SD RD HS EC DC AA. Middle: the state or the tier with an eight cell ladder. Bottom: station
-      name, RSSI and SNR with bars. Mockups come from the same pure drawing function the firmware uses; the last five
-      are captures from the real board.</p>
-    <ul class="gallery oled" data-gallery="oled">
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/dialing.png"><img class="pixel" src="docs/phase2-bench/mockups/dialing.png" width="512" height="256" loading="lazy" alt="OLED: DIALING"></a><figcaption><b>Dialing.</b> OH blinks while dialing.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/training.png"><img class="pixel" src="docs/phase2-bench/mockups/training.png" width="512" height="256" loading="lazy" alt="OLED: TRAINING"></a><figcaption><b>Training.</b> A sweep runs across the eight tiers, then the chosen one flashes.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/online_sf7.png"><img class="pixel" src="docs/phase2-bench/mockups/online_sf7.png" width="512" height="256" loading="lazy" alt="OLED: online at SF7, 21875 bps"></a><figcaption><b>Online at SF7,</b> 21875 bps.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/online_sf5.png"><img class="pixel" src="docs/phase2-bench/mockups/online_sf5.png" width="512" height="256" loading="lazy" alt="OLED: online at SF5, 62500 bps"></a><figcaption><b>Online at SF5,</b> 62500 bps, the top tier.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/online_lz.png"><img class="pixel" src="docs/phase2-bench/mockups/online_lz.png" width="512" height="256" loading="lazy" alt="OLED: online with compression"></a><figcaption><b>Online, compressed.</b> DC is lit while a radio call compresses.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/scan.png"><img class="pixel" src="docs/phase2-bench/mockups/scan.png" width="512" height="256" loading="lazy" alt="OLED: SCAN radar with 3 found"></a><figcaption><b>Scan radar.</b> A sweep goes round every 1.6 s, one blip per answer, the count and FOUND.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/wifi_tcp.png"><img class="pixel" src="docs/phase2-bench/mockups/wifi_tcp.png" width="512" height="256" loading="lazy" alt="OLED: WIFI TCP online"></a><figcaption><b>Wi-Fi telnet call.</b></figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/bridge.png"><img class="pixel" src="docs/phase2-bench/mockups/bridge.png" width="512" height="256" loading="lazy" alt="OLED: BRIDGE with the radio tier line"></a><figcaption><b>Bridge.</b> A radio call bridged to a telnet forward.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle.png"><img class="pixel" src="docs/phase2-bench/mockups/idle.png" width="512" height="256" loading="lazy" alt="OLED: IDLE with the lights shuffled"></a><figcaption><b>Idle,</b> mid lights shuffle.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_heard.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_heard.png" width="512" height="256" loading="lazy" alt="OLED: HEARD 4"></a><figcaption><b>Stations heard</b> in the last 15 minutes.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_caller.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_caller.png" width="512" height="256" loading="lazy" alt="OLED: last caller name"></a><figcaption><b>Last caller,</b> the station that last called over the radio.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_ap.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_ap.png" width="512" height="256" loading="lazy" alt="OLED: hotspot name row"></a><figcaption><b>Hotspot name</b> on the rotating name row.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_ip.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_ip.png" width="512" height="256" loading="lazy" alt="OLED: IP address row"></a><figcaption><b>Wi-Fi address</b> on the name row.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/mockups/radio_fail.png"><img class="pixel" src="docs/phase2-bench/mockups/radio_fail.png" width="512" height="256" loading="lazy" alt="OLED: RADIO FAIL, CHECK BOARD"></a><figcaption><b>Radio fail.</b> Shown when the radio is not usable.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/oled-idle.png"><img class="pixel" src="docs/phase2-bench/oled-idle.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle"></a><figcaption><b>Real panel:</b> idle, first flash.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/oled-dialing.png"><img class="pixel" src="docs/phase2-bench/oled-dialing.png" width="512" height="256" loading="lazy" alt="Real OLED capture: dialing"></a><figcaption><b>Real panel:</b> dialing.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/oled-after.png"><img class="pixel" src="docs/phase2-bench/oled-after.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle after a call"></a><figcaption><b>Real panel:</b> back to idle after the call.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/oled-idle-b.png"><img class="pixel" src="docs/phase2-bench/oled-idle-b.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle, bench rerun"></a><figcaption><b>Real panel:</b> idle, bench rerun.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/oled-phase3-idle.png"><img class="pixel" src="docs/phase2-bench/oled-phase3-idle.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle with the scope and IP address"></a><figcaption><b>Real panel:</b> idle with the live scope and the Wi-Fi address.</figcaption></figure></li>
-    </ul>
-
-    <div class="wide">
-      <ul class="gallery big" data-gallery="oled2">
-        <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle-items.png"><img src="docs/phase2-bench/mockups/idle-items.png" width="1482" height="592" loading="lazy" alt="Every item of the idle show"></a><figcaption><b>Every idle show item,</b> rendered by the PC check tool.</figcaption></figure></li>
-        <li><figure><a class="shot" href="multimode/preview/menu.png"><img src="multimode/preview/menu.png" width="1048" height="1328" loading="lazy" alt="The multimode picker screens"></a><figcaption><b>The mode picker.</b> Tap PRG for the next mode, hold to start. NO IMAGE, STARTING, and the crash note.</figcaption></figure></li>
+    <div class="copy">
+      <p class="lede">Plug it into any terminal program and type <code>ATDT</code>. You get <code>DIALING</code>,
+        <code>RINGING</code>, <code>CONNECT</code>, retrains and <code>NO CARRIER</code>, the way BBS calling used to
+        feel. Except the call goes over LoRa radio on 918.5&nbsp;MHz, with no phone line and no internet. It is the
+        radio side of the <a href="https://github.com/revjmoney/axis-bbs">AXIS BBS</a>.</p>
+      <ul class="checks">
+        <li><a href="#why" data-card="why" data-focus="f1">Real Hayes manners: ATD, ATA, <code>+++</code>, S registers</a></li>
+        <li><a href="#why" data-card="why" data-focus="f2">8 speed tiers, trained live on the signal</a></li>
+        <li><a href="#why" data-card="why" data-focus="f3">Selective-repeat ARQ: nothing gets lost</a></li>
+        <li><a href="#why" data-card="why" data-focus="f4">LZ compression tuned for ANSI art</a></li>
+        <li><a href="#why" data-card="why" data-focus="f5">Wi-Fi hotspot, client and telnet forwards</a></li>
+        <li><a href="#why" data-card="why" data-focus="f6">Beacons, scan and a station directory</a></li>
+        <li><a href="#menu" data-card="menu">Full-screen ANSI setup menu</a></li>
+        <li><a href="#panel" data-card="panel">Front panel with blinking modem lights</a></li>
+        <li><a href="#multimode" data-card="multimode">Four firmwares on one Heltec V4</a></li>
+        <li><a href="#why" data-card="why" data-focus="f10">Rust core, simulator tested and fuzzed</a></li>
       </ul>
     </div>
-  </div>
-</section>
 
-<section id="multimode">
-  <div class="wrap">
-    <h2>Four modes, one radio</h2>
-    <p class="intro">A small picker starts first on every boot. Do nothing and it starts the mode you used last. From
-      inside the modem, one command switches. Each firmware has its own flash slot, so updating one never touches the
-      others. The guide is in <a href="docs.html#multimode">Multimode</a>.</p>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>Menu name</th><th>What it is</th><th>Switch with</th></tr></thead>
-        <tbody>
-          <tr><td>LFD3K-SM</td><td>The Hayes-style LoRa and Wi-Fi modem. The default.</td><td><code>AT+MODE=MODEM</code></td></tr>
-          <tr><td>SIMIAN RADAR</td><td>A listen-only pocket scanner.</td><td><code>AT+MODE=RADAR</code></td></tr>
-          <tr><td>RNODE</td><td>The RNode firmware, so the board works as a Reticulum LoRa interface.</td><td><code>AT+MODE=RNODE</code></td></tr>
-          <tr><td>MESH</td><td>Meshtastic for the Heltec V4, patched to live politely next to the others.</td><td><code>AT+MODE=MESH</code></td></tr>
-        </tbody>
-      </table>
+    <aside class="specs" aria-label="Speeds and boards">
+      <h2 class="spec-head">Speeds</h2>
+      <a class="chart" href="#why" data-card="why" data-focus="tiers" aria-label="The tier ladder: SF5 62,500 bps down to SF12 1,172 bps">
+        <span style="--w:100%"><b>SF5</b><i>62,500</i></span>
+        <span style="--w:60%"><b>SF6</b><i>37,500</i></span>
+        <span style="--w:35%"><b>SF7</b><i>21,875</i></span>
+        <span style="--w:20%"><b>SF8</b><i>12,500</i></span>
+        <span style="--w:11.2%"><b>SF9</b><i>7,031</i></span>
+        <span style="--w:6.2%"><b>SF10</b><i>3,906</i></span>
+        <span style="--w:3.4%"><b>SF11</b><i>2,148</i></span>
+        <span style="--w:1.9%"><b>SF12</b><i>1,172</i></span>
+      </a>
+      <p class="chart-cap">Air rates in bps at 500&nbsp;kHz. It picks the fastest the link can hold.</p>
+      <h2 class="spec-head">Runs on</h2>
+      <p class="boards"><a href="#hardware" data-card="hardware">Heltec WiFi LoRa 32 V4</a> and
+        <a href="#hardware" data-card="hardware">V3</a></p>
+      <pre class="screen" aria-label="A sample call">ATDT AXISMODEM-16FC
+RINGING
+CONNECT LORA SF5 BW500
+  62500/ARQ/LZ</pre>
+    </aside>
+  </div>
+
+  <div class="ad-foot">
+    <div class="coupon">
+      <p class="coupon-head">Yes! I want to dial the air.</p>
+      <div class="coupon-actions">
+        <a class="stamp" href="#call" data-card="call">Watch a real call</a>
+        <a class="stamp" href="#quickstart" data-card="quickstart">Quick start</a>
+        <a class="stamp" href="docs.html">Read the manual</a>
+        <a class="stamp" href="https://github.com/revjmoney/lfd3k-sm">Get the source</a>
+      </div>
     </div>
+    <nav class="index" aria-label="Inside this ad">
+      <p class="index-head">Inside this ad</p>
+      <ul>
+        <li><a href="#call" data-card="call">A real call</a></li>
+        <li><a href="#why" data-card="why">Why it rules</a></li>
+        <li><a href="#animations" data-card="animations">Animations</a></li>
+        <li><a href="#menu" data-card="menu">Setup menu</a></li>
+        <li><a href="#panel" data-card="panel">Front panel</a></li>
+        <li><a href="#multimode" data-card="multimode">Four modes</a></li>
+        <li><a href="#air" data-card="air">On the air</a></li>
+        <li><a href="#quickstart" data-card="quickstart">Quick start</a></li>
+        <li><a href="#build" data-card="build">Build it</a></li>
+        <li><a href="#hardware" data-card="hardware">Hardware</a></li>
+        <li><a href="#license" data-card="license">License</a></li>
+      </ul>
+    </nav>
+    <p class="fineprint">Free software under the GNU GPL v3 or later, with an attribution term
+      (<a href="#license" data-card="license">details</a>). Copyright &copy; 2026 Rev. J. Money /
+      <a href="https://jmscnc.com">jmscnc.com</a>. Check the rules for your region before you transmit.
+      AXIS BBS and LFD3K-SM are by the same author. Shown with the V4; the V3 runs the modem alone.</p>
+  </div>
+</main>
+
+<!-- The insert cards. Each one slides in when its link is clicked. -->
+<dialog class="deck" id="deck" aria-labelledby="deck-title">
+  <div class="card-shell">
+    <div class="card-bar">
+      <p class="card-kicker" id="deck-title">LFD3K-SM</p>
+      <button type="button" class="card-close" aria-label="Close the card">Close</button>
+    </div>
+    <div class="card-scroll" tabindex="-1">
+
+<section class="card" id="call" data-title="A real call, over the air" hidden>
+  <h2>A real call, over the air</h2>
+  <p>Recorded live on 2026-11-12. The PC types into a Heltec V3, the V3 dials a Heltec V4 over LoRa on 918.5&nbsp;MHz
+    (it trained at SF5, 62,500 bps on the air, with ARQ and LZ compression), and the V4 answers and bridges the call over
+    Wi-Fi into the AXIS BBS. Then a walk around the board: log in, read a message, look at a file area, the system stats,
+    the ANSI pack viewer, and log off. Real time, nothing sped up: left is the caller's screen, right is the V4's own
+    terminal.</p>
+  <video controls preload="none" playsinline poster="docs/video/lfd3k-radio-call-poster.jpg">
+    <source src="docs/video/lfd3k-radio-call.mp4" type="video/mp4">
+    Your browser cannot play this video. <a href="docs/video/lfd3k-radio-call.mp4">Download it (MP4, 3 MB)</a>.
+  </video>
+</section>
+
+<section class="card" id="why" data-title="Why it rules" hidden>
+  <h2>Why it rules</h2>
+  <p class="intro">Ten reasons. Full details live in the <a href="docs.html#features">features log</a> and the
+    <a href="docs.html#design">design doc</a>.</p>
+  <div class="reasons">
+    <div class="reason" id="f1"><h3>Real modem manners</h3>
+      <p><code>ATD</code>, <code>ATA</code>, <code>ATH</code>, <code>ATO</code>, <code>ATI</code>, <code>AT&amp;V</code>,
+        <code>ATZ</code>, S registers, <code>+++</code> with guard time, verbose and numeric result codes, auto-answer.
+        Your old terminal scripts just work.</p></div>
+    <div class="reason" id="f2"><h3>8 speed tiers, picked live</h3>
+      <p>SF12 to SF5 at 500 kHz, about 1.2 to 62.5 kbps on the air. The modems train on the measured SNR, start at the
+        best tier the link can hold, step down when the signal fades, and climb back up when it clears. You see it
+        happen: <code>RETRAIN</code>.</p></div>
+    <div class="reason" id="f3"><h3>Nothing gets lost</h3>
+      <p>Selective-repeat ARQ (window 8, SACK bitmap), half-duplex burst manners, keepalives, resync to SF12 when the
+        link dies for a moment, and <code>NO CARRIER</code> only when it is really gone.</p></div>
+    <div class="reason" id="f4"><h3>LZ compression on the air</h3>
+      <p>Each frame is squeezed against a preset tuned for ANSI art, CP437 boxes and blocks, so BBS screens fly.
+        The <code>CONNECT</code> line says so: <code>/ARQ/LZ</code>, and the DC light comes on.</p></div>
+    <div class="reason" id="f5"><h3>Wi-Fi too</h3>
+      <p>Its own WPA2 hotspot, a client network, up to 8 named forwards (<code>ATDT AXIS</code> opens a telnet call),
+        and a published forward so radio callers reach a telnet BBS.</p></div>
+    <div class="reason" id="f6"><h3>Find your friends</h3>
+      <p>Beacons, <code>AT+SCAN</code>, a station directory with pinning, dial by name, and a privacy mode
+        (ON, QUIET or HIDDEN).</p></div>
+    <div class="reason" id="f7"><h3>A full-screen setup menu</h3>
+      <p><code>AT+MENU</code> opens an 80x24 ANSI lightbar menu (CP437, 16 colors) for SyncTERM: directory and scan,
+        live link status, settings, forwards, Wi-Fi. <a href="#menu" data-card="menu">See the screens</a>.</p></div>
+    <div class="reason" id="f8"><h3>A front panel with attitude</h3>
+      <p>The OLED shows modem lights, the call state, tier, RSSI and SNR, a radar sweep while scanning, and an idle
+        show in 17 languages with 12 transitions. <a href="#panel" data-card="panel">See the panel</a>.</p>
+      <div class="lights" aria-label="The eight modem lights">
+        <span>OH</span><span>CD</span><span class="off">SD</span><span>RD</span><span class="off">HS</span><span>EC</span><span>DC</span><span class="off">AA</span>
+      </div></div>
+    <div class="reason" id="f9"><h3>Four modes in one radio</h3>
+      <p>On the V4, a custom bootloader and picker carry LFD3K-SM, Simian Radar, RNode and Meshtastic in their own
+        slots: <code>AT+MODE=RNODE</code> and the board comes back up as an RNode.
+        <a href="#multimode" data-card="multimode">The four modes</a>.</p></div>
+    <div class="reason" id="f10"><h3>Tested hard</h3>
+      <p>A <code>no_std</code>, no-heap Rust core with a seeded LoRa channel simulator, two-modem call scenarios (SNR
+        dips, lost frames, collisions, resyncs) and proptest fuzzing of frames and AT lines. The simulator found real
+        bugs before any radio did.</p></div>
+  </div>
+  <h3 id="tiers">The tier ladder</h3>
+  <p>Eight LoRa tiers at 500 kHz bandwidth, coding rate 4/5. Air rates, fastest first. The <code>CONNECT</code> string
+    always shows the real tier, for example <code>CONNECT LORA SF7 BW500 21875/ARQ/LZ</code>.</p>
+  <div class="ladder">
+    <div><b>SF5</b><span>62,500 bps</span></div>
+    <div><b>SF6</b><span>37,500 bps</span></div>
+    <div><b>SF7</b><span>21,875 bps</span></div>
+    <div><b>SF8</b><span>12,500 bps</span></div>
+    <div><b>SF9</b><span>7,031 bps</span></div>
+    <div><b>SF10</b><span>3,906 bps</span></div>
+    <div><b>SF11</b><span>2,148 bps</span></div>
+    <div><b>SF12</b><span>1,172 bps</span></div>
   </div>
 </section>
 
-<section id="air">
-  <div class="wrap">
-    <h2>On the air</h2>
-    <p class="intro">Checked with an SDR. Every <code>ATDT</code> makes a burst on 918.5 MHz, one per
-      <code>RINGING</code>, each about 0.3 s long (the SF12 call request airtime), about 510 kHz wide and centred on
-      918.50 MHz.</p>
-    <ul class="gallery oled" data-gallery="air">
-      <li><figure><a class="shot" href="docs/phase2-bench/sdr-waterfall-bursts.png"><img class="pixel" src="docs/phase2-bench/sdr-waterfall-bursts.png" width="512" height="500" loading="lazy" alt="SDR waterfall with LFD3K-SM bursts"></a><figcaption><b>Bursts on 918.5 MHz,</b> one per RINGING.</figcaption></figure></li>
-      <li><figure><a class="shot" href="docs/phase2-bench/sdr-waterfall-918500.png"><img class="pixel" src="docs/phase2-bench/sdr-waterfall-918500.png" width="900" height="192" loading="lazy" alt="SDR waterfall centred on 918.5 MHz"></a><figcaption><b>Centred on 918.5 MHz,</b> about 918.245 to 918.755 MHz.</figcaption></figure></li>
-    </ul>
+<section class="card" id="animations" data-title="Animations" hidden>
+  <h2>Animations</h2>
+  <p class="intro">The front panel never sits still. These are the real renderer's frames, drawn by the same pure C
+    code the firmware runs, previewed on the PC. Click any of them to see it big.</p>
+  <ul class="gallery anim" data-gallery="anim">
+    <li><figure>
+      <a class="shot" href="docs/phase2-bench/mockups/idle-show.gif"><img class="pixel" loading="lazy" src="docs/phase2-bench/mockups/idle-show.gif" width="512" height="284" alt="The idle text show cycling through languages and transitions"></a>
+      <figcaption><b>Idle show.</b> One item every 8 seconds: IDLE in 17 languages, the clock, uptime, chip temperature, stations heard and the last caller, through one of 12 transitions (explode, blocks, sine scroll, split flap, typewriter, drip melt, glitch, matrix rain, starfield warp, CRT power, venetian blinds, pixelate).</figcaption>
+    </figure></li>
+    <li><figure>
+      <a class="shot" href="docs/phase2-bench/mockups/idle-scope.gif"><img class="pixel" loading="lazy" src="docs/phase2-bench/mockups/idle-scope.gif" width="384" height="192" alt="The breathing scope drawing the radio channel"></a>
+      <figcaption><b>Radar scope.</b> A breathing scope draws the live radio channel: one RSSI sample every 50 ms from the SX1262, 64 samples, transmit samples marked.</figcaption>
+    </figure></li>
+    <li><figure>
+      <a class="shot" href="docs/phase2-bench/mockups/idle-disintegrate.gif"><img class="pixel" loading="lazy" src="docs/phase2-bench/mockups/idle-disintegrate.gif" width="384" height="192" alt="The idle word disintegrating into flying bits"></a>
+      <figcaption><b>Disintegrate.</b> The idle word breaks up into flying bits and pulls itself back together.</figcaption>
+    </figure></li>
+    <li><figure>
+      <a class="shot" href="docs/phase2-bench/mockups/idle-full.gif"><img class="pixel" loading="lazy" src="docs/phase2-bench/mockups/idle-full.gif" width="384" height="192" alt="The full idle loop of the OLED front panel"></a>
+      <figcaption><b>The full idle loop.</b> The lights slide into a new order each loop and go home every fourth, the scope breathes, the meters show the live channel level.</figcaption>
+    </figure></li>
+    <li><figure>
+      <a class="shot" href="multimode/preview/logo.gif"><img class="pixel" loading="lazy" src="multimode/preview/logo.gif" width="512" height="256" alt="The AXIS BBS boot logo animation"></a>
+      <figcaption><b>Boot logo.</b> Every boot shows the AXIS BBS logo for 5 seconds. On the V4, press PRG during it and the mode list opens.</figcaption>
+    </figure></li>
+  </ul>
+</section>
+
+<section class="card" id="menu" data-title="The setup menu" hidden>
+  <h2>The setup menu</h2>
+  <p class="intro"><code>AT+MENU</code> opens a full-screen 80x24 ANSI lightbar menu. Best in SyncTERM with the CP437
+    font. Up, Down and Tab move, Enter opens or edits, a letter jumps, Esc goes back. Every edit is checked the same
+    way the AT command checks it. These screens are rendered from the menu code by the PC preview tool.</p>
+  <ul class="gallery menu" data-gallery="menu">
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/01-main.png"><img src="docs/phase4-bench/menu/01-main.png" width="1280" height="768" loading="lazy" alt="Main menu"></a><figcaption><b>Main menu.</b> Directory and Scan, Link Status, Settings, Forwards, Wi-Fi, About, Save settings, Exit.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/02-directory.png"><img src="docs/phase4-bench/menu/02-directory.png" width="1280" height="768" loading="lazy" alt="Directory and Scan screen"></a><figcaption><b>Directory.</b> Enter dials the selected name, S scans, P pins, A adds, D deletes.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/03-directory-add.png"><img src="docs/phase4-bench/menu/03-directory-add.png" width="1280" height="768" loading="lazy" alt="Adding a name to the directory"></a><figcaption><b>Add a name</b> to the directory.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/13-scan.png"><img src="docs/phase4-bench/menu/13-scan.png" width="1280" height="768" loading="lazy" alt="Scanning the air for other modems"></a><figcaption><b>Scanning the air</b> for other modems.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/14-link-call.png"><img src="docs/phase4-bench/menu/14-link-call.png" width="1280" height="768" loading="lazy" alt="Live link status during a call"></a><figcaption><b>Live link status in a call:</b> tier, SNR and compression, live.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/11-link-idle.png"><img src="docs/phase4-bench/menu/11-link-idle.png" width="1280" height="768" loading="lazy" alt="Link status while idle"></a><figcaption><b>Link status,</b> idle.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/04-settings.png"><img src="docs/phase4-bench/menu/04-settings.png" width="1280" height="768" loading="lazy" alt="Settings screen"></a><figcaption><b>Settings.</b> Station name, privacy mode, TX power, tier cap, auto-answer, compression, boot to menu.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/05-settings-edit.png"><img src="docs/phase4-bench/menu/05-settings-edit.png" width="1280" height="768" loading="lazy" alt="Editing a setting"></a><figcaption><b>Editing a setting.</b> A bad value shows a red line.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/06-forwards.png"><img src="docs/phase4-bench/menu/06-forwards.png" width="1280" height="768" loading="lazy" alt="Forwards screen"></a><figcaption><b>Forwards.</b> Up to 8 named telnet destinations.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/07-forwards-delete.png"><img src="docs/phase4-bench/menu/07-forwards-delete.png" width="1280" height="768" loading="lazy" alt="Deleting a forward"></a><figcaption><b>Deleting a forward.</b></figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/08-wifi.png"><img src="docs/phase4-bench/menu/08-wifi.png" width="1280" height="768" loading="lazy" alt="Wi-Fi screen"></a><figcaption><b>Wi-Fi.</b> Passwords always hidden.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/09-wifi-password.png"><img src="docs/phase4-bench/menu/09-wifi-password.png" width="1280" height="768" loading="lazy" alt="Typing a new Wi-Fi password, shown as stars"></a><figcaption><b>New password:</b> each character shows as a star.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/15-ring.png"><img src="docs/phase4-bench/menu/15-ring.png" width="1280" height="768" loading="lazy" alt="RING shown in the bottom line while in the menu"></a><figcaption><b>RING</b> while you are in the menu.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/12-unsaved-esc.png"><img src="docs/phase4-bench/menu/12-unsaved-esc.png" width="1280" height="768" loading="lazy" alt="Unsaved changes question on leaving the menu"></a><figcaption><b>Unsaved changes.</b> Y discards and leaves, S saves and leaves, N stays.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase4-bench/menu/10-about.png"><img src="docs/phase4-bench/menu/10-about.png" width="1280" height="768" loading="lazy" alt="About screen"></a><figcaption><b>About.</b></figcaption></figure></li>
+  </ul>
+</section>
+
+<section class="card" id="panel" data-title="The front panel" hidden>
+  <h2>The front panel</h2>
+  <p class="intro">A 0.96 inch 128x64 OLED drawn at up to 20 fps by its own task, with a hand-made 5x7 font. Top row:
+    eight lights, OH CD SD RD HS EC DC AA. Middle: the state or the tier with an eight cell ladder. Bottom: station
+    name, RSSI and SNR with bars. Mockups come from the same pure drawing function the firmware uses; the ones marked
+    real panel are captures from the board.</p>
+  <ul class="gallery oled" data-gallery="oled">
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/dialing.png"><img class="pixel" src="docs/phase2-bench/mockups/dialing.png" width="512" height="256" loading="lazy" alt="OLED: DIALING"></a><figcaption><b>Dialing.</b> OH blinks while dialing.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/training.png"><img class="pixel" src="docs/phase2-bench/mockups/training.png" width="512" height="256" loading="lazy" alt="OLED: TRAINING"></a><figcaption><b>Training.</b> A sweep runs across the eight tiers, then the chosen one flashes.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/online_sf7.png"><img class="pixel" src="docs/phase2-bench/mockups/online_sf7.png" width="512" height="256" loading="lazy" alt="OLED: online at SF7, 21875 bps"></a><figcaption><b>Online at SF7,</b> 21875 bps.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/online_sf5.png"><img class="pixel" src="docs/phase2-bench/mockups/online_sf5.png" width="512" height="256" loading="lazy" alt="OLED: online at SF5, 62500 bps"></a><figcaption><b>Online at SF5,</b> 62500 bps, the top tier.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/online_lz.png"><img class="pixel" src="docs/phase2-bench/mockups/online_lz.png" width="512" height="256" loading="lazy" alt="OLED: online with compression"></a><figcaption><b>Online, compressed.</b> DC is lit while a radio call compresses.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/scan.png"><img class="pixel" src="docs/phase2-bench/mockups/scan.png" width="512" height="256" loading="lazy" alt="OLED: SCAN radar with 3 found"></a><figcaption><b>Scan radar.</b> A sweep goes round every 1.6 s, one blip per answer, the count and FOUND.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/wifi_tcp.png"><img class="pixel" src="docs/phase2-bench/mockups/wifi_tcp.png" width="512" height="256" loading="lazy" alt="OLED: WIFI TCP online"></a><figcaption><b>Wi-Fi telnet call.</b></figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/bridge.png"><img class="pixel" src="docs/phase2-bench/mockups/bridge.png" width="512" height="256" loading="lazy" alt="OLED: BRIDGE with the radio tier line"></a><figcaption><b>Bridge.</b> A radio call bridged to a telnet forward.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle.png"><img class="pixel" src="docs/phase2-bench/mockups/idle.png" width="512" height="256" loading="lazy" alt="OLED: IDLE with the lights shuffled"></a><figcaption><b>Idle,</b> mid lights shuffle.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_heard.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_heard.png" width="512" height="256" loading="lazy" alt="OLED: HEARD 4"></a><figcaption><b>Stations heard</b> in the last 15 minutes.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_caller.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_caller.png" width="512" height="256" loading="lazy" alt="OLED: last caller name"></a><figcaption><b>Last caller,</b> the station that last called over the radio.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_ap.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_ap.png" width="512" height="256" loading="lazy" alt="OLED: hotspot name row"></a><figcaption><b>Hotspot name</b> on the rotating name row.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle_ip.png"><img class="pixel" src="docs/phase2-bench/mockups/idle_ip.png" width="512" height="256" loading="lazy" alt="OLED: IP address row"></a><figcaption><b>Wi-Fi address</b> on the name row.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/radio_fail.png"><img class="pixel" src="docs/phase2-bench/mockups/radio_fail.png" width="512" height="256" loading="lazy" alt="OLED: RADIO FAIL, CHECK BOARD"></a><figcaption><b>Radio fail.</b> Shown when the radio is not usable.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/oled-idle.png"><img class="pixel" src="docs/phase2-bench/oled-idle.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle"></a><figcaption><b>Real panel:</b> idle, first flash.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/oled-dialing.png"><img class="pixel" src="docs/phase2-bench/oled-dialing.png" width="512" height="256" loading="lazy" alt="Real OLED capture: dialing"></a><figcaption><b>Real panel:</b> dialing.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/oled-after.png"><img class="pixel" src="docs/phase2-bench/oled-after.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle after a call"></a><figcaption><b>Real panel:</b> back to idle after the call.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/oled-idle-b.png"><img class="pixel" src="docs/phase2-bench/oled-idle-b.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle, bench rerun"></a><figcaption><b>Real panel:</b> idle, bench rerun.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/oled-phase3-idle.png"><img class="pixel" src="docs/phase2-bench/oled-phase3-idle.png" width="512" height="256" loading="lazy" alt="Real OLED capture: idle with the scope and IP address"></a><figcaption><b>Real panel:</b> idle with the live scope and the Wi-Fi address.</figcaption></figure></li>
+  </ul>
+  <ul class="gallery big" data-gallery="oled2">
+    <li><figure><a class="shot" href="docs/phase2-bench/mockups/idle-items.png"><img src="docs/phase2-bench/mockups/idle-items.png" width="1482" height="592" loading="lazy" alt="Every item of the idle show"></a><figcaption><b>Every idle show item,</b> rendered by the PC check tool.</figcaption></figure></li>
+    <li><figure><a class="shot" href="multimode/preview/menu.png"><img src="multimode/preview/menu.png" width="1048" height="1328" loading="lazy" alt="The multimode picker screens"></a><figcaption><b>The mode picker</b> (V4). Tap PRG for the next mode, hold to start. NO IMAGE, STARTING, and the crash note.</figcaption></figure></li>
+  </ul>
+</section>
+
+<section class="card" id="multimode" data-title="Four modes, one radio" hidden>
+  <h2>Four modes, one radio</h2>
+  <p class="intro">On the Heltec V4 a small picker starts first on every boot. Do nothing and it starts the mode you
+    used last. From inside the modem, one command switches. Each firmware has its own flash slot, so updating one never
+    touches the others. The guide is in <a href="docs.html#multimode">Multimode</a>. The V3 runs the modem alone.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Menu name</th><th>What it is</th><th>Switch with</th></tr></thead>
+      <tbody>
+        <tr><td>LFD3K-SM</td><td>The Hayes-style LoRa and Wi-Fi modem. The default.</td><td><code>AT+MODE=MODEM</code></td></tr>
+        <tr><td>SIMIAN RADAR</td><td>A listen-only pocket scanner.</td><td><code>AT+MODE=RADAR</code></td></tr>
+        <tr><td>RNODE</td><td>The RNode firmware, so the board works as a Reticulum LoRa interface.</td><td><code>AT+MODE=RNODE</code></td></tr>
+        <tr><td>MESH</td><td>Meshtastic for the Heltec V4, patched to live politely next to the others.</td><td><code>AT+MODE=MESH</code></td></tr>
+      </tbody>
+    </table>
   </div>
 </section>
 
-<section id="quickstart">
-  <div class="wrap">
-    <h2>Quick start</h2>
-    <p class="intro">Any terminal at 115200 baud. For the menu, SyncTERM with ANSI-BBS emulation and the CP437 font.</p>
+<section class="card" id="air" data-title="On the air" hidden>
+  <h2>On the air</h2>
+  <p class="intro">Checked with an SDR. Every <code>ATDT</code> makes a burst on 918.5&nbsp;MHz, one per
+    <code>RINGING</code>, each about 0.3 s long (the SF12 call request airtime), about 510 kHz wide and centred on
+    918.50 MHz.</p>
+  <ul class="gallery oled" data-gallery="air">
+    <li><figure><a class="shot" href="docs/phase2-bench/sdr-waterfall-bursts.png"><img class="pixel" src="docs/phase2-bench/sdr-waterfall-bursts.png" width="512" height="500" loading="lazy" alt="SDR waterfall with LFD3K-SM bursts"></a><figcaption><b>Bursts on 918.5 MHz,</b> one per RINGING.</figcaption></figure></li>
+    <li><figure><a class="shot" href="docs/phase2-bench/sdr-waterfall-918500.png"><img class="pixel" src="docs/phase2-bench/sdr-waterfall-918500.png" width="900" height="192" loading="lazy" alt="SDR waterfall centred on 918.5 MHz"></a><figcaption><b>Centred on 918.5 MHz,</b> about 918.245 to 918.755 MHz.</figcaption></figure></li>
+  </ul>
+</section>
+
+<section class="card" id="quickstart" data-title="Quick start" hidden>
+  <h2>Quick start</h2>
+  <p class="intro">Any terminal at 115200 baud. For the menu, SyncTERM with ANSI-BBS emulation and the CP437 font.
+    On a Heltec V3, open the port with DTR and RTS off.</p>
 <pre class="term"><span class="ok">ATI</span>                      <span class="c">who am I (name, version, release)</span>
 <span class="ok">AT+MENU</span>                  <span class="c">the full-screen setup menu</span>
 <span class="ok">AT+SCAN</span>                  <span class="c">look for other modems on the air</span>
@@ -311,78 +328,69 @@
 <span class="ok">ATDT bbs.example.com:23</span>  <span class="c">dial any telnet host</span>
 <span class="ok">+++  (wait)  ATH</span>         <span class="c">hang up</span>
 <span class="ok">AT&amp;V</span>                     <span class="c">show every setting and the link</span>
-<span class="ok">AT+MODE=RNODE</span>            <span class="c">come back up as an RNode</span></pre>
-    <p>Every AT command, setting and S register: <a href="docs.html#features">features, settings and AT commands</a>.
-      No second radio? <a href="docs.html#simnet">SimNet</a> lets the PC be the far modem over Wi-Fi, running the same
-      core with real LoRa timing.</p>
-  </div>
+<span class="ok">AT+MODE=RNODE</span>            <span class="c">come back up as an RNode (V4 multimode)</span></pre>
+  <p>Every AT command, setting and S register: <a href="docs.html#features">features, settings and AT commands</a>.
+    No second radio? <a href="docs.html#simnet">SimNet</a> lets the PC be the far modem over Wi-Fi, running the same
+    core with real LoRa timing.</p>
 </section>
 
-<section id="build">
-  <div class="wrap">
-    <h2>Build it</h2>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>Part</th><th>Where</th><th>How</th></tr></thead>
-        <tbody>
-          <tr><td>Protocol core (Rust, <code>no_std</code>)</td><td><code>core/</code></td><td><code>cargo test --workspace</code></td></tr>
-          <tr><td>PC simulator and demo</td><td><code>sim/</code></td><td><code>cargo run -p lfd3k-sim -- --snr 10 --seed 420</code></td></tr>
-          <tr><td>PC modem (the real core over UDP)</td><td><code>sim/</code></td><td><code>cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --peer &lt;V4 ip&gt;</code></td></tr>
-          <tr><td>SX1262 driver</td><td><code>sx1262/</code></td><td>built into the firmware</td></tr>
-          <tr><td>Firmware (ESP-IDF 5.4 via PlatformIO)</td><td><code>firmware/</code></td><td><code>firmware\build_core.ps1</code>, then <code>pio run -d firmware -e heltec_v4</code></td></tr>
-          <tr><td>Firmware for the Heltec V3 (the modem alone)</td><td><code>firmware/</code></td><td><code>firmware\build_core.ps1</code>, then <code>pio run -d firmware -e heltec_v3_single -t upload --upload-port COMn</code> (see <a href="docs.html#heltec-v3">the V3 guide</a>)</td></tr>
-          <tr><td>Multimode bootloader and picker</td><td><code>multimode/</code></td><td>see <a href="docs.html#multimode-readme">multimode/README.md</a></td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="intro">The Rust toolchain for the ESP32-S3 is installed with <code>espup</code>. The first firmware build
-      downloads ESP-IDF and takes a while; later builds take seconds.</p>
+<section class="card" id="build" data-title="Build it" hidden>
+  <h2>Build it</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Part</th><th>Where</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Protocol core (Rust, <code>no_std</code>)</td><td><code>core/</code></td><td><code>cargo test --workspace</code></td></tr>
+        <tr><td>PC simulator and demo</td><td><code>sim/</code></td><td><code>cargo run -p lfd3k-sim -- --snr 10 --seed 420</code></td></tr>
+        <tr><td>PC modem (the real core over UDP)</td><td><code>sim/</code></td><td><code>cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --peer &lt;modem ip&gt;</code></td></tr>
+        <tr><td>SX1262 driver</td><td><code>sx1262/</code></td><td>built into the firmware</td></tr>
+        <tr><td>Firmware for the Heltec V4 (ESP-IDF 5.4 via PlatformIO)</td><td><code>firmware/</code></td><td><code>firmware\build_core.ps1</code>, then <code>pio run -d firmware -e heltec_v4</code></td></tr>
+        <tr><td>Firmware for the Heltec V3 (the modem alone)</td><td><code>firmware/</code></td><td><code>firmware\build_core.ps1</code>, then <code>pio run -d firmware -e heltec_v3_single -t upload --upload-port COMn</code> (see <a href="docs.html#heltec-v3">the V3 guide</a>)</td></tr>
+        <tr><td>Multimode bootloader and picker (V4)</td><td><code>multimode/</code></td><td>see <a href="docs.html#multimode-readme">multimode/README.md</a></td></tr>
+      </tbody>
+    </table>
   </div>
+  <p>The Rust toolchain for the ESP32-S3 is installed with <code>espup</code>. The first firmware build downloads
+    ESP-IDF and takes a while; later builds take seconds.</p>
 </section>
 
-<section id="hardware">
-  <div class="wrap">
-    <h2>Hardware</h2>
-    <div class="box">
-      <span class="label">Heltec WiFi LoRa 32 V4</span>
-      <p>ESP32-S3R2, 16 MB flash, SX1262 with the GC1109 front end. 918.5 MHz calling channel, 500 kHz bandwidth.
-        Check the rules for your region before you transmit; the default TX power (S30) is low on purpose.</p>
+<section class="card" id="hardware" data-title="Hardware" hidden>
+  <h2>Hardware</h2>
+  <div class="spec-pair">
+    <div class="spec-box">
+      <h3>Heltec WiFi LoRa 32 V4</h3>
+      <p>ESP32-S3R2, 16 MB flash, SX1262 with the GC1109 front end. Native USB. Runs the modem alone or the four-mode
+        picker.</p>
     </div>
-    <div class="box">
-      <span class="label">Heltec WiFi LoRa 32 V3</span>
+    <div class="spec-box">
+      <h3>Heltec WiFi LoRa 32 V3</h3>
       <p>ESP32-S3, 8 MB flash, SX1262 straight to the antenna (no front end, so S30 is the power at the antenna).
-        Runs the modem alone with the AXIS boot logo at power on; its USB-C is a CP2102 serial port at 115200.
-        Open it with DTR and RTS off. Everything else is the same modem. <a href="docs.html#heltec-v3">The V3 guide</a>.</p>
+        Runs the modem alone with the AXIS boot logo at power on. Its USB-C is a CP2102 serial port at 115200: open it
+        with DTR and RTS off. <a href="docs.html#heltec-v3">The V3 guide</a>.</p>
     </div>
   </div>
+  <p>918.5 MHz calling channel, 500 kHz bandwidth. Check the rules for your region before you transmit; the default TX
+    power (S30) is low on purpose.</p>
 </section>
 
-<section id="license">
-  <div class="wrap">
-    <h2>License</h2>
-    <p>LFD3K-SM is free software under the <b>GNU General Public License v3 or later</b>, with one additional term
-      under GPLv3 section 7(b): keep the attribution <b>Rev. J. Money / jmscnc.com</b>. A modified version that shows
-      Appropriate Legal Notices (the setup menu's About page counts as one) must include the line
-      <b>"Based on LFD3K-SM by Rev. J. Money / jmscnc.com"</b>, and must be marked as changed.</p>
-    <p>Read the <a href="docs.html#notice">notice and additional terms</a>, the
-      <a href="https://github.com/revjmoney/lfd3k-sm/blob/main/LICENSE">full license</a> and the
-      <a href="docs.html#third-party">third-party notices</a>.</p>
-  </div>
+<section class="card" id="license" data-title="License" hidden>
+  <h2>License</h2>
+  <p>LFD3K-SM is free software under the <b>GNU General Public License v3 or later</b>, with one additional term
+    under GPLv3 section 7(b): keep the attribution <b>Rev. J. Money / jmscnc.com</b>. A modified version that shows
+    Appropriate Legal Notices (the setup menu's About page counts as one) must include the line
+    <b>"Based on LFD3K-SM by Rev. J. Money / jmscnc.com"</b>, and must be marked as changed.</p>
+  <p>Read the <a href="docs.html#notice">notice and additional terms</a>, the
+    <a href="https://github.com/revjmoney/lfd3k-sm/blob/main/LICENSE">full license</a> and the
+    <a href="docs.html#third-party">third-party notices</a>.</p>
 </section>
-</main>
 
-<footer>
-  <div class="wrap">
-    <img src="docs/img/simian-logo.png" width="512" height="548" alt="">
-    <div>
-      LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM<br>
-      Copyright (C) 2026 Rev. J. Money / <a href="https://jmscnc.com">jmscnc.com</a><br>
-      <a href="https://github.com/revjmoney/lfd3k-sm">github.com/revjmoney/lfd3k-sm</a> ·
-      <a href="https://github.com/revjmoney/axis-bbs">AXIS BBS</a> ·
-      <a href="docs.html">Documentation</a>
+    </div>
+    <div class="card-nav">
+      <button type="button" class="card-prev">Previous card</button>
+      <button type="button" class="card-next">Next card</button>
     </div>
   </div>
-</footer>
+</dialog>
 
 <dialog class="lightbox" id="lightbox" aria-label="Image viewer">
   <img class="lb-img pixel" alt="">
@@ -390,7 +398,7 @@
     <button type="button" class="lb-prev" aria-label="Previous image">&lt;</button>
     <span class="lb-cap" aria-live="polite"></span>
     <button type="button" class="lb-next" aria-label="Next image">&gt;</button>
-    <button type="button" class="lb-close" aria-label="Close">ESC</button>
+    <button type="button" class="lb-close" aria-label="Close">Close</button>
   </div>
 </dialog>
 <script src="site.js"></script>
