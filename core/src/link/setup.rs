@@ -110,6 +110,13 @@ impl Link {
                 self.go_idle();
                 false
             }
+            // A voice answerer not yet bound by the caller's TierSet: its
+            // Hangup (no token) could end the call another device won.
+            State::AwaitTierSet if self.voice.on && !self.got_tierset => {
+                self.q_retain(|f| f.urgent);
+                self.go_idle();
+                true
+            }
             State::Ringing => {
                 self.enq(Tier::ROBUST, FrameType::CallReject, 0, &[], false, true);
                 self.go_idle();
