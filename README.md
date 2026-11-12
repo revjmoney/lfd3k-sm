@@ -1,5 +1,7 @@
+<h3 align="center"><a href="https://revjmoney.github.io/lfd3k-sm/">&#9654; THE WEBSITE: revjmoney.github.io/lfd3k-sm</a></h3>
+
 <p align="center">
-  <img src="multimode/preview/logo.gif" alt="The AXIS boot logo animation" width="512">
+  <a href="https://revjmoney.github.io/lfd3k-sm/"><img src="multimode/preview/logo.gif" alt="The AXIS boot logo animation" width="512"></a>
 </p>
 
 <h1 align="center">LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM</h1>
