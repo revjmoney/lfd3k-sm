@@ -260,7 +260,7 @@ fn menu_opens_and_renders_title() {
         "{:?}",
         t.row(0)
     );
-    assert!(t.row(1).contains("v0.1.0"), "{:?}", t.row(1));
+    assert!(t.row(1).contains("v0.5.0"), "{:?}", t.row(1));
     assert!(t.row(1).contains("r.420 BL4Z3B4ND ULTR4M0D3M"));
     assert!(t.row(2).contains(" Main Menu "), "{:?}", t.row(2));
     for (name, _) in MAIN {

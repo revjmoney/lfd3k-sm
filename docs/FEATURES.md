@@ -123,7 +123,7 @@ Notes:
 - ATA with nothing ringing prints NO CARRIER; ATA in online command mode (a call is up) prints ERROR and the call stays up.
 - A partial command line typed before a call connects (during RING or while dialing) is dropped at CONNECT.
 - The station name is 1 to 16 printable ASCII characters without `:` (Config::new refuses anything else), so a dial like `BBS:1` is always host:port, never a radio name. Radio dial names containing `:` print ERROR.
-- ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
+- ATI prints three lines: LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM, then v0.5.0 r.420 BL4Z3B4ND ULTR4M0D3M, then S0N1C B00M R4D10 PR0 MAX.
 - ATI gets a fourth line `LAST CRASH: <note>` only when the previous boot ended in a panic (the note is `file:line`, up to 64 printable characters). With no crash it prints three lines, as before.
 - AT&V prints `RADIO OK` or `RADIO FAIL <code> ERR 0x<4 hex>` after the TX POWER line, once the firmware has brought the radio up. Code -1 is a BUSY timeout, -2 no chip, -3 bad config; the hex word is the chip's device errors.
 - S30 is the only signed register: ATS30=-9 is accepted (a leading minus works for S30 only), ATS30? prints the signed value, anything outside -9 to 22 prints ERROR. AT&V shows `TX POWER S30=<n> dBm chip, about <n+12> dBm out`.

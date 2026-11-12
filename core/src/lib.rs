@@ -31,7 +31,7 @@ pub use simnet::{DatagramPort, SimNetRadio};
 pub use tier::{best_tier, Tier};
 pub use wire::WireReq;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.5.0";
 
 /// Calling channel: 918.5 MHz (SX1262 frequency word 0x3968_0000).
 pub const CHANNEL_HZ: u32 = 918_500_000;

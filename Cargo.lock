@@ -105,11 +105,11 @@ dependencies = [
 
 [[package]]
 name = "lfd3k-core"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "lfd3k-ffi"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "lfd3k-core",
  "sx1262",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "lfd3k-sim"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "crossterm",
  "lfd3k-core",
@@ -321,7 +321,7 @@ checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 
 [[package]]
 name = "sx1262"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "lfd3k-core",
 ]
