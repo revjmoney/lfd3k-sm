@@ -34,7 +34,7 @@
 //!   slot cannot hold voice and a Listener frame: SF12 listens every
 //!   second slot, with chunks of 20 bytes). With the floor free both send Listener frames every slot.
 //!   Where voice and a listener sub-slot fit in one slot with 20 ms to
-//!   spare ("room": SF8, SF9, SF11), the non-holder may also send a queued
+//!   spare ("room": SF9, SF11), the non-holder may also send a queued
 //!   link frame (TierSet) in any slot.
 //! - **Replies:** a TierAck or a Keepalive reply goes out at once (after
 //!   the hold), never waiting for a sub-slot: the end that asked listens.
@@ -85,34 +85,36 @@
 //!
 //! | Tier | Mode | frame_ms | voice ms | listener ms | chunk | listen every | free | talk slot free |
 //! |---|---|---|---|---|---|---|---|---|
-//! | SF5 | Duplex | 100 | 46 | 28 | 32 | every slot | 8 % | |
-//! | SF6 | Duplex | 200 | 48 | 34 | 32 | every slot | 52 % | |
+//! | SF5 | Duplex | 120 | 46 | 28 | 32 | every slot | 23 % | |
+//! | SF6 | Duplex | 200 | 73 | 34 | 32 | every slot | 27 % | |
 //! | SF7 | Duplex | 200 | 59 | 44 | 32 | every slot | 41 % | |
-//! | SF8 | PTT | 400 | 97 | 62 | 32 | 3 slots | 70 % | 75 % |
+//! | SF8 | Duplex | 200 | 74 | 62 | 32 | every slot | 26 % | |
 //! | SF9 | PTT | 400 | 144 | 92 | 32 | 3 slots | 56 % | 64 % |
 //! | SF10 | PTT | 400 | 246 | 154 | 32 | 3 slots | 25 % | 38 % |
 //! | SF11 | PTT | 1000 | 595 | 267 | 32 | every slot | 13 % | 40 % |
 //! | SF12 | PTT delayed | 2000 | 1784 | 432 | 20 | 2 slots | 0 % | 10 % |
 //!
-//! SF5 duplex is under the 20 % free rule of `duplex_fits` (the plan keeps
-//! SF5 duplex without that check), and SF12 cannot hold a listener every
-//! slot: 2 s of 700C takes 1.76 s on air as a Data frame.
+//! Every duplex tier passes `duplex_fits` (20 % of the slot free with the
+//! same 20 ms guard). SF12 cannot hold a listener every slot: 2 s of 700C
+//! takes 1.76 s on air as a Data frame, so it listens every second slot.
+//! The 20 ms guard must be measured on hardware in the firmware part.
 //!
 //! Measured on a two modem simulation (no loss, 15 dB SNR, the tier capped
 //! with S21, 400 bytes each way through ARQ before both apps say ready;
 //! first audio is the first voice frame heard after CONNECT, in push to
-//! talk with the caller's key down as soon as the slots run):
+//! talk with the caller's key down as soon as the slots run; both modems
+//! ticked every 10 ms once the slots run):
 //!
 //! | Tier | CONNECT to slots | CONNECT to first audio |
 //! |---|---|---|
-//! | SF5 | 131 ms | 177 ms |
-//! | SF6 | 219 ms | 267 ms |
-//! | SF7 | 371 ms | 430 ms |
-//! | SF8 | 651 ms | 1107 ms |
-//! | SF9 | 1165 ms | 1652 ms |
-//! | SF10 | 2159 ms | 2712 ms |
-//! | SF11 | 3945 ms | 5396 ms |
-//! | SF12 | 7311 ms | 10827 ms |
+//! | SF5 | 131 ms | 187 ms |
+//! | SF6 | 219 ms | 301 ms |
+//! | SF7 | 371 ms | 443 ms |
+//! | SF8 | 651 ms | 735 ms |
+//! | SF9 | 1165 ms | 1658 ms |
+//! | SF10 | 2159 ms | 2716 ms |
+//! | SF11 | 3945 ms | 5402 ms |
+//! | SF12 | 7311 ms | 10834 ms |
 
 use super::frames::VSub;
 use super::plan::{talk_plan, TalkMode};
@@ -122,17 +124,17 @@ use crate::tier::Tier;
 
 /// The listener (non-holder) gets a sub-slot at least this often.
 pub const LISTEN_EVERY_MS: u32 = 1500;
-/// Silence after every frame before the next may start: covers the 10 ms
-/// tick and the radio's turnaround. Slots need no carrier sense, so this is
-/// shorter than the data turn gap.
-pub const SLOT_GUARD_MS: u32 = 20;
+/// Silence after every frame before the next may start (shared with
+/// `duplex_fits`): covers the 10 ms tick and the radio's turnaround. Slots
+/// need no carrier sense, so this is shorter than the data turn gap. To be
+/// measured on hardware in the firmware part.
+pub use super::plan::SLOT_GUARD_MS;
 /// Most ARQ bytes in one Listener frame.
 pub const LISTEN_CHUNK: usize = 32;
 /// Control bytes waiting this long since our last Listener frame take the
 /// place of one voice frame.
 pub const CTRL_WAIT_MS: u32 = 1000;
-/// Data body bytes before the voice packet: flags, late, SACK.
-const DATA_HEAD: usize = 3;
+use super::plan::DATA_HEAD;
 /// Listener body bytes before the chunk: flags, late, SACK, SNR.
 const LIS_HEAD: usize = 5;
 /// Longest sealed voice packet a Data frame carries.

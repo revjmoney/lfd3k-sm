@@ -27,6 +27,7 @@ pub trait VoiceCodec: Send {
 pub fn new_codec(id: CodecId, frame_ms: u16) -> Box<dyn VoiceCodec> {
     match id {
         CodecId::Opus12k => Box::new(OpusCodec::new(id, 12_000, frame_ms)),
+        CodecId::Opus10k => Box::new(OpusCodec::new(id, 10_000, frame_ms)),
         CodecId::Opus8k => Box::new(OpusCodec::new(id, 8_000, frame_ms)),
         CodecId::C2_3200 => Box::new(Codec2Codec::new(id, C2_MODE_3200, frame_ms)),
         CodecId::C2_2400 => Box::new(Codec2Codec::new(id, C2_MODE_2400, frame_ms)),
@@ -50,8 +51,10 @@ fn fit(pcm: &[i16], n: usize) -> Vec<i16> {
 // ---------------------------------------------------------------- Opus
 
 /// Opus packets are at most 100 ms here, so a longer voice frame is several
-/// constant bit rate packets of equal size back to back.
+/// constant bit rate packets of equal size back to back: 100 ms packets when
+/// the frame is a multiple of 100 ms, else 20 ms ones (120 ms = 6 x 20 ms).
 const OPUS_PKT_MS: usize = 100;
+const OPUS_SHORT_PKT_MS: usize = 20;
 
 struct OpusCodec {
     id: CodecId,
@@ -70,7 +73,13 @@ impl OpusCodec {
         let _ = enc.set_bitrate(opus::Bitrate::Bits(bps));
         let _ = enc.set_vbr(false);
         let dec = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).expect("opus decoder");
-        let pkts = (usize::from(frame_ms) / OPUS_PKT_MS).max(1);
+        let ms = usize::from(frame_ms);
+        let pkt_ms = if ms % OPUS_PKT_MS == 0 {
+            OPUS_PKT_MS
+        } else {
+            OPUS_SHORT_PKT_MS
+        };
+        let pkts = (ms / pkt_ms).max(1);
         let total = encoded_bytes(id, frame_ms);
         OpusCodec {
             id,
