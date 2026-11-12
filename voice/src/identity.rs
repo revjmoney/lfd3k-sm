@@ -22,9 +22,12 @@ use zeroize::{Zeroize, Zeroizing};
 pub const MAX_FIELD: usize = 64;
 
 const FILE_MAGIC: &[u8; 8] = b"LFD3KID1";
+/// Domain tag at the front of every cert's signed bytes.
+const CERT_TAG: &[u8] = b"LFD3K CERT v1";
 
 /// A device key signed by a person key: `sig` is the person key's Ed25519
-/// signature over `device_pub || name || label`.
+/// signature over `"LFD3K CERT v1"` then device_pub, name and label, each
+/// as one length byte and its bytes (see `DeviceCert::signed_bytes`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceCert {
     pub person_pub: [u8; 32],
@@ -35,12 +38,16 @@ pub struct DeviceCert {
 }
 
 impl DeviceCert {
-    /// The bytes the person key signs: `device_pub || name || label`.
-    fn signed_bytes(device_pub: &[u8; 32], name: &str, label: &str) -> Vec<u8> {
-        let mut m = Vec::with_capacity(32 + name.len() + label.len());
+    /// The bytes the person key signs, the one place both signing and
+    /// checking use: the domain tag `"LFD3K CERT v1"`, then each of
+    /// device_pub (32), name and label as one length byte and its bytes.
+    pub(crate) fn signed_bytes(device_pub: &[u8; 32], name: &str, label: &str) -> Vec<u8> {
+        let mut m = Vec::with_capacity(CERT_TAG.len() + 3 + 32 + name.len() + label.len());
+        m.extend_from_slice(CERT_TAG);
+        m.push(32);
         m.extend_from_slice(device_pub);
-        m.extend_from_slice(name.as_bytes());
-        m.extend_from_slice(label.as_bytes());
+        push_field(&mut m, name);
+        push_field(&mut m, label);
         m
     }
 
@@ -134,7 +141,7 @@ pub struct Identity {
 
 impl Identity {
     /// A first device: makes a device key and a person key, and signs the
-    /// device key with the person key (`device_pub || name || label`).
+    /// device key with the person key (see `DeviceCert::signed_bytes`).
     pub fn generate(name: &str, label: &str) -> Self {
         let device = random_key();
         let person = random_key();
