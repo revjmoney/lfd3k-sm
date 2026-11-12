@@ -25,6 +25,11 @@
 //! refuse a CallReq that carries the byte, so it is only sent when it says
 //! something (S31 = 1), and a 4 byte Train, so it only goes to a caller that
 //! offered (a new build). TrainAck stays 3 bytes.
+//!
+//! Voice calls (`voice::call`): inside a voice call the Train carries a 4
+//! byte answer token after its 3 or 4 bytes, and the setup TierSet carries
+//! it after the tier byte. Only voice call ends send those forms; older
+//! builds refuse them as malformed, and data calls never see them.
 
 use crate::tier::Tier;
 
@@ -157,15 +162,21 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
     }
     let shape_ok = match ftype {
         FrameType::CallReq => parse_call_req(payload).is_ok(),
+        // In a voice call a 4 byte answer token follows (`voice::call`).
         FrameType::Train => match payload {
-            [t, _, _] => Tier::from_index(*t).is_some(),
-            [t, _, _, c] => Tier::from_index(*t).is_some() && c & !CAP_MASK == 0,
+            [t, _, _] | [t, _, _, _, _, _, _] => Tier::from_index(*t).is_some(),
+            [t, _, _, c] | [t, _, _, c, _, _, _, _] => {
+                Tier::from_index(*t).is_some() && c & !CAP_MASK == 0
+            }
             _ => false,
         },
         FrameType::TrainAck => {
             matches!(payload, [t, _, _] if Tier::from_index(*t).is_some())
         }
-        FrameType::TierSet | FrameType::TierAck => {
+        FrameType::TierSet => {
+            matches!(payload, [t] | [t, _, _, _, _] if Tier::from_index(*t).is_some())
+        }
+        FrameType::TierAck => {
             matches!(payload, [t] if Tier::from_index(*t).is_some())
         }
         FrameType::Ack => payload.len() == 1,

@@ -29,6 +29,12 @@ pub(crate) struct VoiceState {
     /// A voice beacon is wanted: after a normal beacon, or soon after a
     /// new or changed registration. Sent by the discovery scheduler.
     pub beacon_due: bool,
+    /// When our last voice beacon went out: one that went out soon after a
+    /// registration stands in for the one after the next normal beacon.
+    pub sent_at: Option<u32>,
+    /// The privacy mode was ON at the last discovery tick (a change to ON
+    /// with registrations asks for a voice beacon).
+    pub mode_on: bool,
 }
 
 impl VoiceState {
@@ -36,6 +42,8 @@ impl VoiceState {
         VoiceState {
             regs: [None; VOICE_REGS],
             beacon_due: false,
+            sent_at: None,
+            mode_on: false,
         }
     }
 

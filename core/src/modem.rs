@@ -38,7 +38,12 @@
 //! a ScanReq with `FLAG_VOICE` (ours always set it) gets a voice scan
 //! answer in place of the normal one (ON and QUIET). Heard voice beacons
 //! and voice scan answers fill the voice directory (`Directory::voice`).
-//! Type 15 frames never reach the link yet.
+//! Voice calls (see `voice/call.rs`): a voice call request is matched
+//! against the registrations here (HIDDEN: only pinned voice names) and
+//! handed to the link, which rings (`Event::VoiceRing`); `voice_dial`,
+//! `voice_answer`, `voice_decline` and `voice_call` are the voice app's
+//! side, `ATDV` the terminal's. A voice call keeps the host in command
+//! mode.
 //!
 //! Setup menu (see `menu/`): `AT+MENU` (or, with S32 = 1, the first host
 //! byte after boot) opens a full-screen ANSI menu. While it is open every
@@ -52,9 +57,9 @@
 use crate::at::{format_result, parse_line, AtCmd, ModeTarget, ResultCode, SRegs, REG_TX_POWER};
 use crate::directory::{Directory, DIR_MAX};
 use crate::discovery::{
-    self, valid_station, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, DISC_MAX,
-    HEARD_WINDOW_MS, SCAN_SEND_LIMIT_MS, SCAN_WINDOW_MS, SLOTS, SLOT_MS, SVC_ACCEPTS, SVC_FORWARD,
-    SVC_HOTSPOT, SVC_VOICE,
+    self, valid_station, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, BEACON_EVERY_MS,
+    DISC_MAX, HEARD_WINDOW_MS, SCAN_SEND_LIMIT_MS, SCAN_WINDOW_MS, SLOTS, SLOT_MS, SVC_ACCEPTS,
+    SVC_FORWARD, SVC_HOTSPOT, SVC_VOICE,
 };
 use crate::frame::{FrameType, Header, FLAG_VOICE, HEADER_LEN, NAME_MAX};
 use crate::lan::{Found, FoundList};
@@ -64,6 +69,7 @@ use crate::radio::{Radio, RxInfo};
 use crate::settings::{parse_hostport, BeaconMode, Forward, Settings, WireMode, MAX_FWD};
 use crate::telnet::{link_frame, LinkStats, LINK_FRAME_MAX};
 use crate::tier::{best_tier, Tier};
+use crate::voice::call::{self as vcall, VoiceCallInfo};
 use crate::voice::frames::{self as vframes, VoiceItems};
 use crate::voice::regs::VoiceState;
 use crate::voice::{
@@ -601,6 +607,65 @@ impl Modem {
     /// Voice names heard from other modems, and the pinned ones.
     pub fn voice_dir(&self) -> &VoiceDir {
         self.dir.voice()
+    }
+
+    /// The voice call ringing here, being set up or up (its far end and
+    /// our registration in it); None otherwise.
+    pub fn voice_call(&self) -> Option<&VoiceCallInfo> {
+        self.link.voice()
+    }
+
+    /// Pick up the voice call ringing here, with a fresh random answer
+    /// token. False if no voice call rings.
+    pub fn voice_answer(&mut self, now_ms: u32) -> bool {
+        if self.link.voice().is_none() || self.link.state() != State::Ringing {
+            return false;
+        }
+        self.disc_start(now_ms);
+        // Per modem (seeded from our station name and the time), so two
+        // devices picking up the same call draw different tokens.
+        let t = self.disc.rand(u32::MAX) ^ now_ms;
+        let token = if t == 0 { 1 } else { t };
+        self.link.answer_voice(token, &self.cfg.sregs, now_ms)
+    }
+
+    /// Decline the voice call ringing here (the caller sees DECLINED, the
+    /// other devices stop ringing).
+    pub fn voice_decline(&mut self, now_ms: u32) {
+        self.link.decline_voice(now_ms);
+    }
+
+    /// Place a voice call from the registration of `session` to the voice
+    /// name `name` (only the device `label` when given). False when that
+    /// session has no registration, a call of any kind is up, or a name is
+    /// invalid.
+    pub fn voice_dial(
+        &mut self,
+        session: u8,
+        name: &str,
+        label: Option<&str>,
+        now_ms: u32,
+    ) -> bool {
+        let Some(Some(r)) = self.voice.regs.get(usize::from(session)).copied() else {
+            return false;
+        };
+        if !self.air_idle() || self.wire.close {
+            return false;
+        }
+        let me = name_of(&self.cfg);
+        let ok = self.link.dial_voice(
+            me,
+            r.name.as_str(),
+            r.label.as_str(),
+            name,
+            label,
+            &self.cfg.sregs,
+            now_ms,
+        );
+        if ok {
+            self.link.set_voice_reg(session);
+        }
+        ok
     }
 
     /// True once when the platform should save the directory
@@ -1180,10 +1245,11 @@ impl Modem {
             }
         }
         self.disc_start(now_ms);
+        // A radio caller during a Wi-Fi call gets BUSY (a voice caller,
+        // silence); set before `screen`, which hands voice frames over.
+        self.link
+            .set_engaged(matches!(self.wire.call, Call::Wire(_)));
         if self.screen(frame, info, now_ms) {
-            // A radio caller during a Wi-Fi call gets BUSY.
-            self.link
-                .set_engaged(matches!(self.wire.call, Call::Wire(_)));
             self.link
                 .on_frame(frame, info, name_of(&self.cfg), &self.cfg.sregs, now_ms);
         }
@@ -1261,14 +1327,17 @@ impl Modem {
                 }
                 false
             }
-            // Voice frames never reach the link (call setup is later work).
+            // Voice frames never reach `Link::on_frame`; voice call setup
+            // frames go to the link from `on_voice`.
             FrameType::Voice => {
-                self.on_voice(f.payload, info, now);
+                self.on_voice(f.payload, h.call_id, info, now);
                 false
             }
             FrameType::CallReq => self.screen_call_req(f.payload, h.call_id, info, now),
             FrameType::CallAck | FrameType::Train => {
-                let dialing = matches!(self.link.state(), State::Dialing | State::AwaitTrain);
+                // A voice dial names a person, not a station.
+                let dialing = matches!(self.link.state(), State::Dialing | State::AwaitTrain)
+                    && self.link.voice().is_none();
                 if dialing && h.call_id != 0 && h.call_id == self.link.call_id() {
                     let mut n = [0u8; NAME_MAX];
                     let len = usize::from(self.dial_len).min(NAME_MAX);
@@ -1408,8 +1477,8 @@ impl Modem {
     }
 
     /// A type 15 frame heard: voice beacons and voice scan answers feed the
-    /// directories; other sub-types wait for the voice call work.
-    fn on_voice(&mut self, p: &[u8], info: RxInfo, now: u32) {
+    /// directories; voice call setup frames go to the link.
+    fn on_voice(&mut self, p: &[u8], call_id: u8, info: RxInfo, now: u32) {
         let Some((&s, body)) = p.split_first() else {
             return;
         };
@@ -1430,8 +1499,57 @@ impl Modem {
                     self.on_scan_resp(r, Some(items), info, now);
                 }
             }
+            Some(VSub::CallReq) => self.on_voice_req(body, call_id, info, now),
+            Some(s @ (VSub::Answer | VSub::Decline)) => {
+                self.link.on_voice_frame(s, call_id, body, now);
+            }
             _ => {}
         }
+    }
+
+    /// A voice call request: it rings the registrations whose voice name
+    /// (and label, when given) it names, never the caller's own device. A
+    /// station name never matches. HIDDEN: only a caller whose voice name
+    /// is pinned rings; anyone else is ignored, silently.
+    fn on_voice_req(&mut self, body: &[u8], call_id: u8, info: RxInfo, now: u32) {
+        let Some(r) = vcall::parse_req(body) else {
+            return;
+        };
+        if self.set.beacon == BeaconMode::Hidden && !self.dir.voice().is_pinned(r.name) {
+            return;
+        }
+        let me = name_of(&self.cfg);
+        let mask = vcall::ring_mask(&self.voice.regs, &r, me);
+        let first = mask.trailing_zeros() as usize;
+        let Some(Some(reg)) = self.voice.regs.get(first).copied() else {
+            return;
+        };
+        let (Some(peer_name), Some(peer_label), Some(peer_station), Some(me)) = (
+            Name16::new(r.name),
+            Name16::label(r.label),
+            Name16::new(r.station),
+            Name16::new(me),
+        ) else {
+            return;
+        };
+        let peer = VoiceCallInfo {
+            peer_name,
+            peer_label,
+            peer_station,
+            token: 0,
+            reg: first as u8,
+        };
+        self.link.on_voice_req(
+            call_id,
+            r.caps,
+            peer,
+            mask,
+            me,
+            reg.label,
+            info,
+            &self.cfg.sregs,
+            now,
+        );
     }
 
     /// Voice names heard through `station` into the voice directory (never
@@ -1519,6 +1637,13 @@ impl Modem {
     /// per call and per 10 s, only on an idle radio with no call.
     fn disc_tick<R: Radio>(&mut self, radio: &R, now: u32) {
         self.disc_start(now);
+        // The privacy mode became ON (AT+BEACON, the menu, ATZ, a load)
+        // with registrations here: our voice names go out soon.
+        let on = self.set.beacon == BeaconMode::On;
+        if on && !self.voice.mode_on && self.voice.any() {
+            self.voice.beacon_due = true;
+        }
+        self.voice.mode_on = on;
         if !self.air_idle() {
             // A call holds all discovery; the beacon timer restarts after it.
             self.disc.in_call = true;
@@ -1637,6 +1762,7 @@ impl Modem {
                 if self.send_voice_disc(None) {
                     self.disc.last_tx = Some(now);
                     self.voice.beacon_due = false;
+                    self.voice.sent_at = Some(now);
                     return;
                 }
             } else {
@@ -1660,8 +1786,14 @@ impl Modem {
             if n > 0 && self.send_disc(FrameType::Beacon, 0, p.get(..n).unwrap_or(&[])) {
                 self.disc.last_tx = Some(now);
                 self.disc.arm_beacon(now);
-                // Our voice names follow in their own frame.
-                self.voice.beacon_due |= self.voice.any();
+                // Our voice names follow in their own frame, unless a voice
+                // beacon (one soon after a registration) went out less than
+                // half a beacon interval ago.
+                let recent = self
+                    .voice
+                    .sent_at
+                    .is_some_and(|t| now.wrapping_sub(t) < BEACON_EVERY_MS / 2);
+                self.voice.beacon_due |= self.voice.any() && !recent;
             }
         }
     }
@@ -1981,6 +2113,24 @@ impl Modem {
                     }
                 }
             }
+            AtCmd::DialVoice(name, label) => {
+                self.fresh_call();
+                // From the first registration (lowest session) here: a
+                // voice session must be open.
+                let session = self.voice.regs.iter().position(Option::is_some);
+                let ok = self.mode == Mode::Command
+                    && session.is_some_and(|s| self.voice_dial(s as u8, name, label, now));
+                if !ok {
+                    self.result(ResultCode::Error);
+                } else if self.verbose {
+                    let mut t = Txt::new();
+                    t.put(b"DIALING ").put(name.as_bytes());
+                    if let Some(l) = label {
+                        t.put(b"/").put(l.as_bytes());
+                    }
+                    self.info(t.bytes());
+                }
+            }
             AtCmd::Answer => {
                 // Already in a call (online command mode): nothing to
                 // answer, and the call stays up.
@@ -2018,6 +2168,10 @@ impl Modem {
                 // A bridge keeps the host out of the call; a Wi-Fi dial
                 // still in progress has nothing to return to.
                 (Call::Wire(_) | Call::Bridge(_), _) => self.result(ResultCode::Error),
+                // A voice call's bytes belong to the voice app.
+                (Call::None, Some(_)) if self.link.voice().is_some() => {
+                    self.result(ResultCode::Error)
+                }
                 (Call::None, Some(t)) if self.link.is_connected() => {
                     self.mode = Mode::Data;
                     self.esc = 0;
@@ -2603,6 +2757,15 @@ impl Modem {
                 }
                 // The link connects once per call; never restart a bridge.
                 Event::Connect(_) if matches!(self.wire.call, Call::Bridge(_)) => {}
+                // A voice call belongs to the voice app: no bridge, and the
+                // host stays in command mode (the call's bytes are not
+                // terminal data).
+                Event::Connect(t) if self.link.voice().is_some() => {
+                    self.fresh_call();
+                    self.call_retrains = 0;
+                    self.call_caller_len = 0;
+                    self.result(ResultCode::ConnectVoice(t));
+                }
                 Event::Connect(t) => {
                     self.fresh_call();
                     self.call_retrains = 0;
@@ -2661,6 +2824,9 @@ impl Modem {
                     self.retrain_note = None;
                     self.result(ResultCode::NoCarrier);
                 }
+                Event::NoCarrier if self.link.voice_last() && self.mode == Mode::Command => {
+                    self.result(ResultCode::NoCarrier);
+                }
                 Event::NoCarrier => {
                     // Deliver what fits, then NO CARRIER at once (the
                     // reserve keeps room for it), so it never outlives the call.
@@ -2671,6 +2837,14 @@ impl Modem {
                 }
                 Event::Busy => self.result(ResultCode::Busy),
                 Event::NoAnswer => self.result(ResultCode::NoAnswer),
+                // Our voice call was declined; a device still ringing that
+                // heard someone else decline prints nothing.
+                Event::Declined if self.link.role() == Role::Caller => {
+                    self.result(ResultCode::Declined);
+                }
+                // The voice app gets these (voice host protocol); the
+                // terminal prints nothing, as for a ring that stops.
+                Event::Declined | Event::VoiceRing(_) | Event::AnsweredElsewhere => {}
             }
         }
         if self.mode == Mode::Data && self.wire.call == Call::None {

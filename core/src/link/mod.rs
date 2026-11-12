@@ -29,12 +29,18 @@
 //! before ArqRx sees it; one that fails to decompress is dropped unacked,
 //! so the sender resends it. Receiving does not depend on the agreement:
 //! any `FLAG_LZ` frame is decoded (a peer only sends one after we offered).
+//!
+//! Voice calls (see `voice::call`): set up with type 15 sub-types (voice
+//! CallReq, Answer, Decline) handed in by the Modem, which owns the
+//! registrations; then today's Train, TierSet and TierAck, the voice Train
+//! and setup TierSet carrying the answer token.
 
 use crate::arq::{ArqRx, ArqTx, CHUNK};
 use crate::at::{SRegs, REG_LZ};
 use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
+use crate::voice::call::{self as vcall, VoiceCallInfo, VoiceLink};
 
 mod data;
 mod retrain;
@@ -63,6 +69,9 @@ const QLEN: usize = 4;
 /// answer with four registrations) must fit (`send_discovery`).
 const QBUF: usize = 132;
 const _: () = assert!(QBUF >= crate::voice::VOICE_DISC_FRAME);
+// The longest voice call request: header, sub-type, capability byte and
+// five names of up to 16 bytes with their length bytes.
+const _: () = assert!(QBUF >= HEADER_LEN + 2 + 5 * 17);
 const EVLEN: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,6 +86,13 @@ pub enum Event {
     NoCarrier,
     Busy,
     NoAnswer,
+    /// A voice call rings this registration (repeated like RING).
+    VoiceRing(u8),
+    /// The voice call ringing or answered here was taken by another device.
+    AnsweredElsewhere,
+    /// The voice call was declined (on the caller), or declined on another
+    /// device (on a device still ringing).
+    Declined,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -264,6 +280,8 @@ pub struct Link {
     /// Call data bytes the host side moved: taken by `push_data` plus
     /// handed out by `read_data`. Wraps; never reset (the menu's throughput).
     moved: u32,
+    /// Voice call state (see `voice::call`).
+    voice: VoiceLink,
 }
 
 impl Default for Link {
@@ -336,6 +354,7 @@ impl Link {
             lz_raw: 0,
             lz_air: 0,
             moved: 0,
+            voice: VoiceLink::new(),
         }
     }
 
@@ -420,7 +439,7 @@ impl Link {
         if self.state != State::Idle || self.q_len > 0 || frame.len() > QBUF {
             return false;
         }
-        self.enq_raw(Tier::ROBUST, frame);
+        self.enq_raw(Tier::ROBUST, frame, false);
         self.q_len > 0
     }
 
@@ -519,7 +538,7 @@ impl Link {
         }
     }
 
-    fn enq_raw(&mut self, tier: Tier, bytes: &[u8]) {
+    fn enq_raw(&mut self, tier: Tier, bytes: &[u8], urgent: bool) {
         if self.q_len >= QLEN || bytes.len() > QBUF {
             return;
         }
@@ -527,7 +546,7 @@ impl Link {
             tier,
             len: bytes.len() as u8,
             end_turn: false,
-            urgent: false,
+            urgent,
             buf: [0; QBUF],
         };
         if let Some(d) = f.buf.get_mut(..bytes.len()) {
@@ -592,6 +611,7 @@ impl Link {
         self.ack_owed = false;
         self.ka_reply = false;
         self.got_tierset = false;
+        self.voice.on = false;
         self.start = now;
         self.last_periodic = now;
         self.tier = Tier::ROBUST;
@@ -628,6 +648,9 @@ impl Link {
         if self.state == State::Idle || h.call_id != self.call_id {
             return;
         }
+        if self.voice.on && self.voice_frame_screen(h.ftype, f.payload) {
+            return;
+        }
         if h.ftype == FrameType::Hangup {
             if self.state != State::Ringing {
                 self.emit(Event::NoCarrier);
@@ -641,13 +664,20 @@ impl Link {
                 FrameType::CallAck => self.state = State::AwaitTrain,
                 FrameType::CallReject => self.fail(Event::Busy, false),
                 FrameType::Train => {
-                    let peer_snr = match f.payload {
+                    // A voice Train carries the token (`voice_frame_screen`
+                    // bound it): the usual form is in front of it.
+                    let p = if self.voice.on {
+                        vcall::split_train(f.payload).map_or(&[][..], |(b, _)| b)
+                    } else {
+                        f.payload
+                    };
+                    let peer_snr = match p {
                         [_, a, b] | [_, a, b, _] => i16::from_le_bytes([*a, *b]),
                         _ => return,
                     };
                     // The caller cannot connect without a Train, so its 4th
                     // byte is the one place the agreed LZ answer is read.
-                    self.lz_peer = frame::parse_train_caps(f.payload) & frame::CAP_LZ != 0;
+                    self.lz_peer = frame::parse_train_caps(p) & frame::CAP_LZ != 0;
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
                     self.own_cap = cap_tier(sregs);
                     self.cap = self.own_cap.min(peer_cap);
@@ -732,10 +762,18 @@ impl Link {
                     self.send_callreq(now);
                 }
             }
+            // Before the S7 arm: a voice answerer that was never bound must
+            // stay silent (no Hangup over someone else's call).
+            State::AwaitTierSet if self.voice.on => self.voice_await_tick(s7, now),
             State::AwaitTrain | State::AwaitTierSet | State::AwaitTierAck
                 if since(now, self.start) >= s7 =>
             {
                 self.fail(Event::NoCarrier, true);
+            }
+            State::AwaitTrain
+                if self.voice.on && since(now, self.voice.bound_at) >= 3 * PERIOD_MS =>
+            {
+                self.voice_unbind(now);
             }
             State::AwaitTrain => {}
             State::AwaitTierSet => {
@@ -750,12 +788,12 @@ impl Link {
                     .saturating_add(200);
                 if since(now, self.last_periodic) >= every {
                     self.last_periodic = now;
-                    let t = self.train;
+                    let (p, n) = self.voice.tierset(self.train.index());
                     self.enq(
                         Tier::ROBUST,
                         FrameType::TierSet,
                         0,
-                        &[t.index()],
+                        p.get(..n).unwrap_or(&[]),
                         false,
                         false,
                     );

@@ -1,6 +1,10 @@
-//! Call setup: dial, ring, answer, training handshake.
+//! Call setup: dial, ring, answer, training handshake. Voice call setup
+//! (dial, ring, answer, decline by person name) is wired here; its frames
+//! and rules are in `voice::call`.
 
 use super::*;
+use crate::voice::call::{VoiceReq, ANSWER_SENDS};
+use crate::voice::{Name16, VSub, VOICE_REGS};
 
 impl Link {
     /// Caller's training probe: Keepalive PING on the trained tier.
@@ -55,14 +59,15 @@ impl Link {
         if let (Some(d), Some(s)) = (b.get_mut(..n), self.callreq.get(..n)) {
             d.copy_from_slice(s);
         }
-        self.enq_raw(Tier::ROBUST, b.get(..n).unwrap_or(&[]));
+        self.enq_raw(Tier::ROBUST, b.get(..n).unwrap_or(&[]), false);
         self.last_periodic = now;
         self.emit(Event::Ringing);
     }
 
-    /// Answer a ringing call. False if nothing is ringing.
+    /// Answer a ringing call. False if nothing is ringing (a voice call
+    /// rings the voice app: only `answer_voice` answers it).
     pub fn answer(&mut self, sregs: &SRegs, now: u32) -> bool {
-        if self.state != State::Ringing {
+        if self.state != State::Ringing || self.voice.on {
             return false;
         }
         let call_id = self.call_id;
@@ -100,6 +105,11 @@ impl Link {
     pub fn hangup(&mut self, _now: u32) -> bool {
         match self.state {
             State::Idle => false,
+            // A voice ring stays silent (CallReject would mean BUSY).
+            State::Ringing if self.voice.on => {
+                self.go_idle();
+                false
+            }
             State::Ringing => {
                 self.enq(Tier::ROBUST, FrameType::CallReject, 0, &[], false, true);
                 self.go_idle();
@@ -122,11 +132,12 @@ impl Link {
         self.start = now;
         self.last_periodic = now;
         self.need_listen = true;
+        let (p, n) = self.voice.tierset(t.index());
         self.enq(
             Tier::ROBUST,
             FrameType::TierSet,
             0,
-            &[t.index()],
+            p.get(..n).unwrap_or(&[]),
             false,
             false,
         );
@@ -167,6 +178,7 @@ impl Link {
         let peer_lz = caps & frame::CAP_LZ != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
+            self.voice.on = false;
             self.lz_peer = peer_lz;
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;
@@ -176,6 +188,10 @@ impl Link {
             self.rings = 0;
             self.ring(sregs, now);
         } else if call_id == self.call_id {
+            // Same id as our voice call: not this CallReq's call.
+            if self.voice.on {
+                return;
+            }
             self.last_req = now;
             self.my_snr = info.snr_x4;
             if !self.is_connected() {
@@ -196,10 +212,359 @@ impl Link {
     pub(super) fn ring(&mut self, sregs: &SRegs, now: u32) {
         self.rings = self.rings.saturating_add(1);
         self.last_periodic = now;
+        if self.voice.on {
+            // Every ringing registration; S0 never answers a voice call.
+            for i in 0..VOICE_REGS {
+                if self.voice.ring_mask & (1 << i) != 0 {
+                    self.emit(Event::VoiceRing(i as u8));
+                }
+            }
+            return;
+        }
         self.emit(Event::Ring);
         let s0 = reg(sregs, 0, 0);
         if s0 > 0 && u32::from(self.rings) >= s0 {
             self.answer(sregs, now);
         }
+    }
+}
+
+/// Voice call setup (spec 5.4; frames and rules in `voice::call`).
+impl Link {
+    /// Place a voice call from our registration `me`/`me_label` on station
+    /// `me_station` to the voice name `callee` (one device when
+    /// `callee_label` is given). False if busy or a name is invalid. The
+    /// request repeats every `PERIOD_MS` until answered or S7 runs out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dial_voice(
+        &mut self,
+        me_station: &str,
+        me: &str,
+        me_label: &str,
+        callee: &str,
+        callee_label: Option<&str>,
+        sregs: &SRegs,
+        now: u32,
+    ) -> bool {
+        if self.state != State::Idle {
+            return false;
+        }
+        let peer_label = match callee_label {
+            Some(l) => Name16::label(l),
+            None => Some(Name16::EMPTY),
+        };
+        let (Some(peer_name), Some(peer_label)) = (Name16::new(callee), peer_label) else {
+            return false;
+        };
+        let lz = lz_wanted(sregs);
+        let call_id = (now as u8) | 1;
+        let r = VoiceReq {
+            caps: if lz { frame::CAP_LZ } else { 0 },
+            station: me_station,
+            name: me,
+            label: me_label,
+            callee,
+            callee_label: callee_label.unwrap_or(""),
+        };
+        let mut b = [0u8; QBUF];
+        let Some(n) = vcall::encode_req(call_id, &r, &mut b) else {
+            return false;
+        };
+        self.callreq = b;
+        self.callreq_len = n as u8;
+        self.call_id = call_id;
+        self.reset_call(Role::Caller, now);
+        self.voice.start(VoiceCallInfo {
+            peer_name,
+            peer_label,
+            ..VoiceCallInfo::EMPTY
+        });
+        self.voice.want_label = peer_label;
+        self.lz_mine = lz;
+        self.state = State::Dialing;
+        self.send_callreq(now);
+        true
+    }
+
+    /// Which of our registrations placed the current voice call.
+    pub(crate) fn set_voice_reg(&mut self, reg: u8) {
+        self.voice.info.reg = reg;
+    }
+
+    /// Answer a ringing voice call with our answer `token` (drawn by the
+    /// Modem, never zero). Sends the Answer and the voice Train. False if no
+    /// voice call rings.
+    pub fn answer_voice(&mut self, token: u32, sregs: &SRegs, now: u32) -> bool {
+        if self.state != State::Ringing || !self.voice.on {
+            return false;
+        }
+        let call_id = self.call_id;
+        let snr = self.my_snr;
+        let peer_lz = self.lz_peer;
+        let v = self.voice;
+        self.reset_call(Role::Answerer, now);
+        self.call_id = call_id;
+        self.my_snr = snr;
+        self.lz_peer = peer_lz;
+        self.voice = v;
+        self.voice.info.token = token;
+        self.voice.sends = 0;
+        self.lz_mine = lz_wanted(sregs);
+        self.own_cap = cap_tier(sregs);
+        self.cap = self.own_cap;
+        self.state = State::AwaitTierSet;
+        self.send_voice_answer(now);
+        true
+    }
+
+    /// Answer and voice Train (today's Train form plus the token).
+    fn send_voice_answer(&mut self, now: u32) {
+        self.voice.sends = self.voice.sends.saturating_add(1);
+        self.voice.sent_at = now;
+        self.voice.next_at = self.voice.resend_after(now, PERIOD_MS);
+        self.last_periodic = now;
+        let mut b = [0u8; QBUF];
+        let (st, lb) = (self.voice.me_station, self.voice.me_label);
+        let token = self.voice.info.token;
+        if let Ok(n) = vcall::encode_answer(self.call_id, token, st.as_str(), lb.as_str(), &mut b) {
+            self.enq_raw(Tier::ROBUST, b.get(..n).unwrap_or(&[]), false);
+        }
+        let s = self.my_snr.to_le_bytes();
+        let base = [self.cap.index(), s[0], s[1], frame::CAP_LZ];
+        let blen = if self.lz_mine && self.lz_peer { 4 } else { 3 };
+        let mut t = [0u8; 8];
+        let n = vcall::train_payload(base.get(..blen).unwrap_or(&[]), token, &mut t);
+        let train = t.get(..n).unwrap_or(&[]);
+        self.enq(Tier::ROBUST, FrameType::Train, 0, train, false, false);
+    }
+
+    /// Decline a ringing voice call: Decline twice, then idle. Its repeats
+    /// do not ring again.
+    pub fn decline_voice(&mut self, now: u32) {
+        if self.state != State::Ringing || !self.voice.on {
+            return;
+        }
+        let mut b = [0u8; HEADER_LEN + 1];
+        if let Ok(n) = vcall::encode_decline(self.call_id, &mut b) {
+            let f = b.get(..n).unwrap_or(&[]);
+            self.enq_raw(Tier::ROBUST, f, true);
+            self.enq_raw(Tier::ROBUST, f, true);
+        }
+        self.voice.declined = Some((self.call_id, now));
+        self.go_idle();
+    }
+
+    /// The far end of the voice call ringing, being set up or up; None
+    /// otherwise (also during a data call).
+    pub fn voice(&self) -> Option<&VoiceCallInfo> {
+        (self.voice.on && self.state != State::Idle).then_some(&self.voice.info)
+    }
+
+    /// The current (or last) call is a voice call.
+    pub(crate) fn voice_last(&self) -> bool {
+        self.voice.on
+    }
+
+    /// A voice CallReq (call id `call_id`) that rings the registrations in
+    /// `mask` (the Modem matched them and applied the privacy rule).
+    /// `peer` is the caller, `me_station` and `me_label` our station and
+    /// the label of `peer.reg`. An idle link rings; the repeats of the call
+    /// ringing or answered here refresh it; anything else is ignored, so a
+    /// busy device stays silent.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_voice_req(
+        &mut self,
+        call_id: u8,
+        caps: u8,
+        peer: VoiceCallInfo,
+        mask: u8,
+        me_station: Name16,
+        me_label: Name16,
+        info: RxInfo,
+        sregs: &SRegs,
+        now: u32,
+    ) {
+        if call_id == 0 || mask == 0 {
+            return;
+        }
+        if let Some((id, at)) = self.voice.declined {
+            if id == call_id && since(now, at) < 2 * PERIOD_MS + 1000 {
+                self.voice.declined = Some((id, now));
+                return;
+            }
+        }
+        let peer_lz = caps & frame::CAP_LZ != 0;
+        if self.state == State::Idle && !self.engaged {
+            self.call_id = call_id;
+            self.lz_peer = peer_lz;
+            self.my_snr = info.snr_x4;
+            self.voice.start(peer);
+            self.voice.ring_mask = mask;
+            self.voice.me_station = me_station;
+            self.voice.me_label = me_label;
+            // Not the caller (the Modem reads the role on Declined).
+            self.role = Role::Answerer;
+            self.state = State::Ringing;
+            self.start = now;
+            self.last_req = now;
+            self.last_periodic = now;
+            self.rings = 0;
+            self.ring(sregs, now);
+        } else if call_id == self.call_id
+            && self.voice.on
+            && (self.state == State::Ringing || self.role == Role::Answerer)
+        {
+            self.last_req = now;
+            self.my_snr = info.snr_x4;
+            if !self.is_connected() {
+                self.lz_peer = peer_lz;
+            }
+            // The caller has not heard our answer: send it again soon once
+            // the last one has gone out, within the send limit.
+            if self.state == State::AwaitTierSet
+                && !self.got_tierset
+                && self.q_len == 0
+                && self.voice.sends < ANSWER_SENDS
+            {
+                let soon = self.voice.resend_soon(now);
+                if vcall::reached(self.voice.next_at, soon) {
+                    self.voice.next_at = soon;
+                }
+            }
+        }
+    }
+
+    /// A voice Answer or Decline for call id `call_id`.
+    pub(crate) fn on_voice_frame(&mut self, sub: VSub, call_id: u8, body: &[u8], now: u32) {
+        if self.state == State::Idle || !self.voice.on || call_id != self.call_id {
+            return;
+        }
+        match sub {
+            VSub::Answer => {
+                let Some((token, station, label)) = vcall::parse_answer(body) else {
+                    return;
+                };
+                let st = Name16::new(station).unwrap_or(Name16::EMPTY);
+                let lb = Name16::label(label).unwrap_or(Name16::EMPTY);
+                if self.state == State::Ringing {
+                    // Another device picked up.
+                    self.emit(Event::AnsweredElsewhere);
+                    self.go_idle();
+                } else if self.state == State::Dialing && !self.voice.bound {
+                    // The first answer wins; later ones get no reply.
+                    self.voice.bound = true;
+                    self.voice.bound_at = now;
+                    self.voice.info.token = token;
+                    self.voice.info.peer_station = st;
+                    self.voice.info.peer_label = lb;
+                    self.state = State::AwaitTrain;
+                } else if self.role == Role::Caller
+                    && self.voice.bound
+                    && token == self.voice.info.token
+                    && self.voice.info.peer_station.is_empty()
+                {
+                    // Bound by its Train: its Answer still names it.
+                    self.voice.info.peer_station = st;
+                    self.voice.info.peer_label = lb;
+                }
+            }
+            VSub::Decline => {
+                if !body.is_empty() {
+                    return;
+                }
+                if self.state == State::Ringing {
+                    self.voice.declined = Some((self.call_id, now));
+                    self.emit(Event::Declined);
+                    self.go_idle();
+                } else if self.state == State::Dialing && !self.voice.bound {
+                    self.fail(Event::Declined, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A frame of our voice call (call id matched, link not idle) before
+    /// the usual handling: binds the caller to a token and screens tokens.
+    /// True when it was handled here and the usual handling must not run.
+    pub(super) fn voice_frame_screen(&mut self, ft: FrameType, p: &[u8]) -> bool {
+        match self.state {
+            // Someone else's TierSet: the call was answered elsewhere.
+            State::Ringing => {
+                if ft == FrameType::TierSet {
+                    self.emit(Event::AnsweredElsewhere);
+                    self.go_idle();
+                    return true;
+                }
+                false
+            }
+            State::Dialing | State::AwaitTrain => match ft {
+                // Not voice call frames: CallReject means BUSY on data only.
+                FrameType::CallAck | FrameType::CallReject => true,
+                FrameType::Train => {
+                    let Some((_, token)) = vcall::split_train(p) else {
+                        return true;
+                    };
+                    if self.voice.bound {
+                        return token != self.voice.info.token;
+                    }
+                    // Its Answer was lost: the first Train binds.
+                    self.voice.bound = true;
+                    self.voice.info.token = token;
+                    false
+                }
+                _ => false,
+            },
+            State::AwaitTierSet | State::Probe
+                if self.role == Role::Answerer && ft == FrameType::TierSet =>
+            {
+                if vcall::tierset_token(p) == Some(self.voice.info.token) {
+                    return false;
+                }
+                if !self.got_tierset {
+                    // The caller bound to another device: stop, silently.
+                    self.q_retain(|f| f.urgent);
+                    self.emit(Event::AnsweredElsewhere);
+                    self.go_idle();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// AwaitTierSet on a voice answerer: the answer goes out at most
+    /// `ANSWER_SENDS` times (again after 3 to 4 s, or soon after the caller
+    /// asks again); with no TierSet carrying our token
+    /// `2 * PERIOD_MS` after the last one, another device has the call.
+    pub(super) fn voice_await_tick(&mut self, s7: u32, now: u32) {
+        if self.got_tierset {
+            // Back from a failed probe: as for a data call.
+            if since(now, self.start) >= s7 {
+                self.fail(Event::NoCarrier, true);
+            }
+            return;
+        }
+        if self.voice.sends < ANSWER_SENDS {
+            if vcall::reached(now, self.voice.next_at) {
+                self.send_voice_answer(now);
+            }
+        } else if since(now, self.voice.sent_at) >= 2 * PERIOD_MS || since(now, self.start) >= s7 {
+            self.q_retain(|f| f.urgent);
+            self.emit(Event::AnsweredElsewhere);
+            self.go_idle();
+        }
+    }
+
+    /// Caller bound by an Answer whose Train never came (the answering
+    /// device sends it at most twice): unbind and ask again, so the
+    /// devices (that one included, once it gives up) can ring and pick up.
+    pub(super) fn voice_unbind(&mut self, now: u32) {
+        self.voice.bound = false;
+        self.voice.info.token = 0;
+        self.voice.info.peer_station = Name16::EMPTY;
+        self.voice.info.peer_label = self.voice.want_label;
+        self.state = State::Dialing;
+        self.send_callreq(now);
     }
 }

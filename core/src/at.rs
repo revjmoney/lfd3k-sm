@@ -17,6 +17,9 @@ pub const MAX_NAME: usize = 16;
 pub enum AtCmd<'a> {
     Attention,
     Dial(&'a str),
+    /// `ATDV<name>[/<label>]`: a voice call to a person (voice name), one
+    /// device when a label is given.
+    DialVoice(&'a str, Option<&'a str>),
     Answer,
     Hangup,
     Online,
@@ -467,6 +470,12 @@ pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
 }
 
 fn parse_dial(arg: &str) -> Result<AtCmd<'_>, AtError> {
+    // V: a voice call (ATDV REV, ATDV REV/PC).
+    if let Some(b) = arg.bytes().next() {
+        if b.eq_ignore_ascii_case(&b'V') {
+            return parse_dial_voice(arg.get(1..).unwrap_or("").trim());
+        }
+    }
     // Strip one leading T or P dial modifier, as in ATDTAXIS.
     let mut name = arg;
     if let Some(b) = name.bytes().next() {
@@ -481,6 +490,18 @@ fn parse_dial(arg: &str) -> Result<AtCmd<'_>, AtError> {
         return Err(AtError::BadArg);
     }
     Ok(AtCmd::Dial(name))
+}
+
+/// `<name>[/<label>]`, split at the last `/` (a label has no `/`).
+fn parse_dial_voice(arg: &str) -> Result<AtCmd<'_>, AtError> {
+    let (name, label) = match arg.rsplit_once('/') {
+        Some((n, l)) => (n.trim(), Some(l.trim())),
+        None => (arg, None),
+    };
+    if !valid_station(name) || !label.is_none_or(crate::voice::valid_label) {
+        return Err(AtError::BadArg);
+    }
+    Ok(AtCmd::DialVoice(name, label))
 }
 
 fn parse_sreg(arg: &str) -> Result<AtCmd<'_>, AtError> {
@@ -525,6 +546,10 @@ pub enum ResultCode {
     ConnectLz(Tier),
     /// A Wi-Fi (TCP) call: `CONNECT WIFI TCP`, numeric 1.
     ConnectWifi,
+    /// A voice call: `CONNECT <tier> <bps>/VOICE`, numeric 1.
+    ConnectVoice(Tier),
+    /// Our voice call was declined: `DECLINED`, numeric 3 (as NO CARRIER).
+    Declined,
     Retrain(Tier),
 }
 
@@ -596,6 +621,14 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
                 }
             }
             ResultCode::ConnectWifi => b.put(b"CONNECT WIFI TCP"),
+            ResultCode::ConnectVoice(t) => {
+                b.put(b"CONNECT ");
+                b.put(t.name().as_bytes());
+                b.put(b" ");
+                b.put_u32(t.air_bps());
+                b.put(b"/VOICE");
+            }
+            ResultCode::Declined => b.put(b"DECLINED"),
             ResultCode::Retrain(t) => {
                 b.put(b"RETRAIN ");
                 b.put(t.name().as_bytes());
@@ -607,9 +640,12 @@ pub fn format_result(code: &ResultCode, verbose: bool, out: &mut [u8]) -> usize 
     } else {
         let n = match code {
             ResultCode::Ok => 0,
-            ResultCode::Connect(_) | ResultCode::ConnectLz(_) | ResultCode::ConnectWifi => 1,
+            ResultCode::Connect(_)
+            | ResultCode::ConnectLz(_)
+            | ResultCode::ConnectWifi
+            | ResultCode::ConnectVoice(_) => 1,
             ResultCode::Ring => 2,
-            ResultCode::NoCarrier => 3,
+            ResultCode::NoCarrier | ResultCode::Declined => 3,
             ResultCode::Error => 4,
             ResultCode::Busy => 7,
             ResultCode::NoAnswer => 8,

@@ -122,8 +122,8 @@ impl VoiceDir {
     }
 
     /// A device was heard through `station`. With `only_known` (HIDDEN
-    /// mode) only a device or pinned name already here is refreshed. True
-    /// when stored.
+    /// mode) only a device already here is refreshed, or a device of a
+    /// pinned name recorded. True when stored.
     pub(crate) fn heard(
         &mut self,
         name: &str,
@@ -146,7 +146,8 @@ impl VoiceDir {
             // A pinned name not heard yet: its placeholder takes the device.
             None => match self.find(name, "") {
                 Some(i) => i,
-                None if only_known => return false,
+                // HIDDEN: a new device of a pinned name is still recorded.
+                None if only_known && !pinned => return false,
                 None => match self.slot_for_new() {
                     Some(i) => i,
                     None => return false,

@@ -47,15 +47,18 @@ pub const SVC_MASK: u8 = SVC_ACCEPTS | SVC_FORWARD | SVC_HOTSPOT;
 /// Beacon period and the most random delay added to it.
 pub const BEACON_EVERY_MS: u32 = 300_000;
 pub const BEACON_JITTER_MS: u32 = 60_000;
-/// How long `AT+SCAN` collects answers after its ScanReq went out.
-pub const SCAN_WINDOW_MS: u32 = 4_000;
+/// How long `AT+SCAN` collects answers after its ScanReq went out: a full
+/// voice scan answer (about 1.1 s at SF12) from the last slot ends near
+/// 3.9 s, so 5 s leaves room.
+pub const SCAN_WINDOW_MS: u32 = 5_000;
 /// Scan answer slots: 11 of 250 ms (0 to 2.5 s after the ScanReq).
 pub const SLOT_MS: u32 = 250;
 pub const SLOTS: u8 = 11;
 /// At most one discovery transmission per this many ms.
 pub const DISC_GAP_MS: u32 = 10_000;
 /// A scan whose ScanReq could not go out within this time gives ERROR.
-pub const SCAN_SEND_LIMIT_MS: u32 = DISC_GAP_MS + SCAN_WINDOW_MS;
+/// (14 s, as before the scan window grew.)
+pub const SCAN_SEND_LIMIT_MS: u32 = DISC_GAP_MS + 4_000;
 /// Directory entries heard within this window count in a beacon.
 pub const HEARD_WINDOW_MS: u32 = 900_000;
 /// Longest discovery payload (ScanResp with a 16 byte name).
