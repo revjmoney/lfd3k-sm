@@ -16,6 +16,7 @@ pub mod settings;
 pub mod simnet;
 pub mod telnet;
 pub mod tier;
+pub mod voice;
 pub mod wire;
 
 pub use arq::{ArqRx, ArqTx};

@@ -1,4 +1,4 @@
-# Third-party crates
+﻿# Third-party crates
 
 core and ffi have no dependencies outside the workspace, so nothing below is ever built into the core library or the firmware. sim has two third-party crates: crossterm, a normal dependency used only by the PC tool `lfd3k-pcmodem --raw` (raw console and key events), and proptest, a dev-dependency used by the fuzz tests (`sim/tests/fuzz.rs`) with default features off (`features = ["std"]`). Licenses are as declared in each crate's Cargo.toml (checked with `cargo metadata`).
 
@@ -58,6 +58,15 @@ It and everything it pulls in are dev-only for proptest: none of it is built int
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
 | unarray | 0.1.4 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
 
+## Voice (the `voice` crate, std; never built into core, ffi or the firmware)
+
+| Component | Version | License | Why |
+|-----------|---------|---------|-----|
+| Codec 2 (C library, vendored in `voice/codec2/`: codec sources only, no FreeDV modems) | 1.2.0 (drowe67/codec2 tag 1.2.0, archive codec2-1.2.0.tar.gz, 7,688,549 bytes, sha256 cbccae52b2c2ecc5d2757e407da567eb681241ff8dadce39d779a7219dbcf449) | LGPL-2.1 (`voice/codec2/LICENSE`) | Voice codec for SF7 to SF12 (3200 to 700C bps). The codebook C files in `voice/codec2/generated/` were produced from the archive's own `src/codebook/*.txt` by its `generate_codebook.c`; `include/codec2/version.h` is hand-written. Built by `voice/build.rs` with `cc`; on the MSVC target it needs clang-cl (C99 VLAs), found from `LFD3K_CLANG_CL` or PATH. |
+| opus (Rust bindings) | 0.4.0 | MIT/Apache-2.0 | Opus codec for SF5 and SF6 |
+| opusic-sys (builds the bundled libopus from source) | 0.7.7 | BSD-3-Clause (as declared; libopus itself is BSD-3-Clause) | libopus for the `opus` crate; its build uses cmake |
+| cc (build dependency) | 1.11.1 | MIT OR Apache-2.0 | Compiles Codec 2 |
+| cmake, find-msvc-tools, shlex (build dependencies) | 0.1.58, 0.1.15, 2.0.1 | MIT OR Apache-2.0 | Build helpers of opusic-sys and cc |
 ## Toolchain and firmware components (not crates)
 
 | Component | Version | License | Used in |

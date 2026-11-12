@@ -132,7 +132,7 @@ pub(crate) fn xorshift32(mut x: u32) -> u32 {
     x
 }
 
-fn air_ms(t: Tier, len: usize) -> u32 {
+pub(crate) fn air_ms(t: Tier, len: usize) -> u32 {
     (t.airtime_us(len) / 1000).saturating_add(1)
 }
 
@@ -153,7 +153,7 @@ fn preamble_us(t: Tier) -> u32 {
 /// Silence before taking the turn back: two preambles at this tier plus
 /// 20 ms, at least 40 ms. A real radio only reports busy once it has
 /// detected the peer's preamble.
-fn turn_gap_ms(t: Tier) -> u32 {
+pub(crate) fn turn_gap_ms(t: Tier) -> u32 {
     (preamble_us(t) * 2 / 1000 + 20).max(40)
 }
 
