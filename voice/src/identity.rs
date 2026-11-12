@@ -165,7 +165,9 @@ impl Identity {
     /// Write the identity file (private keys). Written to a side file first,
     /// then moved over `path`. Owner only on Unix.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let mut buf = Zeroizing::new(Vec::with_capacity(256));
+        // Sized for the largest file up front, so the buffer never regrows
+        // and leaves a copy of the seeds behind unwiped.
+        let mut buf = Zeroizing::new(Vec::with_capacity(8 + 32 + 33 + 1 + 32 + 2 * (1 + MAX_FIELD) + 64));
         buf.extend_from_slice(FILE_MAGIC);
         buf.extend_from_slice(self.device.as_bytes());
         match &self.person {

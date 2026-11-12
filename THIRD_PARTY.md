@@ -37,20 +37,20 @@ Default features off; `events` and `windows` on. Which crates build depends on t
 
 ### proptest (sim tests only)
 
-It and everything it pulls in are dev-only for proptest: none of it is built into the core library or the firmware. bitflags and cfg-if (and libc on Unix) are also built into the sim binary, through crossterm (table above).
+It and everything it pulls in are dev-only for proptest (chacha20, cpufeatures, getrandom, rand_core and r-efi are also built into the voice crate, below): none of it is built into the core library or the firmware. bitflags and cfg-if (and libc on Unix) are also built into the sim binary, through crossterm (table above).
 
 | Crate | Version | License | Used in |
 |-------|---------|---------|---------|
 | proptest | 1.12.0 | MIT OR Apache-2.0 | sim tests only (dev) |
 | rand | 0.10.3 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
-| rand_core | 0.10.1 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | sim tests (dev, via proptest); also the voice crate, below |
 | rand_xorshift | 0.5.0 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
-| chacha20 | 0.10.2 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
-| cpufeatures | 0.3.1 | MIT OR Apache-2.0 | sim tests only (dev, via chacha20) |
-| getrandom | 0.4.3 | MIT OR Apache-2.0 | sim tests only (dev, via rand) |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 | sim tests (dev, via proptest); also the voice crate, below |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 | sim tests (dev, via chacha20); also the voice crate, below |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 | sim tests (dev, via rand); also the voice crate, below |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | sim tests (dev, via chacha20 and getrandom); also crossterm, above |
 | libc | 0.2.191 | MIT OR Apache-2.0 | sim tests (dev, via cpufeatures and getrandom on some targets); also crossterm on Unix, above |
-| r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later (used under MIT OR Apache-2.0) | sim tests only (dev, via getrandom on UEFI targets; not built on Windows) |
+| r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later (used under MIT OR Apache-2.0) | sim tests (dev, via getrandom on UEFI targets; not built on Windows); also the voice crate, below |
 | core_detect | 1.0.0 | MIT/Apache-2.0 | sim tests only (dev, via proptest) |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | sim tests (dev, via proptest); also crossterm, above |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | sim tests only (dev, via proptest) |
@@ -70,7 +70,7 @@ It and everything it pulls in are dev-only for proptest: none of it is built int
 
 ### The FLOWTRON SCRAMBLER (voice crate)
 
-Standard primitives only (spec section 7), from the RustCrypto and dalek projects. chacha20poly1305 has default features off (`alloc`, `zeroize` on); ed25519-dalek has default features off (`fast`, `zeroize`); x25519-dalek has default features off (`precomputed-tables`, `getrandom`, `zeroize`). Licenses as declared in each crate's Cargo.toml (checked with `cargo metadata`). Crates marked "also above" are already listed for another part.
+Standard primitives only (spec section 7), from the RustCrypto and dalek projects. chacha20poly1305 has default features off (`alloc`, `zeroize` on); ed25519-dalek has default features off (`fast`, `zeroize`); x25519-dalek has default features off (`precomputed-tables`, `getrandom`, `zeroize`); sha2 has `zeroize` on (wipes hash and HMAC state). Licenses as declared in each crate's Cargo.toml (checked with `cargo metadata`). Crates marked "also above" are already listed for another part.
 
 | Crate | Version | License | Why |
 |-------|---------|---------|-----|
