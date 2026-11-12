@@ -1,6 +1,6 @@
 # LFD3K-SM voice calls: design
 
-Status: draft for Rev's review, 2026-11-12. Owner: Rev. J. Money. Brainstormed with Rev on 2026-11-12. Builds on `docs/2026-11-09-lfd3k-sm-design.md` (section 14 there parked voice; this document replaces that paragraph) and `docs/FEATURES.md`.
+Status: approved by Rev, 2026-11-12 (plan: `docs/superpowers/plans/2026-11-12-lfd3k-sm-voice-1-pc.md`). Owner: Rev. J. Money. Brainstormed with Rev on 2026-11-12. Builds on `docs/2026-11-09-lfd3k-sm-design.md` (section 14 there parked voice; this document replaces that paragraph) and `docs/FEATURES.md`.
 
 Marking: **Rev:** is what Rev said or decided. **Claude's call:** is a choice made for him that he can change. Everything else is left to the builder unless stated. Code references were checked against `main` at 6364009.
 
@@ -138,7 +138,7 @@ Rev: "use the proven ones, flowtron scrambler". Our own name and protocol around
 
 - **Per call keys:** each app makes a fresh X25519 key pair for every call. The apps exchange public keys, each signed with the app's identity key, over the call's reliable control path (section 8.1), and derive one key per direction with HKDF-SHA256. Keys are wiped at hang-up, so a recorded call cannot be opened later even with a stolen phone.
 - **Every voice frame** is sealed with ChaCha20-Poly1305 or AES-256-GCM (builder's call, one of the two, from a permissive, well known crate). Nonce from direction plus a frame counter. A frame that fails to open, or a replayed or old counter, is dropped as a gap.
-- **Two word check:** at the start of a call both apps show two words derived from the session and both identity keys (for example `WRENCH TANGO`, from a fixed word list). Matching words mean nobody is in the middle.
+- **Two word check:** at the start of a call both apps show two words derived from the session and both identity keys (for example `WRENCH TANGO`, from a fixed word list). Matching words mean nobody is in the middle. The caller commits to its hello (sends a hash first) and reveals it only after the answerer's hello arrives, so nobody in the middle can try thousands of keys until the 16 bits of words match (the ZRTP way; added while planning).
 - **Overhead:** a 16 byte tag plus a short counter per voice frame. Truncated tags are not allowed; frame sizes in section 8.2 account for it.
 - **Password channels** (section 9): channel key from name and password through Argon2id with deliberately slow settings.
 - **Ham mode:** no scrambler (section 3.1).
