@@ -5,11 +5,22 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Rev. J. Money <https://jmscnc.com>"]
 publish = false
-description = "Shared voice engine for the LFD3K-SM apps: Opus and Codec2 codecs, jitter buffer"
+description = "Shared voice engine for the LFD3K-SM apps: Opus and Codec2 codecs, jitter buffer, the FLOWTRON SCRAMBLER"
 
 [dependencies]
 lfd3k-core = { path = "../core" }
 opus = "0.4"
+# FLOWTRON SCRAMBLER (spec section 7): RustCrypto and dalek crates only.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"] }
+getrandom = "0.4"
+hkdf = "0.13"
+sha2 = "0.11"
+x25519-dalek = { version = "3", default-features = false, features = ["precomputed-tables", "getrandom", "zeroize"] }
+zeroize = "1"
+# Trust store file.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 cc = "1"

@@ -1,4 +1,4 @@
-﻿# Third-party crates
+# Third-party crates
 
 core and ffi have no dependencies outside the workspace, so nothing below is ever built into the core library or the firmware. sim has two third-party crates: crossterm, a normal dependency used only by the PC tool `lfd3k-pcmodem --raw` (raw console and key events), and proptest, a dev-dependency used by the fuzz tests (`sim/tests/fuzz.rs`) with default features off (`features = ["std"]`). Licenses are as declared in each crate's Cargo.toml (checked with `cargo metadata`).
 
@@ -67,6 +67,41 @@ It and everything it pulls in are dev-only for proptest: none of it is built int
 | opusic-sys (builds the bundled libopus from source) | 0.7.7 | BSD-3-Clause (as declared; libopus itself is BSD-3-Clause) | libopus for the `opus` crate; its build uses cmake |
 | cc (build dependency) | 1.11.1 | MIT OR Apache-2.0 | Compiles Codec 2 |
 | cmake, find-msvc-tools, shlex (build dependencies) | 0.1.58, 0.1.15, 2.0.1 | MIT OR Apache-2.0 | Build helpers of opusic-sys and cc |
+
+### The FLOWTRON SCRAMBLER (voice crate)
+
+Standard primitives only (spec section 7), from the RustCrypto and dalek projects. chacha20poly1305 has default features off (`alloc`, `zeroize` on); ed25519-dalek has default features off (`fast`, `zeroize`); x25519-dalek has default features off (`precomputed-tables`, `getrandom`, `zeroize`). Licenses as declared in each crate's Cargo.toml (checked with `cargo metadata`). Crates marked "also above" are already listed for another part.
+
+| Crate | Version | License | Why |
+|-------|---------|---------|-----|
+| x25519-dalek | 3.0.0 | BSD-3-Clause | Per call X25519 key exchange |
+| ed25519-dalek | 3.0.0 | BSD-3-Clause | Device and person keys, hello and cert signatures |
+| curve25519-dalek | 5.0.0 | BSD-3-Clause | Curve arithmetic, via the two dalek crates |
+| curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | Proc macro of curve25519-dalek, build time only |
+| fiat-crypto | 0.3.0 | MIT OR Apache-2.0 OR BSD-1-Clause (used under MIT OR Apache-2.0) | Field arithmetic, via curve25519-dalek |
+| rustc_version, semver | 0.4.1, 1.0.28 | MIT OR Apache-2.0 | Build script of curve25519-dalek, build time only |
+| ed25519, signature | 3.0.0, 3.0.0 | Apache-2.0 OR MIT | Signature types and traits, via ed25519-dalek |
+| subtle | 2.6.1 | BSD-3-Clause | Constant time compares, via the dalek crates |
+| chacha20poly1305 | 0.11.0 | Apache-2.0 OR MIT | Seals every voice frame (full 16 byte tag) |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 | Stream cipher, via chacha20poly1305 (also above, sim tests) |
+| poly1305, universal-hash | 0.9.1, 0.6.1 | Apache-2.0 OR MIT, MIT OR Apache-2.0 | Authenticator, via chacha20poly1305 |
+| aead, cipher, inout | 0.6.1, 0.5.2, 0.2.6 | MIT OR Apache-2.0 | AEAD and cipher traits, via chacha20poly1305 |
+| hkdf, hmac | 0.13.0, 0.13.0 | MIT OR Apache-2.0 | HKDF-SHA256 for the two direction keys |
+| sha2 | 0.11.1 | MIT OR Apache-2.0 | SHA-256 (commit, words, HKDF) and SHA-512 (Ed25519) |
+| digest, block-buffer, crypto-common, hybrid-array, typenum, const-oid | 0.11.3, 0.12.1, 0.2.2, 0.4.15, 1.20.1, 0.10.3 | MIT OR Apache-2.0 (const-oid Apache-2.0 OR MIT) | Hash and array plumbing, via sha2 and the others |
+| cmov, ctutils | 0.5.4, 0.4.8 | Apache-2.0 OR MIT | Constant time helpers, via the RustCrypto crates |
+| cpufeatures, cfg-if | 0.3.1, 1.0.5 | MIT OR Apache-2.0 | CPU feature checks, via the ciphers (also above) |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | Random traits, via the RustCrypto crates (also above, sim tests) |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 | OS random source for every key (also above, sim tests) |
+| libc, r-efi | 0.2.191, 6.0.0 | MIT OR Apache-2.0; r-efi MIT OR Apache-2.0 OR LGPL-2.1-or-later (used under MIT OR Apache-2.0) | Via getrandom on Unix and UEFI targets (not built on Windows; also above) |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT | Wipes private keys and session keys on drop |
+| serde, serde_core, serde_derive | 1.0.229 | MIT OR Apache-2.0 | Trust store file |
+| serde_json | 1.0.154 | MIT OR Apache-2.0 | Trust store file is JSON |
+| itoa, memchr, zmij | 1.0.19, 2.8.3, 1.0.23 | MIT OR Apache-2.0; memchr Unlicense OR MIT; zmij MIT | Via serde_json |
+| proc-macro2, quote, unicode-ident, syn | 1.0.107, 1.0.47, 1.0.27, 2.0.119 and 3.0.10 | MIT OR Apache-2.0 (unicode-ident also Unicode-3.0) | Proc macro support for serde_derive and curve25519-dalek-derive, build time only |
+
+The PGP word list in `voice/src/words.rs` (the two words) is public domain (Juola and Zimmermann); checked word for word against a published copy.
+
 ## Toolchain and firmware components (not crates)
 
 | Component | Version | License | Used in |
