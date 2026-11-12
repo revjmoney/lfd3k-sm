@@ -1,0 +1,7 @@
+# Heltec V3 (heltec_v3_single, after sdkconfig.defaults): 8 MB flash DIO,
+# no PSRAM, and UART0 is the CP2102 USB port, which carries the modem stream
+# (uart_link.c), so the console is off and the bootloader stays quiet.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y

@@ -21,7 +21,7 @@ use super::render::{attr, Row, COLS};
 use super::{dir_slot, Ask, Screen, Step, Ui, View, MAIN, SETTINGS, WIFI};
 use crate::directory::DIR_MAX;
 use crate::discovery::{SVC_ACCEPTS, SVC_FORWARD, SVC_HOTSPOT};
-use crate::modem::{BANNER, GC1109_GAIN_DB, RELEASE_NAME, RELEASE_TAGLINE};
+use crate::modem::{BANNER, RELEASE_NAME, RELEASE_TAGLINE};
 use crate::settings::{BeaconMode, WireMode, MAX_FWD};
 use crate::tier::Tier;
 
@@ -458,9 +458,13 @@ fn settings_body(w: &mut Row, i: u8, ui: &Ui, v: &View) {
             2 => {
                 let dbm = i32::from(reg(30) as i16);
                 w.int(a, dbm).str(a, " dBm");
-                w.str(d, "  chip, about ")
-                    .int(d, dbm + GC1109_GAIN_DB)
-                    .str(d, " dBm out");
+                if v.fe_gain_db == 0 {
+                    w.str(d, "  at the antenna");
+                } else {
+                    w.str(d, "  chip, about ")
+                        .int(d, dbm + v.fe_gain_db)
+                        .str(d, " dBm out");
+                }
             }
             3 => {
                 let c = reg(21);

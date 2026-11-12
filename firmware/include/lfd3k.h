@@ -85,6 +85,10 @@ void     lfd3k_status(uint32_t now_ms, lfd3k_status_t *out);
  * Either pointer may be NULL. Returns 0 before init. */
 size_t   lfd3k_rf_trace(int8_t *dbm, uint8_t *tx, size_t cap);
 
+/* Once at boot after lfd3k_init: the board's front end gain in dB, for the
+ * power shown by AT&V and the menu (default 12, the V4's GC1109; 0 on the V3). */
+void     lfd3k_set_front_end_gain(int8_t db);
+
 /* ---- AT+MODE: firmware modes on the multimode board. ---- */
 
 /* Multimode board only, once at boot after lfd3k_init: bit i set when mode i's

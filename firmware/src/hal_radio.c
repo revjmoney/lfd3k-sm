@@ -108,10 +108,14 @@ void hal_radio_init(TaskHandle_t modem_task)
      * reset in the middle of a transmit nothing goes out through the PA. The
      * driver's reset() releases it. PA mode off first, then power. */
     out_pin(PIN_LORA_RST, 0);
+#if BOARD_HAS_FEM
     out_pin(PIN_FEM_PA, 0);
+#endif
     out_pin(PIN_VEXT, 0); /* Vext on (LOW): OLED and GPS */
+#if BOARD_HAS_FEM
     out_pin(PIN_FEM_POWER, s_safe ? 0 : 1);
     out_pin(PIN_FEM_EN, s_safe ? 0 : 1);
+#endif
 
     gpio_config_t busy = {
         .pin_bit_mask = 1ULL << PIN_LORA_BUSY,
@@ -214,7 +218,11 @@ void lfd3k_hal_reset(void)
 
 void lfd3k_hal_fem_tx(bool on)
 {
+#if BOARD_HAS_FEM
     gpio_set_level(PIN_FEM_PA, (on && !s_safe) ? 1 : 0);
+#else
+    (void)on; /* no front end: DIO2 switches the antenna by itself */
+#endif
 }
 
 uint64_t lfd3k_hal_now_us(void)

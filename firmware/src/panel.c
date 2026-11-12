@@ -3,12 +3,14 @@
 #include "board.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "panel.h"
 #include "panel_render.h"
+#include "picker_draw.h"
 #include "ssd1306.h"
 
 static const char *TAG = "panel";
@@ -123,6 +125,23 @@ static void panel_task(void *arg)
     }
     uint32_t next_try_ms = (uint32_t)(esp_timer_get_time() / 1000) + RETRY_MS;
 
+    /* With the picker on the board (multimode) the boot logo has already
+     * played there, so a short splash. Alone on the board (the single app
+     * layout, no factory app) the modem plays the AXIS boot logo itself. */
+    if (!esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL)) {
+        _Static_assert(PK_FB_BYTES == PANEL_FB_BYTES, "picker and panel frames differ");
+        for (uint32_t t = 0; t < PK_LOGO_MS; t += FRAME_MS) {
+            pk_draw_logo(fb, t);
+            commit_frame(fb);
+            if (oled_ok) {
+                ssd1306_flush(fb);
+            }
+            vTaskDelay(pdMS_TO_TICKS(FRAME_MS));
+        }
+        if (oled_ok) {
+            memcpy(shown, fb, sizeof(shown));
+        }
+    }
     panel_render_splash(fb);
     commit_frame(fb);
     if (oled_ok) {

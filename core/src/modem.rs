@@ -340,6 +340,8 @@ pub struct Modem {
     stack_free: Option<u32>,
     /// Lowest free heap since boot reported by the firmware, bytes.
     heap_min: Option<u32>,
+    /// Gain of the board's front end in dB (`set_front_end_gain`).
+    fe_gain_db: i32,
     /// `AT+MODE`: which mode slots hold an image (bit `ModeTarget::index`),
     /// reported once by the firmware on the multimode board. `None` (the PC,
     /// or the single app layout): AT+MODE answers ERROR.
@@ -459,6 +461,7 @@ impl Modem {
             wire: Wire::new(),
             stack_free: None,
             heap_min: None,
+            fe_gain_db: GC1109_GAIN_DB,
             mode_slots: None,
             mode_req: None,
             mode_wait: false,
@@ -635,6 +638,13 @@ impl Modem {
     /// shown by `AT&V` as `STACK FREE <n>`.
     pub fn set_stack_free(&mut self, bytes: u32) {
         self.stack_free = Some(bytes);
+    }
+
+    /// Once at boot: the board's front end gain in dB, used to show the power
+    /// out (`AT&V`, the menu). Default 12, the V4's GC1109; 0 on a board with
+    /// no amplifier (the V3), where S30 is the power at the antenna.
+    pub fn set_front_end_gain(&mut self, db: i8) {
+        self.fe_gain_db = i32::from(db);
     }
 
     /// The firmware's lowest free heap since boot (bytes), shown by `AT&V`
@@ -1877,9 +1887,13 @@ impl Modem {
                 let dbm = self.tx_power_dbm();
                 let mut t = Txt::new();
                 t.put(b"TX POWER S30=").int(i32::from(dbm));
-                t.put(b" dBm chip, about ")
-                    .int(i32::from(dbm) + GC1109_GAIN_DB)
-                    .put(b" dBm out");
+                if self.fe_gain_db == 0 {
+                    t.put(b" dBm at the antenna");
+                } else {
+                    t.put(b" dBm chip, about ")
+                        .int(i32::from(dbm) + self.fe_gain_db)
+                        .put(b" dBm out");
+                }
                 self.info(t.bytes());
                 if let Some(ip) = self.simnet {
                     let mut t = Txt::new();
@@ -2693,6 +2707,7 @@ impl Modem {
             simnet_fail: self.simnet_fail,
             stack_free: self.stack_free,
             heap_min: self.heap_min,
+            fe_gain_db: self.fe_gain_db,
             note: self.note.get(..self.note_len).unwrap_or(&[]),
             scanning: self.disc.scan.is_some(),
             scan_hits: self.scan_hits(),
@@ -3068,6 +3083,18 @@ mod tests {
         // An empty note clears it again.
         m.set_last_panic(b"");
         assert!(!run(&mut m, b"ATI\r", 40).contains("LAST CRASH"));
+    }
+
+    #[test]
+    fn board_without_amp_shows_power_at_the_antenna() {
+        let mut m = Modem::new(Config::new("CALLER").unwrap());
+        m.set_front_end_gain(0);
+        let t = run(&mut m, b"AT&V\r", 0);
+        assert!(t.contains("TX POWER S30=2 dBm at the antenna"), "{t:?}");
+        assert!(!t.contains("dBm out"), "{t:?}");
+        // The ATZ reset keeps the board's gain.
+        run(&mut m, b"ATZ\r", 10);
+        assert!(run(&mut m, b"AT&V\r", 20).contains("dBm at the antenna"));
     }
 
     #[test]

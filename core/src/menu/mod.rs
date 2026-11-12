@@ -385,6 +385,9 @@ pub struct View<'a> {
     pub simnet_fail: bool,
     pub stack_free: Option<u32>,
     pub heap_min: Option<u32>,
+    /// Gain of the board's front end in dB (0: no amplifier, S30 is the
+    /// power at the antenna).
+    pub fe_gain_db: i32,
     pub note: &'a [u8],
     pub scanning: bool,
     pub scan_hits: u8,

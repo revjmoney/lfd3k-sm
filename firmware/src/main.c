@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "board.h"
 #include "driver/temperature_sensor.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -410,6 +411,9 @@ static void modem_task(void *arg)
     size_t note_len = hal_radio_take_panic_note(note);
     int rc = lfd3k_init(name, note_len ? note : NULL, note_len);
     ESP_LOGI(TAG, "%s core init rc=%d, last crash note %u bytes", name, rc, (unsigned)note_len);
+#if !BOARD_HAS_FEM
+    lfd3k_set_front_end_gain(0); /* no amplifier: S30 is the power at the antenna */
+#endif
     if (mode_switch_available()) {
         lfd3k_set_mode_slots(mode_switch_slots()); /* AT+MODE; the single app layout leaves it ERROR */
     }

@@ -103,6 +103,7 @@ Settings, S registers and every AT command are in [`docs/FEATURES.md`](docs/FEAT
 | PC modem (the real core over UDP) | `sim/` | `cargo run -p lfd3k-sim --bin lfd3k-pcmodem -- --peer <V4 ip>` |
 | SX1262 driver | `sx1262/` | built into the firmware |
 | Firmware (ESP-IDF 5.4 via PlatformIO) | `firmware/` | `firmware\build_core.ps1`, then `pio run -d firmware -e heltec_v4` |
+| Firmware for the Heltec V3 (the modem alone) | `firmware/` | `firmware\build_core.ps1`, then `pio run -d firmware -e heltec_v3_single -t upload --upload-port COMn` |
 | Multimode bootloader and picker | `multimode/` | see [`multimode/README.md`](multimode/README.md) |
 
 The Rust toolchain for the ESP32-S3 is installed with `espup`. The first firmware build downloads
@@ -123,6 +124,15 @@ ESP-IDF and takes a while; later builds take seconds.
 Heltec WiFi LoRa 32 V4 (ESP32-S3R2, 16 MB flash, SX1262 with the GC1109 front end), 918.5 MHz
 calling channel, 500 kHz bandwidth. Check the rules for your region before you transmit; the default
 TX power (S30) is low on purpose.
+
+The **Heltec WiFi LoRa 32 V3** runs it too, as the modem alone (env `heltec_v3_single`, 8 MB flash),
+with the AXIS boot logo at power on. Differences from the V4:
+
+* No front end amplifier: S30 is the power at the antenna (22 dBm at most), and AT&V says so.
+* Its USB-C port is a CP2102 bridge, so the modem talks on that COM port at 115200 baud, 8N1, no flow
+  control. Open it with DTR and RTS off (opening it with them on resets the board). The ESP32-S3's own
+  boot text shows on that port for a moment after every reset, before the modem starts.
+* The multimode picker is V4 only.
 
 ## License
 

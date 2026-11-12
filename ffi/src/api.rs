@@ -479,6 +479,14 @@ pub extern "C" fn lfd3k_set_mode_slots(mask: u8) {
     let _ = with_device(|d| d.modem.set_mode_slots(mask));
 }
 
+/// Once at boot after `lfd3k_init`: the board's front end gain in dB, for the
+/// power shown by AT&V and the menu (default 12, the V4's GC1109; 0 on the
+/// V3, which has no amplifier).
+#[no_mangle]
+pub extern "C" fn lfd3k_set_front_end_gain(db: i8) {
+    let _ = with_device(|d| d.modem.set_front_end_gain(db));
+}
+
 /// Taken once after an accepted `AT+MODE=`: -1 none, else the target
 /// (0 LFD3K-SM, 1 SIMIAN RADAR, 2 RNODE, 3 MESH, 4 the picker). The modem
 /// prints nothing for it until `lfd3k_mode_result`.
