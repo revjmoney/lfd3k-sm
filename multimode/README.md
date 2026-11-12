@@ -5,7 +5,7 @@ four firmware modes, each in its own app slot. A small custom bootloader starts
 the **picker** on every boot; the picker shows the AXIS BBS logo for 5 seconds,
 opens the mode list on a PRG press, and otherwise starts the last used mode.
 
-Closed source. Private. Never pushed.
+Free software: GPLv3 or later with an attribution term (see `NOTICE.md` at the top of the repo).
 
 ## Partition layout (`partitions-multimode.csv`)
 

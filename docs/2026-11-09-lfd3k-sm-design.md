@@ -1,6 +1,6 @@
 # LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM (LFD3K-SM): Design
 
-Status: draft for Rev's review, 2026-11-09. Closed source. Owner: Rev. J. Money.
+Status: draft for Rev's review, 2026-11-09. Owner: Rev. J. Money. Open source since 2026-11-12: GPLv3 or later with an attribution term (`NOTICE.md`); the closed-source lines below are history.
 Brain notes: `D:\brain\Projects\AXIS BBS Firmware.md` (LFD3K-SM and ring sections), `D:\brain\Projects\Simian Radar.md`, `D:\brain\Reference\Heltec V4 MeshCore Node.md`.
 
 ## 1. Intent
