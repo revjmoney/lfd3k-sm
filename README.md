@@ -8,7 +8,8 @@
   <img src="docs/img/simian-logo.png" alt="Simian Tactical Unit monkey logo" width="160"><br>
   <b>v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M</b><br>
   <i>S0N1C B00M R4D10 PR0 MAX</i><br>
-  by Rev. J. Money / <a href="https://jmscnc.com">jmscnc.com</a>
+  by Rev. J. Money / <a href="https://jmscnc.com">jmscnc.com</a><br>
+  <b>Website: <a href="https://revjmoney.github.io/lfd3k-sm/">revjmoney.github.io/lfd3k-sm</a></b>
 </p>
 
 A Hayes-style dial-up modem that talks over **LoRa radio** and **Wi-Fi**, built for the Heltec V4
@@ -107,6 +108,7 @@ ESP-IDF and takes a while; later builds take seconds.
 
 ## Documentation
 
+- [The website](https://revjmoney.github.io/lfd3k-sm/): screenshots, animations and every doc below, [rendered](https://revjmoney.github.io/lfd3k-sm/docs.html)
 - [Design](docs/2026-11-09-lfd3k-sm-design.md): the protocol, tiers, frames, ARQ, training and retrain
 - [Features, settings and AT commands](docs/FEATURES.md)
 - [Multimode](docs/multimode.md): four firmwares on one radio
