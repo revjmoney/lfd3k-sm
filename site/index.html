@@ -8,119 +8,133 @@
 <meta property="og:title" content="LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM">
 <meta property="og:description" content="Type ATDT, hear the BBS answer over the air. A Hayes-style modem over LoRa and Wi-Fi for the Heltec V4 and V3.">
 <meta property="og:image" content="docs/img/simian-logo.png">
-<meta name="theme-color" content="#e2ddd0">
+<meta name="theme-color" content="#060709">
 <link rel="icon" href="docs/img/simian-logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Anton&family=IBM+Plex+Mono:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,800;1,8..60,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
-<body class="ad-page">
+<body>
 
-<main class="ad" id="ad">
-  <div class="folio">
-    <span>Advertisement</span>
-    <span>Circle 420 on Reader Service Card</span>
-  </div>
-
-  <header class="ad-head">
-    <h1 class="headline">Dial a BBS across town.<br>No phone line.</h1>
-    <a class="burst" href="#why" data-card="why" data-focus="f2">
-      <span>62,500 bps<br>over the air!</span>
-    </a>
-  </header>
-
-  <div class="ad-body">
-    <figure class="product">
-      <a class="photo shot" href="multimode/preview/logo.gif">
-        <img class="pixel" src="multimode/preview/logo.gif" width="512" height="256"
-             alt="The AXIS BBS boot logo on the modem's OLED: the letters build up from scan lines, a sweep runs along the rule, five dots count down">
-      </a>
-      <figcaption>The boot screen, live from the OLED. Heltec V4 shown; the V3 runs it too.</figcaption>
-      <div class="wordmark">
-        <img src="docs/img/simian-logo.png" width="512" height="548" alt="Simian Tactical Unit monkey logo">
-        <div>
-          <p class="model">LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM</p>
-          <p class="release">v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M</p>
-          <p class="tagline">S0N1C B00M R4D10 PR0 MAX</p>
-        </div>
-      </div>
-    </figure>
-
-    <div class="copy">
-      <p class="lede">Plug it into any terminal program and type <code>ATDT</code>. You get <code>DIALING</code>,
-        <code>RINGING</code>, <code>CONNECT</code>, retrains and <code>NO CARRIER</code>, the way BBS calling used to
-        feel. Except the call goes over LoRa radio on 918.5&nbsp;MHz, with no phone line and no internet. It is the
-        radio side of the <a href="https://github.com/revjmoney/axis-bbs">AXIS BBS</a>.</p>
-      <ul class="checks">
-        <li><a href="#why" data-card="why" data-focus="f1">Real Hayes manners: ATD, ATA, <code>+++</code>, S registers</a></li>
-        <li><a href="#why" data-card="why" data-focus="f2">8 speed tiers, trained live on the signal</a></li>
-        <li><a href="#why" data-card="why" data-focus="f3">Selective-repeat ARQ: nothing gets lost</a></li>
-        <li><a href="#why" data-card="why" data-focus="f4">LZ compression tuned for ANSI art</a></li>
-        <li><a href="#why" data-card="why" data-focus="f5">Wi-Fi hotspot, client and telnet forwards</a></li>
-        <li><a href="#why" data-card="why" data-focus="f6">Beacons, scan and a station directory</a></li>
-        <li><a href="#menu" data-card="menu">Full-screen ANSI setup menu</a></li>
-        <li><a href="#panel" data-card="panel">Front panel with blinking modem lights</a></li>
-        <li><a href="#multimode" data-card="multimode">Four firmwares on one Heltec V4</a></li>
-        <li><a href="#why" data-card="why" data-focus="f10">Rust core, simulator tested and fuzzed</a></li>
-      </ul>
-    </div>
-
-    <aside class="specs" aria-label="Speeds and boards">
-      <h2 class="spec-head">Speeds</h2>
-      <a class="chart" href="#why" data-card="why" data-focus="tiers" aria-label="The tier ladder: SF5 62,500 bps down to SF12 1,172 bps">
-        <span style="--w:100%"><b>SF5</b><i>62,500</i></span>
-        <span style="--w:60%"><b>SF6</b><i>37,500</i></span>
-        <span style="--w:35%"><b>SF7</b><i>21,875</i></span>
-        <span style="--w:20%"><b>SF8</b><i>12,500</i></span>
-        <span style="--w:11.2%"><b>SF9</b><i>7,031</i></span>
-        <span style="--w:6.2%"><b>SF10</b><i>3,906</i></span>
-        <span style="--w:3.4%"><b>SF11</b><i>2,148</i></span>
-        <span style="--w:1.9%"><b>SF12</b><i>1,172</i></span>
-      </a>
-      <p class="chart-cap">Air rates in bps at 500&nbsp;kHz. It picks the fastest the link can hold.</p>
-      <h2 class="spec-head">Runs on</h2>
-      <p class="boards"><a href="#hardware" data-card="hardware">Heltec WiFi LoRa 32 V4</a> and
-        <a href="#hardware" data-card="hardware">V3</a></p>
-      <pre class="screen" aria-label="A sample call">ATDT AXISMODEM-16FC
-RINGING
-CONNECT LORA SF5 BW500
-  62500/ARQ/LZ</pre>
-    </aside>
-  </div>
-
-  <div class="ad-foot">
-    <div class="coupon">
-      <p class="coupon-head">Yes! I want to dial the air.</p>
-      <div class="coupon-actions">
-        <a class="stamp" href="#call" data-card="call">Watch a real call</a>
-        <a class="stamp" href="#quickstart" data-card="quickstart">Quick start</a>
-        <a class="stamp" href="docs.html">Read the manual</a>
-        <a class="stamp" href="https://github.com/revjmoney/lfd3k-sm">Get the source</a>
-      </div>
-    </div>
-    <nav class="index" aria-label="Inside this ad">
-      <p class="index-head">Inside this ad</p>
-      <ul>
-        <li><a href="#call" data-card="call">A real call</a></li>
-        <li><a href="#why" data-card="why">Why it rules</a></li>
-        <li><a href="#animations" data-card="animations">Animations</a></li>
-        <li><a href="#menu" data-card="menu">Setup menu</a></li>
-        <li><a href="#panel" data-card="panel">Front panel</a></li>
-        <li><a href="#multimode" data-card="multimode">Four modes</a></li>
-        <li><a href="#air" data-card="air">On the air</a></li>
-        <li><a href="#quickstart" data-card="quickstart">Quick start</a></li>
-        <li><a href="#build" data-card="build">Build it</a></li>
-        <li><a href="#hardware" data-card="hardware">Hardware</a></li>
-        <li><a href="#license" data-card="license">License</a></li>
-      </ul>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="./"><img src="docs/img/simian-logo.png" width="512" height="548" alt=""> LFD3K-SM <small>JMSCNC</small></a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#call" data-card="call">Real call</a>
+      <a href="#why" data-card="why">Features</a>
+      <a href="#quickstart" data-card="quickstart">Quick start</a>
+      <a href="#hardware" data-card="hardware">Hardware</a>
+      <a href="docs.html">Docs</a>
     </nav>
-    <p class="fineprint">Free software under the GNU GPL v3 or later, with an attribution term
-      (<a href="#license" data-card="license">details</a>). Copyright &copy; 2026 Rev. J. Money /
-      <a href="https://jmscnc.com">jmscnc.com</a>. Check the rules for your region before you transmit.
-      AXIS BBS and LFD3K-SM are by the same author. Shown with the V4; the V3 runs the modem alone.</p>
+    <div class="header-cta">
+      <a class="btn btn-sm btn-github" href="https://github.com/revjmoney/lfd3k-sm">GitHub <span class="arw" aria-hidden="true">&#8599;</span></a>
+      <a class="btn btn-sm btn-primary" href="https://jmscnc.com/simiantacticaltoolbox">Simian Tactical</a>
+    </div>
   </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <p class="kicker">LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM</p>
+      <h1>Dial a BBS across town. No phone line.</h1>
+      <p class="lede">A Hayes-style modem that talks over LoRa radio and Wi-Fi. Plug a Heltec V4 or V3 into any terminal,
+        type <code>ATDT</code>, and you get <code>RINGING</code>, <code>CONNECT</code>, retrains and
+        <code>NO CARRIER</code>, the way BBS calling used to feel. The call goes over the air on 918.5&nbsp;MHz. It is the
+        radio side of the <a href="https://github.com/revjmoney/axis-bbs">AXIS BBS</a>.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="#call" data-card="call">Watch a real call</a>
+        <a class="btn" href="#quickstart" data-card="quickstart">Quick start</a>
+        <a class="btn" href="docs.html">Read the docs</a>
+        <a class="btn" href="https://github.com/revjmoney/lfd3k-sm">Source <span class="arw" aria-hidden="true">&#8599;</span></a>
+      </div>
+    </div>
+    <div class="console" aria-label="A sample call">
+      <div class="bar"><i></i><i></i><i></i><span>COM15 &middot; 115200 8N1</span></div>
+      <pre><span class="dim">v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M</span>
+<span class="acc">ATDT</span> AXISMODEM-16FC
+<span class="dim">DIALING</span>
+<span class="dim">RINGING</span>
+<span class="ok">CONNECT LORA SF5 BW500 62500/ARQ/LZ</span>
+
+<span class="dim">AXIS UNDERGROUND CNC</span>
+Login: _</pre>
+      <a class="console-oled shot" href="multimode/preview/logo.gif"><img class="pixel" src="multimode/preview/logo.gif" width="512" height="256"
+        alt="The AXIS BBS boot logo on the modem's OLED: the letters build up from scan lines, a sweep runs along the rule, five dots count down"></a>
+    </div>
+  </section>
+
+  <div class="stats">
+    <div><b>62,500</b><span>bps over the air, top tier</span></div>
+    <div><b>8</b><span>speed tiers, trained live</span></div>
+    <div><b>2</b><span>boards: Heltec V4 and V3</span></div>
+    <div><b>GPLv3</b><span>free software, open source</span></div>
+  </div>
+
+  <section class="section" aria-labelledby="inside">
+    <div class="section-head">
+      <div>
+        <h2 id="inside">Inside the modem</h2>
+        <p>Every part opens on its own card. Esc or Close slides it back.</p>
+      </div>
+    </div>
+    <div class="grid">
+      <a class="mod" href="#call" data-card="call">
+        <span class="cover"><img src="docs/video/lfd3k-radio-call-poster.jpg" alt="" loading="lazy"></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Video</span><span class="status s-new"><i></i>New</span></span>
+          <span class="mod-title">A real call, over the air</span><span class="sub">V3 to V4 to the AXIS BBS</span></span></a>
+      <a class="mod" href="#why" data-card="why">
+        <span class="cover blank"><span>62,500 bps</span></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Features</span></span>
+          <span class="mod-title">Why it rules</span><span class="sub">ARQ, LZ, 8 tiers, Wi-Fi, scan</span></span></a>
+      <a class="mod" href="#animations" data-card="animations">
+        <span class="cover"><img class="pixel" src="docs/phase2-bench/mockups/idle-show.gif" alt="" loading="lazy"></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Front panel</span></span>
+          <span class="mod-title">Animations</span><span class="sub">Idle show in 17 languages</span></span></a>
+      <a class="mod" href="#menu" data-card="menu">
+        <span class="cover"><img src="docs/phase4-bench/menu/01-main.png" alt="" loading="lazy"></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">AT+MENU</span></span>
+          <span class="mod-title">The setup menu</span><span class="sub">80x24 ANSI, CP437, 16 colors</span></span></a>
+      <a class="mod" href="#panel" data-card="panel">
+        <span class="cover"><img class="pixel" src="docs/phase2-bench/mockups/online_sf5.png" alt="" loading="lazy"></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">OLED</span></span>
+          <span class="mod-title">The front panel</span><span class="sub">Modem lights, tier, RSSI, SNR</span></span></a>
+      <a class="mod" href="#multimode" data-card="multimode">
+        <span class="cover"><img src="multimode/preview/menu.png" alt="" loading="lazy"></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Heltec V4</span></span>
+          <span class="mod-title">Four modes, one radio</span><span class="sub">Modem, Radar, RNode, Meshtastic</span></span></a>
+      <a class="mod" href="#air" data-card="air">
+        <span class="cover"><img class="pixel" src="docs/phase2-bench/sdr-waterfall-918500.png" alt="" loading="lazy"></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">SDR</span></span>
+          <span class="mod-title">On the air</span><span class="sub">Bursts on 918.5 MHz</span></span></a>
+      <a class="mod" href="#quickstart" data-card="quickstart">
+        <span class="cover blank"><span>ATDT</span></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Use it</span></span>
+          <span class="mod-title">Quick start</span><span class="sub">The AT commands you need</span></span></a>
+      <a class="mod" href="#build" data-card="build">
+        <span class="cover blank"><span>cargo test</span></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Rust and ESP-IDF</span></span>
+          <span class="mod-title">Build it</span><span class="sub">Core, simulator, firmware</span></span></a>
+      <a class="mod" href="#hardware" data-card="hardware">
+        <span class="cover blank"><span>V4 and V3</span></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Boards</span></span>
+          <span class="mod-title">Hardware</span><span class="sub">Heltec WiFi LoRa 32 V4 and V3</span></span></a>
+      <a class="mod" href="#license" data-card="license">
+        <span class="cover blank"><span>GPLv3</span></span>
+        <span class="mod-body"><span class="mod-top"><span class="group-label">Legal</span></span>
+          <span class="mod-title">License</span><span class="sub">GPLv3 or later, with attribution</span></span></a>
+    </div>
+  </section>
 </main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <a class="brand" href="./"><img src="docs/img/simian-logo.png" width="512" height="548" alt=""> LFD3K-SM</a>
+    <span>Copyright &copy; 2026 Rev. J. Money / <a href="https://jmscnc.com">jmscnc.com</a>. Check the rules for your region before you transmit.</span>
+    <span class="motto">S0N1C B00M R4D10 PR0 MAX</span>
+  </div>
+</footer>
 
 <!-- The insert cards. Each one slides in when its link is clicked. -->
 <dialog class="deck" id="deck" aria-labelledby="deck-title">
