@@ -61,9 +61,13 @@
 //!
 //! **Timers.** Slot frames count as heard frames and SNR samples. While
 //! slots run, the link sends no PINGs, and its step-down and resync clocks
-//! run on `quiet_ms` (the time over consecutive slots in which the peer was
-//! due to send and was not heard) and `missed` (how many) in place of
-//! wall-clock silence. A tier change takes effect for the plan and the slot
+//! run on `quiet_ms` (the summed length of the consecutive slots in which
+//! the peer was due to send and was not heard; slots in which it was not
+//! due add nothing) and `missed` (how many) in place of wall-clock silence.
+//! A Listener frame carries an ARQ chunk only up to the tier's chunk size,
+//! except in a voice sub-slot or with the floor free (a longer chunk queued
+//! on a faster tier gets through there and never overruns a listener
+//! sub-slot). A tier change takes effect for the plan and the slot
 //! layout at the next slot boundary (the link reports it with `Retrain`).
 //!
 //! Bodies (after the sub-type byte; header seq = slot number, header ack =
@@ -344,7 +348,19 @@ pub(crate) fn parse(sub: VSub, body: &[u8]) -> Option<Heard<'_>> {
     }
 }
 
-/// Slot clock, floor and the two one-frame voice buffers of a voice call.
+/// Layout before the slots start (replaced at slot 0).
+const INITIAL_LAYOUT: SlotLayout = SlotLayout {
+    mode: TalkMode::PttDelayed,
+    frame_ms: 2000,
+    voice_ms: 0,
+    listen_ms: 0,
+    listen_every: 1,
+    chunk: LISTEN_CHUNK as u8,
+    room: false,
+};
+
+/// Slot clock, floor, the two-frame voice send queue and the one-frame
+/// receive buffer of a voice call.
 pub struct VoiceSched {
     /// The app said VoiceReady.
     pub(crate) ready_mine: bool,
@@ -373,12 +389,11 @@ pub struct VoiceSched {
     key: bool,
     /// Caller: the answerer's talk key, as last heard.
     peer_key: bool,
-    /// Time over consecutive due slots in which the peer was not heard.
+    /// Silence: the length of each consecutive slot in which the peer was due
+    /// and not heard.
     pub(crate) quiet_ms: u32,
     /// How many such slots.
     pub(crate) missed: u8,
-    /// End of the last slot in which the peer was due.
-    due_end: u32,
     /// When we last sent a Listener frame.
     pub(crate) last_lis: u32,
     /// Voice frames waiting to go out (a ring of `VOICE_QUEUE`).
@@ -406,15 +421,7 @@ impl VoiceSched {
             caller: false,
             synced: false,
             tier: Tier::ROBUST,
-            lay: SlotLayout {
-                mode: TalkMode::PttDelayed,
-                frame_ms: 2000,
-                voice_ms: 0,
-                listen_ms: 0,
-                listen_every: 1,
-                chunk: LISTEN_CHUNK as u8,
-                room: false,
-            },
+            lay: INITIAL_LAYOUT,
             slot_start: 0,
             n: 0,
             sent: false,
@@ -426,7 +433,6 @@ impl VoiceSched {
             peer_key: false,
             quiet_ms: 0,
             missed: 0,
-            due_end: 0,
             last_lis: 0,
             tx: [[0; VOICE_MAX]; VOICE_QUEUE],
             tx_len: [0; VOICE_QUEUE],
@@ -454,8 +460,35 @@ impl VoiceSched {
         self.peer_key = false;
         self.quiet_ms = 0;
         self.missed = 0;
+        self.tx_head = 0;
         self.tx_count = 0;
         self.rx_len = 0;
+        self.tier = Tier::ROBUST;
+        self.lay = INITIAL_LAYOUT;
+        self.slot_start = 0;
+        self.n = 0;
+        self.hold = 0;
+        self.last_lis = 0;
+    }
+
+    /// An ARQ chunk of `len` bytes, longer than this tier's listener chunk
+    /// (queued on a faster tier), may go in our sub-slot now: it is a voice
+    /// sub-slot (duplex, or we hold the floor), or the floor is free (both
+    /// send listeners, with time to spare), or the listen period is several
+    /// slots and the longer Listener frame runs into the next slot by no
+    /// more than that slot's spare time (SF12: 82 ms of 216), which the
+    /// holder's hold and the next slots absorb.
+    pub(crate) fn big_chunk_ok(&self, len: usize) -> bool {
+        if self.may_talk() || self.owner == Owner::None {
+            return true;
+        }
+        let over = listen_ms(self.tier, len).saturating_sub(self.lay.listen_ms);
+        let spare = self
+            .lay
+            .frame_ms
+            .saturating_sub(self.lay.voice_ms)
+            .saturating_sub(SLOT_GUARD_MS);
+        self.lay.listen_every >= 2 && over <= spare
     }
 
     /// The slot clock runs here (always on the caller; on the answerer
@@ -623,7 +656,7 @@ impl VoiceSched {
         self.hold = now;
         self.owner = Owner::None;
         self.begin_slot(t);
-        self.reset_quiet(now);
+        self.reset_quiet();
     }
 
     /// Answerer: a caller frame said the slots run.
@@ -635,13 +668,13 @@ impl VoiceSched {
         self.lay = slot_layout(t);
         self.hold = now;
         self.owner = Owner::None;
-        self.reset_quiet(now);
+        self.reset_quiet();
     }
 
     /// Back from a resync: the caller starts a new slot now; the answerer
     /// waits for a caller frame before sending in a slot again.
     pub(crate) fn restart(&mut self, now: u32, t: Tier) {
-        self.reset_quiet(now);
+        self.reset_quiet();
         self.hold = now;
         if self.caller {
             self.slot_start = now;
@@ -652,10 +685,9 @@ impl VoiceSched {
         }
     }
 
-    fn reset_quiet(&mut self, now: u32) {
+    fn reset_quiet(&mut self) {
         self.quiet_ms = 0;
         self.missed = 0;
-        self.due_end = now;
     }
 
     /// A slot starts: plan change, floor decision (caller).
@@ -684,16 +716,14 @@ impl VoiceSched {
         }
     }
 
-    /// A slot ends: count it if the peer was due and not heard.
-    fn end_slot(&mut self, end: u32) {
-        if !self.peer_due() {
-            return;
-        }
-        if !self.heard {
-            self.quiet_ms = self.quiet_ms.saturating_add(end.wrapping_sub(self.due_end));
+    /// A slot ends: if the peer was due and not heard, its length counts
+    /// as silence (only due slots count; a listen period's other slots do
+    /// not).
+    fn end_slot(&mut self) {
+        if self.peer_due() && !self.heard {
+            self.quiet_ms = self.quiet_ms.saturating_add(self.lay.frame_ms);
             self.missed = self.missed.saturating_add(1);
         }
-        self.due_end = end;
     }
 
     /// Move the slot clock up to `now`; `t` is the link's tier.
@@ -721,7 +751,7 @@ impl VoiceSched {
             && now.wrapping_sub(self.slot_start) >= self.lay.frame_ms.max(1)
         {
             let end = self.slot_start.wrapping_add(self.lay.frame_ms);
-            self.end_slot(end);
+            self.end_slot();
             self.slot_start = end;
             self.n = self.n.wrapping_add(1);
             self.begin_slot(t);

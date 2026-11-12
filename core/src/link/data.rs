@@ -6,7 +6,7 @@ use super::*;
 use crate::lz;
 use crate::voice::frames::VSub;
 use crate::voice::plan::{talk_plan, TalkPlan};
-use crate::voice::sched::{self, Floor, Turn, LISTEN_CHUNK, VF_READY, VF_SLOTS};
+use crate::voice::sched::{self, Floor, Turn, VF_READY, VF_SLOTS};
 
 impl Link {
     pub(super) fn on_connected(
@@ -444,7 +444,8 @@ impl Link {
     /// caller starts the slots once both are. Called from the connected
     /// timers.
     pub(super) fn voice_ready_tick(&mut self, now: u32) {
-        if self.vs.slots || !self.vs.ready_mine || self.tx.longest() > LISTEN_CHUNK {
+        let chunk = usize::from(sched::slot_layout(self.tier).chunk);
+        if self.vs.slots || !self.vs.ready_mine || self.tx.longest() > chunk {
             return;
         }
         match self.role {
@@ -533,8 +534,8 @@ impl Link {
     /// Pop the queued frame at the head into `out`: (len, tier).
     fn next_queued(&mut self, out: &mut [u8]) -> Option<(usize, Tier)> {
         let f = self.q.get(self.q_head).copied()?;
+        self.q_len = self.q_len.checked_sub(1)?;
         self.q_head = (self.q_head + 1) % QLEN;
-        self.q_len -= 1;
         let n = f.len as usize;
         out.get_mut(..n)?.copy_from_slice(f.buf.get(..n)?);
         Some((n, f.tier))
@@ -549,7 +550,11 @@ impl Link {
         let ack = self.rx.ack_state();
         self.ack_owed = false;
         self.ka_reply = false;
-        let starve = !self.tx.idle() && since(now, self.vs.last_lis) >= sched::CTRL_WAIT_MS;
+        let rto = rto_ms(t);
+        // A chunk due now (never sent, or past its RTO), not one that only
+        // waits for its ack.
+        let due = self.tx.next_len(now, rto);
+        let starve = due.is_some() && since(now, self.vs.last_lis) >= sched::CTRL_WAIT_MS;
         if self.vs.may_talk() && self.vs.voice_waiting(t) && !starve {
             *listener = false;
             return self.vs.build_data(self.call_id, ack, now, out);
@@ -564,8 +569,17 @@ impl Link {
         *listener = true;
         let snr = self.last_snr;
         let call_id = self.call_id;
-        let rto = rto_ms(t);
-        let chunk = self.tx.next_to_send(now, rto);
+        // A chunk longer than this tier's listener chunk (queued on a
+        // faster tier) goes only where it cannot overrun into someone
+        // else's frame (`VoiceSched::big_chunk_ok`); else this Listener
+        // carries no chunk.
+        let max = usize::from(sched::slot_layout(t).chunk);
+        let fits = due.is_some_and(|n| n <= max || self.vs.big_chunk_ok(n));
+        let chunk = if fits {
+            self.tx.next_to_send(now, rto)
+        } else {
+            None
+        };
         let carried = chunk.is_some();
         let n = self.vs.build_listener(call_id, ack, snr, chunk, now, out);
         if n.is_some() && carried {

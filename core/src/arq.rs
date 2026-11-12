@@ -122,6 +122,26 @@ impl ArqTx {
     /// oldest unacked chunk whose last send is at least `rto_ms` ago
     /// (wrapping u32 millisecond math).
     pub fn next_to_send(&mut self, now_ms: u32, rto_ms: u32) -> Option<(u8, &[u8])> {
+        let i = self.pick(now_ms, rto_ms)?;
+        let r = self.ring(i);
+        let s = self.slots.get_mut(r)?;
+        s.sent = true;
+        s.last_ms = now_ms;
+        let len = s.len as usize;
+        let seq = self.base.wrapping_add(i as u8);
+        let data = self.buf.get(r)?.get(..len)?;
+        Some((seq, data))
+    }
+
+    /// Length of the chunk `next_to_send` would hand out now, without
+    /// sending it; None when nothing is due.
+    pub fn next_len(&self, now_ms: u32, rto_ms: u32) -> Option<usize> {
+        let i = self.pick(now_ms, rto_ms)?;
+        self.slots.get(self.ring(i)).map(|s| s.len as usize)
+    }
+
+    /// Window offset of the chunk due now (see `next_to_send`).
+    fn pick(&self, now_ms: u32, rto_ms: u32) -> Option<usize> {
         let mut pick = None;
         for i in 0..self.count {
             if let Some(s) = self.slots.get(self.ring(i)) {
@@ -141,15 +161,7 @@ impl ArqTx {
                 }
             }
         }
-        let i = pick?;
-        let r = self.ring(i);
-        let s = self.slots.get_mut(r)?;
-        s.sent = true;
-        s.last_ms = now_ms;
-        let len = s.len as usize;
-        let seq = self.base.wrapping_add(i as u8);
-        let data = self.buf.get(r)?.get(..len)?;
-        Some((seq, data))
+        pick
     }
 
     /// `ack` is the receiver's next expected seq; sack bit i means frame
