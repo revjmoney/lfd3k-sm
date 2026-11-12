@@ -59,7 +59,10 @@ const PROBE_TRIES: u8 = 2;
 /// Most jitter added to a training probe retry.
 const PROBE_JITTER_MS: u32 = 50;
 const QLEN: usize = 4;
-const QBUF: usize = 40;
+/// Queue slot bytes: the longest voice discovery frame (a voice scan
+/// answer with four registrations) must fit (`send_discovery`).
+const QBUF: usize = 132;
+const _: () = assert!(QBUF >= crate::voice::VOICE_DISC_FRAME);
 const EVLEN: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -407,8 +410,9 @@ impl Link {
         self.call_id
     }
 
-    /// Queue one discovery frame (Beacon, ScanReq, ScanResp, already
-    /// encoded, call id 0) on SF12. Taken only while the link is idle with
+    /// Queue one discovery frame (Beacon, ScanReq, ScanResp or a type 15
+    /// voice beacon or voice scan answer, already encoded, call id 0) on
+    /// SF12. Taken only while the link is idle with
     /// nothing else queued, so it never delays a Hangup or CallReject and
     /// never goes out during a call; the next pump sends it and listens
     /// again afterwards. False when refused.

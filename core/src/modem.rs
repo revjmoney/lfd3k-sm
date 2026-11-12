@@ -30,6 +30,16 @@
 //! dropped before the link sees it, so nothing at all is sent (no RING, no
 //! CallReject).
 //!
+//! Voice names (see `voice/`): a voice app registers a name and label per
+//! host link session (`voice_register`, `voice_unregister`,
+//! `voice_session_seen`; expired in `tick`). With registrations, beacons and
+//! scan answers carry `SVC_VOICE`; in ON mode a voice beacon (type 15)
+//! follows each normal beacon and goes out soon after a new registration;
+//! a ScanReq with `FLAG_VOICE` (ours always set it) gets a voice scan
+//! answer in place of the normal one (ON and QUIET). Heard voice beacons
+//! and voice scan answers fill the voice directory (`Directory::voice`).
+//! Type 15 frames never reach the link yet.
+//!
 //! Setup menu (see `menu/`): `AT+MENU` (or, with S32 = 1, the first host
 //! byte after boot) opens a full-screen ANSI menu. While it is open every
 //! host byte goes to the menu, never to the AT parser, and nothing else
@@ -44,9 +54,9 @@ use crate::directory::{Directory, DIR_MAX};
 use crate::discovery::{
     self, valid_station, Answer, Beacon, Discovery, Scan, ScanReq, ScanResp, DISC_MAX,
     HEARD_WINDOW_MS, SCAN_SEND_LIMIT_MS, SCAN_WINDOW_MS, SLOTS, SLOT_MS, SVC_ACCEPTS, SVC_FORWARD,
-    SVC_HOTSPOT,
+    SVC_HOTSPOT, SVC_VOICE,
 };
-use crate::frame::{FrameType, Header, HEADER_LEN, NAME_MAX};
+use crate::frame::{FrameType, Header, FLAG_VOICE, HEADER_LEN, NAME_MAX};
 use crate::lan::{Found, FoundList};
 use crate::link::{Event, Link, Role, State};
 use crate::menu::{self, render, Action, Menu, View};
@@ -54,6 +64,12 @@ use crate::radio::{Radio, RxInfo};
 use crate::settings::{parse_hostport, BeaconMode, Forward, Settings, WireMode, MAX_FWD};
 use crate::telnet::{link_frame, LinkStats, LINK_FRAME_MAX};
 use crate::tier::{best_tier, Tier};
+use crate::voice::frames::{self as vframes, VoiceItems};
+use crate::voice::regs::VoiceState;
+use crate::voice::{
+    Name16, VSub, VoiceDir, VoiceEntry, VoiceReg, VOICE_DIR_MAX, VOICE_DISC_FRAME, VOICE_DISC_MAX,
+    VOICE_REGS,
+};
 use crate::wire::{Call, Phase, Wire, WireReq};
 
 /// ATI line 1.
@@ -401,6 +417,8 @@ pub struct Modem {
     call_rx: Option<(u8, RxInfo)>,
     /// Telnet servers the platform's mDNS browse found (`set_found_hosts`).
     found: FoundList,
+    /// Voice name registrations and the voice beacon request. Never saved.
+    voice: VoiceState,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -489,6 +507,7 @@ impl Modem {
             call_caller_len: 0,
             call_rx: None,
             found: FoundList::new(),
+            voice: VoiceState::new(),
         }
     }
 
@@ -550,6 +569,38 @@ impl Modem {
         self.call_caller_len = 0;
         self.call_rx = None;
         self.found.clear();
+        self.voice = VoiceState::new();
+    }
+
+    /// A voice app on host link `session` (0 to 3) registers its voice
+    /// name and device label (one per session; a second call replaces the
+    /// first). False, and nothing changed, for a session over 3, a name
+    /// that breaks the station name rule or a label that is not 1 to 8
+    /// printable characters without `:` or `/`. A new or changed
+    /// registration asks for a voice beacon soon (ON mode).
+    pub fn voice_register(&mut self, session: u8, name: &str, label: &str, now_ms: u32) -> bool {
+        self.voice.register(session, name, label, now_ms)
+    }
+
+    /// The session left: its registration goes at once.
+    pub fn voice_unregister(&mut self, session: u8, _now_ms: u32) {
+        self.voice.unregister(session);
+    }
+
+    /// The session sent a frame; its registration lasts `VOICE_GRACE_MS`
+    /// past the last one (expired in `tick`).
+    pub fn voice_session_seen(&mut self, session: u8, now_ms: u32) {
+        self.voice.seen(session, now_ms);
+    }
+
+    /// The registrations, slot `s` for session `s`.
+    pub fn voice_regs(&self) -> &[Option<VoiceReg>; VOICE_REGS] {
+        &self.voice.regs
+    }
+
+    /// Voice names heard from other modems, and the pinned ones.
+    pub fn voice_dir(&self) -> &VoiceDir {
+        self.dir.voice()
     }
 
     /// True once when the platform should save the directory
@@ -743,6 +794,7 @@ impl Modem {
         if self.dir.remove(name_of(&self.cfg)) {
             self.dir_dirty = true;
         }
+        self.dir.voice_remove_via(name_of(&self.cfg));
     }
 
     /// True while the generated hotspot password may be shown on the OLED:
@@ -1140,6 +1192,8 @@ impl Modem {
 
     pub fn tick<R: Radio>(&mut self, radio: &mut R, now_ms: u32) {
         self.escape_timer(now_ms);
+        // Registrations expire also during a call.
+        self.voice.expire(now_ms);
         self.disc_tick(radio, now_ms);
         self.dir_save_timer(now_ms);
         if self.menu.open {
@@ -1198,11 +1252,18 @@ impl Modem {
                 false
             }
             FrameType::ScanReq => {
-                self.on_scan_req(f.payload, info, now);
+                self.on_scan_req(f.payload, h.flags & FLAG_VOICE != 0, info, now);
                 false
             }
             FrameType::ScanResp => {
-                self.on_scan_resp(f.payload, info, now);
+                if let Some(r) = discovery::parse_scan_resp(f.payload) {
+                    self.on_scan_resp(r, None, info, now);
+                }
+                false
+            }
+            // Voice frames never reach the link (call setup is later work).
+            FrameType::Voice => {
+                self.on_voice(f.payload, info, now);
                 false
             }
             FrameType::CallReq => self.screen_call_req(f.payload, h.call_id, info, now),
@@ -1265,7 +1326,7 @@ impl Modem {
         true
     }
 
-    fn on_scan_req(&mut self, p: &[u8], info: RxInfo, now: u32) {
+    fn on_scan_req(&mut self, p: &[u8], voice: bool, info: RxInfo, now: u32) {
         let Some(r) = discovery::parse_scan_req(p) else {
             return;
         };
@@ -1287,13 +1348,18 @@ impl Modem {
             slot,
             snr_x4: info.snr_x4,
             scan_id: r.scan_id,
+            voice,
         });
     }
 
-    fn on_scan_resp(&mut self, p: &[u8], info: RxInfo, now: u32) {
-        let Some(r) = discovery::parse_scan_resp(p) else {
-            return;
-        };
+    /// A scan answer, normal or voice (`items`: its voice names).
+    fn on_scan_resp(
+        &mut self,
+        r: ScanResp<'_>,
+        items: Option<VoiceItems<'_>>,
+        info: RxInfo,
+        now: u32,
+    ) {
         if r.name.eq_ignore_ascii_case(name_of(&self.cfg)) {
             return;
         }
@@ -1305,8 +1371,12 @@ impl Modem {
         };
         // HIDDEN: an overheard answer only refreshes a name already known,
         // like a ScanReq.
-        if self.set.beacon != BeaconMode::Hidden || self.dir.get(r.name).is_some() {
+        let hidden = self.set.beacon == BeaconMode::Hidden;
+        if !hidden || self.dir.get(r.name).is_some() {
             self.dir_heard(r.name, Some(r.services), both, now);
+        }
+        if let Some(items) = items {
+            self.voice_heard(r.name, items, snr, hidden, now);
         }
         let print = self.verbose && self.mode != Mode::Data;
         let Some(scan) = self.disc.scan.as_mut() else {
@@ -1326,13 +1396,66 @@ impl Modem {
             t.put(b"SCAN ").put(r.name.as_bytes()).put(b" SNR ");
             put_snr(&mut t, snr);
             t.put(b" dB ").put(tier.name().as_bytes());
+            if let Some(items) = items {
+                t.put(b" VOICE");
+                for (name, label) in items {
+                    t.put(b" ").put(name.as_bytes()).put(b"/");
+                    t.put(label.as_bytes());
+                }
+            }
             self.info(t.bytes());
+        }
+    }
+
+    /// A type 15 frame heard: voice beacons and voice scan answers feed the
+    /// directories; other sub-types wait for the voice call work.
+    fn on_voice(&mut self, p: &[u8], info: RxInfo, now: u32) {
+        let Some((&s, body)) = p.split_first() else {
+            return;
+        };
+        match VSub::from_u8(s) {
+            Some(VSub::Beacon) => {
+                let Some(b) = vframes::parse_voice_beacon(body) else {
+                    return;
+                };
+                if b.station.eq_ignore_ascii_case(name_of(&self.cfg)) {
+                    return;
+                }
+                // Like a normal beacon: heard in every privacy mode.
+                self.dir_heard(b.station, None, info, now);
+                self.voice_heard(b.station, b.items, info.snr_x4, false, now);
+            }
+            Some(VSub::ScanResp) => {
+                if let Some((r, items)) = vframes::parse_voice_scan_resp(body) {
+                    self.on_scan_resp(r, Some(items), info, now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Voice names heard through `station` into the voice directory (never
+    /// through our own name; the caller checked).
+    fn voice_heard(
+        &mut self,
+        station: &str,
+        items: VoiceItems<'_>,
+        snr_x4: i16,
+        known: bool,
+        now: u32,
+    ) {
+        let tier = best_tier(snr_x4, self.margin());
+        for (name, label) in items {
+            self.dir.voice_heard(name, label, station, tier, now, known);
         }
     }
 
     /// Services byte for our beacon and scan answers.
     fn services(&self) -> u8 {
         let mut s = 0;
+        if self.voice.any() {
+            s |= SVC_VOICE;
+        }
         if self.cfg.sregs.get(0).unwrap_or(0) > 0 {
             s |= SVC_ACCEPTS;
         }
@@ -1346,10 +1469,10 @@ impl Modem {
     }
 
     /// Hand one discovery frame (call id 0) to the idle link.
-    fn send_disc(&mut self, ft: FrameType, payload: &[u8]) -> bool {
+    fn send_disc(&mut self, ft: FrameType, flags: u8, payload: &[u8]) -> bool {
         let h = Header {
             ftype: ft,
-            flags: 0,
+            flags,
             call_id: 0,
             seq: 0,
             ack: 0,
@@ -1358,6 +1481,36 @@ impl Modem {
         match crate::frame::encode(&h, payload, &mut b) {
             Ok(n) => self.link.send_discovery(b.get(..n).unwrap_or(&[])),
             Err(_) => false,
+        }
+    }
+
+    /// Hand one voice discovery frame (type 15, call id 0) to the idle
+    /// link: a voice beacon (`scan` None) or a voice scan answer to the
+    /// ScanReq heard at that SNR with that scan id.
+    fn send_voice_disc(&mut self, scan: Option<(i16, u8)>) -> bool {
+        let mut p = [0u8; VOICE_DISC_MAX];
+        let name = name_of(&self.cfg);
+        let n = match scan {
+            Some((snr_x4, scan_id)) => {
+                let r = ScanResp {
+                    name,
+                    services: self.services(),
+                    snr_x4,
+                    scan_id,
+                };
+                vframes::voice_scan_resp_body(&r, &self.voice.regs, &mut p)
+            }
+            None => vframes::voice_beacon_body(name, &self.voice.regs, &mut p),
+        };
+        let sub = if scan.is_some() {
+            VSub::ScanResp
+        } else {
+            VSub::Beacon
+        };
+        let mut b = [0u8; VOICE_DISC_FRAME];
+        match n.map(|n| vframes::encode_voice(sub, 0, 0, p.get(..n).unwrap_or(&[]), &mut b)) {
+            Some(Ok(k)) => self.link.send_discovery(b.get(..k).unwrap_or(&[])),
+            _ => false,
         }
     }
 
@@ -1384,9 +1537,13 @@ impl Modem {
                     self.disc.arm_beacon(now);
                 }
             }
-            BeaconMode::Quiet => self.disc.beacon = None,
+            BeaconMode::Quiet => {
+                self.disc.beacon = None;
+                self.voice.beacon_due = false;
+            }
             BeaconMode::Hidden => {
                 self.disc.beacon = None;
+                self.voice.beacon_due = false;
                 self.disc.answer = None;
                 // A scan whose ScanReq has not gone out yet never will.
                 if self.disc.scan.is_some_and(|s| s.sent.is_none()) {
@@ -1432,8 +1589,14 @@ impl Modem {
                     snr_x4: a.snr_x4,
                     scan_id: a.scan_id,
                 };
-                let n = discovery::scan_resp_payload(&r, &mut p).unwrap_or(0);
-                sent = n > 0 && self.send_disc(FrameType::ScanResp, p.get(..n).unwrap_or(&[]));
+                // A voice ScanReq gets our voice names, when we have any,
+                // in place of the normal answer.
+                sent = if a.voice && self.voice.any() {
+                    self.send_voice_disc(Some((a.snr_x4, a.scan_id)))
+                } else {
+                    let n = discovery::scan_resp_payload(&r, &mut p).unwrap_or(0);
+                    n > 0 && self.send_disc(FrameType::ScanResp, 0, p.get(..n).unwrap_or(&[]))
+                };
             }
             if sent {
                 self.disc.last_tx = Some(now);
@@ -1458,12 +1621,27 @@ impl Modem {
                 scan_id: s.id,
             };
             let n = discovery::scan_req_payload(&r, &mut p).unwrap_or(0);
-            if n > 0 && self.send_disc(FrameType::ScanReq, p.get(..n).unwrap_or(&[])) {
+            let req = p.get(..n).unwrap_or(&[]);
+            if n > 0 && self.send_disc(FrameType::ScanReq, FLAG_VOICE, req) {
                 s.sent = Some(now);
                 self.disc.scan = Some(s);
                 self.disc.last_tx = Some(now);
             }
             return;
+        }
+        // The voice beacon (ON mode, registrations here): a separate frame
+        // 10 s or more after the normal beacon, or soon after a new
+        // registration; never while a scan collects answers.
+        if self.voice.beacon_due && self.disc.scan.is_none() {
+            if self.set.beacon == BeaconMode::On && self.voice.any() {
+                if self.send_voice_disc(None) {
+                    self.disc.last_tx = Some(now);
+                    self.voice.beacon_due = false;
+                    return;
+                }
+            } else {
+                self.voice.beacon_due = false;
+            }
         }
         // The beacon, never while a scan collects answers.
         if let Some((from, wait)) = self.disc.beacon {
@@ -1479,9 +1657,11 @@ impl Modem {
                 time_quality: 0,
             };
             let n = discovery::beacon_payload(&b, &mut p).unwrap_or(0);
-            if n > 0 && self.send_disc(FrameType::Beacon, p.get(..n).unwrap_or(&[])) {
+            if n > 0 && self.send_disc(FrameType::Beacon, 0, p.get(..n).unwrap_or(&[])) {
                 self.disc.last_tx = Some(now);
                 self.disc.arm_beacon(now);
+                // Our voice names follow in their own frame.
+                self.voice.beacon_due |= self.voice.any();
             }
         }
     }
@@ -1506,42 +1686,65 @@ impl Modem {
             self.dir_list = None;
             return;
         }
+        // Station slots 0 to 31, then voice slots 32 to 47.
+        const END: usize = DIR_MAX + VOICE_DIR_MAX;
+        fn voice_slot(d: &Directory, i: usize) -> Option<&VoiceEntry> {
+            i.checked_sub(DIR_MAX).and_then(|j| d.voice().slot(j))
+        }
+        fn dash(n: &Name16) -> &str {
+            if n.is_empty() {
+                "-"
+            } else {
+                n.as_str()
+            }
+        }
         while let Some((next, at)) = self.dir_list {
             let mut i = usize::from(next);
-            while i < DIR_MAX && self.dir.slot(i).is_none() {
+            while i < END && self.dir.slot(i).is_none() && voice_slot(&self.dir, i).is_none() {
                 i += 1;
             }
-            let Some(e) = self.dir.slot(i) else {
+            let mut t = Txt::new();
+            let (tier, heard, heard_ms, pinned) = if let Some(e) = self.dir.slot(i) {
+                t.put(b"DIR ").put(e.name().as_bytes());
+                (e.best_tier, e.heard_since_boot(), e.heard_ms, e.pinned)
+            } else if let Some(v) = voice_slot(&self.dir, i) {
+                // A pinned name not heard yet has no label or station.
+                t.put(b"DIR VOICE ")
+                    .put(v.name.as_str().as_bytes())
+                    .put(b"/");
+                t.put(dash(&v.label).as_bytes()).put(b" VIA ");
+                t.put(dash(&v.station).as_bytes());
+                (v.best_tier, v.heard_since_boot(), v.heard_ms, v.pinned)
+            } else {
                 if self.out.free() >= 16 {
                     self.dir_list = None;
                     self.result(ResultCode::Ok);
                 }
                 return;
             };
-            let mut t = Txt::new();
-            t.put(b"DIR ").put(e.name().as_bytes()).put(b" ");
-            match e.best_tier {
+            t.put(b" ");
+            match tier {
                 Some(tier) => t.put(tier.name().as_bytes()),
                 None => t.put(b"NONE"),
             };
             t.put(b" ");
-            if e.heard_since_boot() {
+            if heard {
                 // Heard again after the command was typed: age 0, never
                 // a wrapped "negative" age.
-                let d = at.wrapping_sub(e.heard_ms);
+                let d = at.wrapping_sub(heard_ms);
                 let d = if d > u32::MAX / 2 { 0 } else { d };
                 t.num(d / 1000, 1);
             } else {
                 t.put(b"-");
             }
-            if e.pinned {
+            if pinned {
                 t.put(b" PIN");
             }
             if self.out.free() < t.n + 4 + OUT_RESERVE {
                 return;
             }
             self.info(t.bytes());
-            self.dir_list = Some(((i + 1).min(DIR_MAX) as u8, at));
+            self.dir_list = Some(((i + 1).min(END) as u8, at));
         }
     }
 
@@ -1945,6 +2148,10 @@ impl Modem {
                 let mut t = Txt::new();
                 t.put(b"MODE ").put(ModeTarget::Modem.name().as_bytes());
                 self.info(t.bytes());
+                let mut t = Txt::new();
+                t.put(b"VOICE ").num(self.voice.count() as u32, 1);
+                t.put(b" ").num(self.dir.voice().len() as u32, 1);
+                self.info(t.bytes());
                 if let Some(n) = self.stack_free {
                     let mut t = Txt::new();
                     t.put(b"STACK FREE ").num(n, 1);
@@ -2192,6 +2399,14 @@ impl Modem {
             AtCmd::DirClear => {
                 self.dir.clear_unpinned();
                 self.result(ResultCode::Ok);
+            }
+            AtCmd::DirVoicePin(name) => {
+                let ok = self.dir.pin_voice(name);
+                self.ok_or_error(ok);
+            }
+            AtCmd::DirVoiceUnpin(name) => {
+                let ok = self.dir.unpin_voice(name);
+                self.ok_or_error(ok);
             }
             AtCmd::NameQuery => {
                 let mut t = Txt::new();

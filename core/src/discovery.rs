@@ -1,6 +1,7 @@
 //! Discovery on the calling channel: beacons, scans and their payloads.
 //!
-//! All three frames go out on SF12 with call id 0, seq 0, ack 0, flags 0.
+//! All three frames go out on SF12 with call id 0, seq 0, ack 0, flags 0
+//! (a ScanReq of this build sets `FLAG_VOICE`).
 //! Payloads (a name is a length byte 1 to 16 plus that many printable ASCII
 //! bytes without `:`, the station name rule):
 //!
@@ -14,8 +15,15 @@
 //! Every parser requires the exact length: trailing bytes are a bad payload.
 //!
 //! Services bits: bit 0 accepts calls (auto-answer S0 on), bit 1 a forward
-//! is published (AT+PUB), bit 2 the Wi-Fi hotspot is on. Other bits are 0
-//! when sent and ignored (masked off) when heard.
+//! is published (AT+PUB), bit 2 the Wi-Fi hotspot is on, bit 3 voice names
+//! are registered here (`SVC_VOICE`, a hint: the names come in a voice
+//! beacon or a voice scan answer, type 15). Other bits are 0 when sent and
+//! ignored (masked off) when heard; the directory keeps only bits 0 to 2
+//! (`SVC_MASK`), so its blob stays one older builds load.
+//!
+//! A ScanReq with header flag `FLAG_VOICE` asks for voice names: a modem
+//! with registrations answers it with a voice scan answer (type 15
+//! sub-type ScanResp) in place of its ScanResp, in the same slot rules.
 //!
 //! The scheduler state (`Discovery`) sits in the `Modem`, which runs it from
 //! `tick` (see `Modem::disc_tick`). Timing rules: a beacon every 300 s plus
@@ -31,7 +39,9 @@ pub const SVC_ACCEPTS: u8 = 1;
 pub const SVC_FORWARD: u8 = 2;
 /// Services bit 2: the Wi-Fi hotspot is on.
 pub const SVC_HOTSPOT: u8 = 4;
-/// The services bits this build knows.
+/// Services bit 3: voice names are registered here (a hint, not stored).
+pub const SVC_VOICE: u8 = 8;
+/// The services bits the directory keeps.
 pub const SVC_MASK: u8 = SVC_ACCEPTS | SVC_FORWARD | SVC_HOTSPOT;
 
 /// Beacon period and the most random delay added to it.
@@ -161,6 +171,9 @@ pub(crate) struct Answer {
     pub slot: u8,
     pub snr_x4: i16,
     pub scan_id: u8,
+    /// The ScanReq had `FLAG_VOICE`: answer with voice names when any are
+    /// registered.
+    pub voice: bool,
 }
 
 /// An `AT+SCAN` in progress.

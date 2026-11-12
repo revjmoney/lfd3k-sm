@@ -88,6 +88,10 @@ pub enum AtCmd<'a> {
     DirRemove(&'a str),
     /// `AT+DIR=0`: remove every unpinned entry.
     DirClear,
+    /// `AT+DIR=+V:<name>`: pin a voice name.
+    DirVoicePin(&'a str),
+    /// `AT+DIR=-V:<name>`: unpin a voice name.
+    DirVoiceUnpin(&'a str),
     /// `AT+MENU`: open the full-screen setup menu.
     Menu,
     /// `AT+NAME?`
@@ -316,7 +320,9 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
 }
 
 /// `AT+DIR?`, `AT+DIR=0`, `AT+DIR=+<name>`, `AT+DIR=-<name>` (the name is
-/// trimmed and must be a valid station name).
+/// trimmed and must be a valid station name), `AT+DIR=+V:<name>`,
+/// `AT+DIR=-V:<name>` (a voice name, same rule; `V:` in any case, never a
+/// station name since those have no `:`).
 fn parse_dir(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
     let v = match form {
         Form::Query => return Ok(AtCmd::DirList),
@@ -332,6 +338,21 @@ fn parse_dir(form: Form<'_>) -> Result<AtCmd<'_>, AtError> {
     } else {
         return Err(AtError::BadArg);
     };
+    let voice = name
+        .get(..2)
+        .filter(|p| p.eq_ignore_ascii_case("V:"))
+        .and_then(|_| name.get(2..))
+        .map(str::trim);
+    if let Some(v) = voice {
+        if !valid_station(v) {
+            return Err(AtError::BadArg);
+        }
+        return Ok(if pin {
+            AtCmd::DirVoicePin(v)
+        } else {
+            AtCmd::DirVoiceUnpin(v)
+        });
+    }
     if !valid_station(name) {
         return Err(AtError::BadArg);
     }

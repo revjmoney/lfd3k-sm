@@ -26,12 +26,27 @@
 //! or CRC, a bad name, padding that is not zero, unknown services bits, a
 //! bad tier byte, a pinned byte other than 0 or 1, duplicate names (any
 //! case), and more than 8 unpinned records.
+//!
+//! Blob v2 adds the pinned voice names (the voice directory, `voice/dir.rs`,
+//! lives here so the platform's one blob carries it). It is written only
+//! when at least one voice name is pinned; otherwise the blob is v1 byte
+//! for byte, which older builds still load. v2 is v1 with magic `LFD2`,
+//! version 2, and between the records and the CRC:
+//!
+//! - voice name count m (0 to 16)
+//! - m records of 17 bytes: name length (1), name (16, zero padded)
+//!
+//! `DIR_HEAD + n * DIR_REC + 1 + m * VOICE_REC + 2` bytes. `from_blob` takes
+//! v1 and v2 (magic and version must match) and refuses a bad voice name,
+//! padding that is not zero or a duplicate voice name (any case). Heard
+//! voice entries are never stored.
 
 use crate::discovery::{valid_station, SVC_MASK};
 use crate::frame::NAME_MAX;
 use crate::radio::RxInfo;
 use crate::settings::crc16;
 use crate::tier::{best_tier, Tier};
+use crate::voice::{VoiceDir, VOICE_DIR_MAX};
 
 pub const DIR_MAX: usize = 32;
 pub const DIR_BLOB_LEN: usize = 1024;
@@ -44,11 +59,17 @@ pub const DIR_REC: usize = 20;
 /// Margin `heard` uses for the best tier (the S20 default, 5 dB).
 pub const DEFAULT_MARGIN_X4: i16 = 20;
 
+/// Blob v2 voice name record bytes.
+pub const VOICE_REC: usize = 1 + NAME_MAX;
+
 const MAGIC: [u8; 4] = *b"LFD1";
 const VERSION: u8 = 1;
+const MAGIC2: [u8; 4] = *b"LFD2";
+const VERSION2: u8 = 2;
 const NO_TIER: u8 = 0xFF;
 
-const _: () = assert!(DIR_HEAD + DIR_MAX * DIR_REC + 2 <= DIR_BLOB_LEN);
+const _: () =
+    assert!(DIR_HEAD + DIR_MAX * DIR_REC + 1 + VOICE_DIR_MAX * VOICE_REC + 2 <= DIR_BLOB_LEN);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DirEntry {
@@ -111,6 +132,8 @@ pub struct Directory {
     clock: u32,
     /// Something the blob holds changed (see `take_changed`).
     changed: bool,
+    /// Voice names heard or pinned (only pins are in the blob).
+    voice: VoiceDir,
 }
 
 impl Default for Directory {
@@ -125,7 +148,53 @@ impl Directory {
             entries: [None; DIR_MAX],
             clock: 0,
             changed: false,
+            voice: VoiceDir::new(),
         }
+    }
+
+    /// The voice directory.
+    pub fn voice(&self) -> &VoiceDir {
+        &self.voice
+    }
+
+    /// A voice device was heard (see `VoiceDir::heard`). Never a blob
+    /// change: heard voice entries are not stored.
+    pub(crate) fn voice_heard(
+        &mut self,
+        name: &str,
+        label: &str,
+        station: &str,
+        tier: Tier,
+        now_ms: u32,
+        only_known: bool,
+    ) -> bool {
+        self.voice
+            .heard(name, label, station, tier, now_ms, only_known)
+    }
+
+    /// Pin a voice name (`AT+DIR=+V:<name>`). False for a bad name or when
+    /// every voice entry is pinned.
+    pub fn pin_voice(&mut self, name: &str) -> bool {
+        match self.voice.pin(name) {
+            Some(changed) => {
+                self.changed |= changed;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Unpin a voice name (`AT+DIR=-V:<name>`). False when it was not
+    /// pinned.
+    pub fn unpin_voice(&mut self, name: &str) -> bool {
+        let ok = self.voice.unpin(name);
+        self.changed |= ok;
+        ok
+    }
+
+    /// Forget unpinned voice devices heard through `station`.
+    pub(crate) fn voice_remove_via(&mut self, station: &str) {
+        self.voice.remove_via(station);
     }
 
     fn find(&self, name: &str) -> Option<usize> {
@@ -263,8 +332,10 @@ impl Directory {
         true
     }
 
-    /// Remove every unpinned entry (`AT+DIR=0`); returns how many.
+    /// Remove every unpinned entry (`AT+DIR=0`), stations and voice
+    /// devices; returns how many stations.
     pub fn clear_unpinned(&mut self) -> usize {
+        self.voice.clear_unpinned();
         let mut n = 0;
         for s in self.entries.iter_mut() {
             if s.as_ref().is_some_and(|e| !e.pinned) {
@@ -379,8 +450,37 @@ impl Directory {
             pos += DIR_REC;
             n += 1;
         }
+        // v2 only when a voice name is pinned: else v1, byte for byte.
+        let v2 = self.voice.pinned_names().next().is_some();
+        if v2 {
+            let count_at = pos;
+            pos += 1;
+            let mut m = 0u8;
+            for name in self.voice.pinned_names() {
+                let s = name.as_str();
+                let Some(rec) = out.get_mut(pos..pos + VOICE_REC) else {
+                    break;
+                };
+                if let Some((l, rest)) = rec.split_first_mut() {
+                    if let Some(d) = rest.get_mut(..s.len()) {
+                        *l = s.len() as u8;
+                        d.copy_from_slice(s.as_bytes());
+                    }
+                }
+                pos += VOICE_REC;
+                m += 1;
+            }
+            if let Some(c) = out.get_mut(count_at) {
+                *c = m;
+            }
+        }
+        let (magic, version) = if v2 {
+            (MAGIC2, VERSION2)
+        } else {
+            (MAGIC, VERSION)
+        };
         if let Some(d) = out.get_mut(..DIR_HEAD) {
-            d.copy_from_slice(&[MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], VERSION, n as u8]);
+            d.copy_from_slice(&[magic[0], magic[1], magic[2], magic[3], version, n as u8]);
         }
         let crc = crc16(out.get(..pos).unwrap_or(&[]));
         if let Some(d) = out.get_mut(pos..pos + 2) {
@@ -415,19 +515,51 @@ impl Directory {
         }
         self.clock = 0;
         self.changed = false;
+        self.voice.clear();
     }
 
     fn fill_from_blob(&mut self, b: &[u8]) -> Option<()> {
         self.clear_all();
+        let v2 = match (b.get(..4)?, *b.get(4)?) {
+            (m, VERSION) if m == MAGIC => false,
+            (m, VERSION2) if m == MAGIC2 => true,
+            _ => return None,
+        };
         let n = usize::from(*b.get(5)?);
-        if n > DIR_MAX || b.len() != DIR_HEAD + n * DIR_REC + 2 {
+        if n > DIR_MAX {
             return None;
         }
-        let end = DIR_HEAD + n * DIR_REC;
+        let rec_end = DIR_HEAD + n * DIR_REC;
+        let m = if v2 { usize::from(*b.get(rec_end)?) } else { 0 };
+        if m > VOICE_DIR_MAX {
+            return None;
+        }
+        let end = if v2 {
+            rec_end + 1 + m * VOICE_REC
+        } else {
+            rec_end
+        };
+        if b.len() != end + 2 {
+            return None;
+        }
         let body = b.get(..end)?;
         let want = u16::from_le_bytes([*b.get(end)?, *b.get(end + 1)?]);
-        if crc16(body) != want || body.get(..4)? != MAGIC || *body.get(4)? != VERSION {
+        if crc16(body) != want {
             return None;
+        }
+        for k in 0..m {
+            let at = rec_end + 1 + k * VOICE_REC;
+            let rec = body.get(at..at + VOICE_REC)?;
+            let len = usize::from(*rec.first()?);
+            let name_buf = rec.get(1..)?;
+            if !name_buf.get(len..)?.iter().all(|&x| x == 0) {
+                return None;
+            }
+            let name = core::str::from_utf8(name_buf.get(..len)?).ok()?;
+            // Bad name, duplicate (any case) or no room: refused.
+            if !self.voice.load_pin(name) {
+                return None;
+            }
         }
         let d = self;
         let mut unpinned = 0usize;

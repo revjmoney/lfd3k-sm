@@ -4,11 +4,16 @@
 //!
 //! Types 1 to 11 are call frames; 12 to 14 (Beacon, ScanReq, ScanResp) are
 //! discovery frames with call id 0 and payloads laid out in `discovery.rs`.
-//! Older builds drop 12 to 14 as `BadType`.
+//! Older builds drop 12 to 14 as `BadType`. Type 15 (`Voice`) is everything
+//! voice: its first payload byte is a sub-type (`voice::frames`); a type 15
+//! frame without a sub-type this build knows is `BadType`, as it is for
+//! every older build.
 //!
 //! Header flags (low nibble of byte1): bit 0 `FLAG_MORE` (another frame
 //! follows at once), bit 1 `FLAG_PING` (Keepalive: please reply), bit 2
-//! `FLAG_LZ` (Data: the payload is compressed, see `lz.rs`), bit 3 free.
+//! `FLAG_LZ` (Data: the payload is compressed, see `lz.rs`), bit 3
+//! `FLAG_VOICE` (ScanReq only: answer with voice names; older builds ignore
+//! it, `decode` looks only at the payload shape).
 //!
 //! Capabilities: a CallReq payload may end with one capability byte after
 //! the two names (the caller's offer), and the answerer's CallAck payload
@@ -25,6 +30,9 @@ use crate::tier::Tier;
 
 /// Header flag on Data: the payload is LZ compressed (see `lz.rs`).
 pub const FLAG_LZ: u8 = 4;
+/// Header flag on a ScanReq: a modem with voice names answers with a voice
+/// scan answer (type 15) in place of its normal ScanResp.
+pub const FLAG_VOICE: u8 = 8;
 /// Capability bit: the station can take LZ compressed Data frames.
 pub const CAP_LZ: u8 = 1;
 /// Bits a capability byte may use.
@@ -57,6 +65,8 @@ pub enum FrameType {
     ScanReq = 13,
     /// Discovery: the answer to a ScanReq. Call id 0.
     ScanResp = 14,
+    /// Everything voice: a sub-type byte, then its body (`voice::frames`).
+    Voice = 15,
 }
 
 impl FrameType {
@@ -76,6 +86,7 @@ impl FrameType {
             12 => FrameType::Beacon,
             13 => FrameType::ScanReq,
             14 => FrameType::ScanResp,
+            15 => FrameType::Voice,
             _ => return None,
         })
     }
@@ -135,6 +146,15 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
         _ => return Err(FrameError::TooShort),
     };
     let ftype = FrameType::from_u8(b0 >> 4).ok_or(FrameError::BadType)?;
+    // Type 15: any body, but only a sub-type this build knows.
+    if ftype == FrameType::Voice
+        && payload
+            .first()
+            .and_then(|&s| crate::voice::VSub::from_u8(s))
+            .is_none()
+    {
+        return Err(FrameError::BadType);
+    }
     let shape_ok = match ftype {
         FrameType::CallReq => parse_call_req(payload).is_ok(),
         FrameType::Train => match payload {
@@ -345,7 +365,9 @@ mod tests {
         assert_eq!(decode(&[0x60; MAX_FRAME + 1]), Err(FrameError::TooLong));
         assert_eq!(FrameType::from_u8(0), None);
         assert_eq!(FrameType::from_u8(12), Some(FrameType::Beacon));
-        assert_eq!(FrameType::from_u8(15), None);
+        // Type 15 is Voice since the voice calls: a bare header (no
+        // sub-type) is still BadType, as asserted above.
+        assert_eq!(FrameType::from_u8(15), Some(FrameType::Voice));
         // Wrong payload shapes for the types that have one.
         assert_eq!(decode(&[0xD1, 0x80, 1, 2, 3]), Err(FrameError::BadPayload));
         assert_eq!(
