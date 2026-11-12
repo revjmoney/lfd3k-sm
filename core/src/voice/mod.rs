@@ -19,5 +19,5 @@ pub use plan::{duplex_fits, encoded_bytes, talk_plan, CodecId, TalkMode, TalkPla
 pub use regs::{VoiceReg, VOICE_GRACE_MS, VOICE_REGS};
 pub use sched::{
     slot_layout, Floor, SlotLayout, VoiceSched, LISTEN_CHUNK, LISTEN_EVERY_MS, SLOT_GUARD_MS,
-    VOICE_MAX,
+    VOICE_MAX, VOICE_QUEUE,
 };

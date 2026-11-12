@@ -33,10 +33,17 @@
 //!   up to every slot when `frame_ms` is longer, and stretched where one
 //!   slot cannot hold voice and a Listener frame: SF12 listens every
 //!   second slot, with chunks of 20 bytes). With the floor free both send Listener frames every slot.
-//!   Where voice and a listener sub-slot fit in one slot ("room"), the
-//!   non-holder may also send a queued link frame (TierSet) in any slot.
+//!   Where voice and a listener sub-slot fit in one slot with 20 ms to
+//!   spare ("room": SF8, SF9, SF11), the non-holder may also send a queued
+//!   link frame (TierSet) in any slot.
 //! - **Replies:** a TierAck or a Keepalive reply goes out at once (after
 //!   the hold), never waiting for a sub-slot: the end that asked listens.
+//!
+//! **Voice buffers.** `Link::voice_push` holds up to `VOICE_QUEUE` (2)
+//! sealed frames: our send time moves within the slot (a listener sub-slot
+//! first, a slot that ran long), and one frame of slack keeps the app's
+//! steady frame clock from losing a frame each time it does. Each slot
+//! sends the oldest. `Link::voice_pop` hands out the last frame heard, once.
 //!
 //! **Floor (push to talk).** The caller arbitrates. Every frame carries
 //! `VF_KEY` (the sender's talk key is down); the caller's frames carry the
@@ -130,6 +137,14 @@ const DATA_HEAD: usize = 3;
 const LIS_HEAD: usize = 5;
 /// Longest sealed voice packet a Data frame carries.
 pub const VOICE_MAX: usize = MAX_PAYLOAD - 1 - DATA_HEAD;
+/// Voice frames `Link::voice_push` holds: one slot of jitter (our send time
+/// moves within the slot when a listener sub-slot comes first) on top of
+/// the frame for the next slot.
+pub const VOICE_QUEUE: usize = 2;
+/// Spare time a slot needs beyond voice and listener sub-slots before a
+/// non-holder may use it outside its listener slots ("room"): two 10 ms
+/// ticks of jitter, since the holder then runs on its own clock.
+const ROOM_MARGIN_MS: u32 = 20;
 /// Most slots in one listen period.
 const MAX_LISTEN_EVERY: u8 = 8;
 
@@ -189,7 +204,7 @@ pub struct SlotLayout {
     /// Most ARQ bytes per Listener frame on this tier (`LISTEN_CHUNK`, less
     /// where that buys a shorter listen period: SF12).
     pub chunk: u8,
-    /// Voice and a listener sub-slot fit in one slot.
+    /// Voice and a listener sub-slot fit in one slot with 20 ms to spare.
     pub room: bool,
 }
 
@@ -255,7 +270,7 @@ pub fn slot_layout(t: Tier) -> SlotLayout {
         listen_ms: lis,
         listen_every: k,
         chunk: chunk as u8,
-        room: voice_ms.saturating_add(lis) <= frame_ms,
+        room: voice_ms.saturating_add(lis).saturating_add(ROOM_MARGIN_MS) <= frame_ms,
     }
 }
 
@@ -364,8 +379,11 @@ pub struct VoiceSched {
     due_end: u32,
     /// When we last sent a Listener frame.
     pub(crate) last_lis: u32,
-    tx: [u8; VOICE_MAX],
-    tx_len: u8,
+    /// Voice frames waiting to go out (a ring of `VOICE_QUEUE`).
+    tx: [[u8; VOICE_MAX]; VOICE_QUEUE],
+    tx_len: [u8; VOICE_QUEUE],
+    tx_head: usize,
+    tx_count: usize,
     rx: [u8; VOICE_MAX],
     rx_len: u8,
 }
@@ -408,8 +426,10 @@ impl VoiceSched {
             missed: 0,
             due_end: 0,
             last_lis: 0,
-            tx: [0; VOICE_MAX],
-            tx_len: 0,
+            tx: [[0; VOICE_MAX]; VOICE_QUEUE],
+            tx_len: [0; VOICE_QUEUE],
+            tx_head: 0,
+            tx_count: 0,
             rx: [0; VOICE_MAX],
             rx_len: 0,
         }
@@ -432,7 +452,7 @@ impl VoiceSched {
         self.peer_key = false;
         self.quiet_ms = 0;
         self.missed = 0;
-        self.tx_len = 0;
+        self.tx_count = 0;
         self.rx_len = 0;
     }
 
@@ -515,18 +535,31 @@ impl VoiceSched {
         self.key = down;
     }
 
-    /// Queue one sealed voice frame; false if one is already waiting or it
-    /// is empty or too long.
+    /// Queue one sealed voice frame; false if `VOICE_QUEUE` frames are
+    /// already waiting or it is empty or too long.
     pub(crate) fn push_voice(&mut self, sealed: &[u8]) -> bool {
-        if self.tx_len > 0 || sealed.is_empty() || sealed.len() > VOICE_MAX {
+        if self.tx_count >= VOICE_QUEUE || sealed.is_empty() || sealed.len() > VOICE_MAX {
             return false;
         }
-        if let Some(d) = self.tx.get_mut(..sealed.len()) {
+        let i = (self.tx_head + self.tx_count) % VOICE_QUEUE;
+        if let (Some(d), Some(l)) = (
+            self.tx.get_mut(i).and_then(|b| b.get_mut(..sealed.len())),
+            self.tx_len.get_mut(i),
+        ) {
             d.copy_from_slice(sealed);
-            self.tx_len = sealed.len() as u8;
+            *l = sealed.len() as u8;
+            self.tx_count += 1;
             return true;
         }
         false
+    }
+
+    /// Length of the oldest waiting voice frame (0 when none).
+    fn head_len(&self) -> u8 {
+        if self.tx_count == 0 {
+            return 0;
+        }
+        self.tx_len.get(self.tx_head).copied().unwrap_or(0)
     }
 
     /// The last voice frame heard (each one once).
@@ -552,13 +585,28 @@ impl VoiceSched {
         }
     }
 
-    /// A voice frame waits and fits the plan of the current slot.
+    /// The oldest waiting voice frame fits the plan of the current slot.
     pub(crate) fn voice_waiting(&self, t: Tier) -> bool {
-        self.tx_len > 0 && self.tx_len <= talk_plan(t).max_sealed_bytes
+        let n = self.head_len();
+        n > 0 && n <= talk_plan(t).max_sealed_bytes
     }
 
+    /// Any voice frame waits.
+    pub(crate) fn voice_queued(&self) -> bool {
+        self.tx_count > 0
+    }
+
+    /// Drop the oldest waiting voice frame.
     pub(crate) fn drop_voice(&mut self) {
-        self.tx_len = 0;
+        if self.tx_count > 0 {
+            self.tx_head = (self.tx_head + 1) % VOICE_QUEUE;
+            self.tx_count -= 1;
+        }
+    }
+
+    /// Drop every waiting voice frame.
+    pub(crate) fn clear_voice(&mut self) {
+        self.tx_count = 0;
     }
 
     /// Caller: start the voice slots now (slot 0).
@@ -834,7 +882,7 @@ impl VoiceSched {
         now: u32,
         out: &mut [u8],
     ) -> Option<usize> {
-        let n = usize::from(self.tx_len);
+        let n = usize::from(self.head_len());
         if n == 0 {
             return None;
         }
@@ -842,9 +890,9 @@ impl VoiceSched {
         let head = [VSub::Data as u8, self.flags(false), self.late(now), sack];
         p.get_mut(..head.len())?.copy_from_slice(&head);
         p.get_mut(head.len()..head.len() + n)?
-            .copy_from_slice(self.tx.get(..n)?);
+            .copy_from_slice(self.tx.get(self.tx_head)?.get(..n)?);
         let len = frame::encode(&self.header(call_id, ack), p.get(..head.len() + n)?, out).ok()?;
-        self.tx_len = 0;
+        self.drop_voice();
         Some(len)
     }
 

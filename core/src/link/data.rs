@@ -341,8 +341,10 @@ impl Link {
     }
 
     /// Queue one sealed voice frame for the next slot we may talk in;
-    /// false if a frame is already waiting (or no voice call is up, or it
-    /// is empty or longer than `VOICE_MAX`).
+    /// false if `VOICE_QUEUE` (2) frames are already waiting (or no voice
+    /// call is up, or it is empty or longer than `VOICE_MAX`). In push to
+    /// talk, frames queued while the floor is not ours are dropped at our
+    /// next sub-slot.
     pub fn voice_push(&mut self, sealed: &[u8]) -> bool {
         self.voice.on && self.is_connected() && self.vs.push_voice(sealed)
     }
@@ -552,9 +554,13 @@ impl Link {
             *listener = false;
             return self.vs.build_data(self.call_id, ack, now, out);
         }
-        // Not ours to send now (or too long for this plan, or replaced by
-        // control bytes): a stale frame is never sent later.
-        self.vs.drop_voice();
+        if !self.vs.may_talk() {
+            // Not ours to send: a stale frame is never sent later.
+            self.vs.clear_voice();
+        } else if self.vs.voice_queued() {
+            // Replaced by control bytes, or too long for this plan.
+            self.vs.drop_voice();
+        }
         *listener = true;
         let snr = self.last_snr;
         let call_id = self.call_id;
