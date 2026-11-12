@@ -15,6 +15,11 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"] }
 getrandom = "0.4"
 hkdf = "0.13"
+# Linking devices (spec 7.2): key confirm, and SPAKE2 keyed by the code.
+# spake2 0.5 is a prerelease, pinned exactly; it is the release built on the
+# same curve25519-dalek 5, sha2 0.11 and hkdf 0.13 as the rest of the crate.
+hmac = { version = "0.13", features = ["zeroize"] }
+spake2 = { version = "=0.5.0-pre.0", features = ["getrandom"] }
 # zeroize: wipes hash and HMAC state (through digest), so HKDF state is wiped too.
 sha2 = { version = "0.11", features = ["zeroize"] }
 x25519-dalek = { version = "3", default-features = false, features = ["precomputed-tables", "getrandom", "zeroize"] }

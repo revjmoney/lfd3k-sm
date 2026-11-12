@@ -3,7 +3,8 @@
 //! Every app install has one long term **device key** (Ed25519). The first
 //! device a person sets up also makes a **person key** (Ed25519) and signs its
 //! own device key with it, giving a [`DeviceCert`]. A device linked later
-//! (Task 3) holds only a cert made by the person key of another device.
+//! ([`crate::link`]) gets that person key and the name over a code protected
+//! exchange and signs its own device key with it, keeping its own label.
 //!
 //! The identity file lives in app storage. It holds private keys, so it is
 //! written owner only on Unix (mode 0600; on Windows the user profile ACL
@@ -18,7 +19,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Longest name or label (bytes) carried in a cert. Voice names are 1 to 16
-/// printable ASCII (spec 5.1); longer input is cut at a char boundary.
+/// printable ASCII (spec 5.1). A longer name or label is refused when a cert
+/// is made and makes [`DeviceCert::verify`] fail; it is never cut short.
 pub const MAX_FIELD: usize = 64;
 
 const FILE_MAGIC: &[u8; 8] = b"LFD3KID1";
@@ -41,43 +43,51 @@ impl DeviceCert {
     /// The bytes the person key signs, the one place both signing and
     /// checking use: the domain tag `"LFD3K CERT v1"`, then each of
     /// device_pub (32), name and label as one length byte and its bytes.
-    pub(crate) fn signed_bytes(device_pub: &[u8; 32], name: &str, label: &str) -> Vec<u8> {
+    /// `None` when the name or the label is longer than [`MAX_FIELD`]: such
+    /// a cert is never made and never checks out.
+    pub(crate) fn signed_bytes(device_pub: &[u8; 32], name: &str, label: &str) -> Option<Vec<u8>> {
+        if !field_ok(name) || !field_ok(label) {
+            return None;
+        }
         let mut m = Vec::with_capacity(CERT_TAG.len() + 3 + 32 + name.len() + label.len());
         m.extend_from_slice(CERT_TAG);
         m.push(32);
         m.extend_from_slice(device_pub);
         push_field(&mut m, name);
         push_field(&mut m, label);
-        m
+        Some(m)
     }
 
-    /// Make a cert for `device_pub`, signed by `person`.
-    pub(crate) fn sign(person: &SigningKey, device_pub: [u8; 32], name: &str, label: &str) -> Self {
-        let name = cut(name);
-        let label = cut(label);
-        let sig = person.sign(&Self::signed_bytes(&device_pub, &name, &label));
-        DeviceCert {
+    /// Make a cert for `device_pub`, signed by `person`. `None` when the name
+    /// or the label is longer than [`MAX_FIELD`].
+    pub(crate) fn sign(person: &SigningKey, device_pub: [u8; 32], name: &str, label: &str) -> Option<Self> {
+        let sig = person.sign(&Self::signed_bytes(&device_pub, name, label)?);
+        Some(DeviceCert {
             person_pub: person.verifying_key().to_bytes(),
             device_pub,
-            name,
-            label,
+            name: name.to_string(),
+            label: label.to_string(),
             sig: sig.to_bytes(),
-        }
+        })
     }
 
-    /// True when the person key really signed this device key, name and label.
+    /// True when the person key really signed this device key, name and
+    /// label. False for a name or label longer than [`MAX_FIELD`].
     pub fn verify(&self) -> bool {
+        let Some(m) = Self::signed_bytes(&self.device_pub, &self.name, &self.label) else {
+            return false;
+        };
         let Ok(person) = VerifyingKey::from_bytes(&self.person_pub) else {
             return false;
         };
         let sig = Signature::from_bytes(&self.sig);
-        person
-            .verify_strict(&Self::signed_bytes(&self.device_pub, &self.name, &self.label), &sig)
-            .is_ok()
+        person.verify_strict(&m, &sig).is_ok()
     }
 
     /// Wire form, without the device key (the carrier already holds it):
     /// person_pub (32), name length (1), name, label length (1), label, sig (64).
+    /// Only for certs made by `sign` or read by `decode`, whose fields are
+    /// never longer than [`MAX_FIELD`].
     pub(crate) fn encode_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.person_pub);
         push_field(out, &self.name);
@@ -99,14 +109,13 @@ impl DeviceCert {
     }
 }
 
-fn cut(s: &str) -> String {
-    let mut end = s.len().min(MAX_FIELD);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s.get(..end).unwrap_or("").to_string()
+/// True when `s` fits a cert field (at most [`MAX_FIELD`] bytes).
+pub(crate) fn field_ok(s: &str) -> bool {
+    s.len() <= MAX_FIELD
 }
 
+/// One length byte and the bytes. Callers check [`field_ok`] first; the
+/// clamp only keeps the length byte and the bytes written in step.
 fn push_field(out: &mut Vec<u8>, s: &str) {
     let b = s.as_bytes();
     let n = b.len().min(MAX_FIELD);
@@ -142,11 +151,15 @@ pub struct Identity {
 impl Identity {
     /// A first device: makes a device key and a person key, and signs the
     /// device key with the person key (see `DeviceCert::signed_bytes`).
-    pub fn generate(name: &str, label: &str) -> Self {
+    /// `None` when the name or the label is longer than [`MAX_FIELD`] bytes.
+    pub fn generate(name: &str, label: &str) -> Option<Self> {
+        if !field_ok(name) || !field_ok(label) {
+            return None;
+        }
         let device = random_key();
         let person = random_key();
-        let cert = DeviceCert::sign(&person, device.verifying_key().to_bytes(), name, label);
-        Identity { device, person: Some(person), cert: Some(cert) }
+        let cert = DeviceCert::sign(&person, device.verifying_key().to_bytes(), name, label)?;
+        Some(Identity { device, person: Some(person), cert: Some(cert) })
     }
 
     /// The device public key.
@@ -162,6 +175,33 @@ impl Identity {
     /// The cert for this device key, if any.
     pub fn cert(&self) -> Option<&DeviceCert> {
         self.cert.as_ref()
+    }
+
+    /// The person private key seed, for linking another device
+    /// ([`crate::link`]). Wiped when dropped.
+    pub(crate) fn person_seed(&self) -> Option<Zeroizing<[u8; 32]>> {
+        self.person.as_ref().map(|p| {
+            let mut seed = Zeroizing::new([0u8; 32]);
+            seed.copy_from_slice(p.as_bytes());
+            seed
+        })
+    }
+
+    /// Take a person key and name from another of this person's devices
+    /// ([`crate::link`]): this device keeps its own device key and the label
+    /// of its current cert, and gets a new cert signed by the adopted person
+    /// key. Nothing changes unless the whole new cert is made: `None` when
+    /// this device has no cert (so no label) or the name is too long.
+    pub(crate) fn adopt_person(&mut self, seed: &[u8; 32], name: &str) -> Option<()> {
+        let label = self.cert.as_ref()?.label.clone();
+        let person = SigningKey::from_bytes(seed);
+        let cert = DeviceCert::sign(&person, self.device_pub(), name, &label)?;
+        if !cert.verify() {
+            return None;
+        }
+        self.person = Some(person);
+        self.cert = Some(cert);
+        Some(())
     }
 
     /// Sign with the device key.

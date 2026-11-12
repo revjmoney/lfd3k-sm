@@ -70,7 +70,7 @@ It and everything it pulls in are dev-only for proptest (chacha20, cpufeatures, 
 
 ### The FLOWTRON SCRAMBLER (voice crate)
 
-Standard primitives only (spec section 7), from the RustCrypto and dalek projects. chacha20poly1305 has default features off (`alloc`, `zeroize` on); ed25519-dalek has default features off (`fast`, `zeroize`); x25519-dalek has default features off (`precomputed-tables`, `getrandom`, `zeroize`); sha2 has `zeroize` on (wipes hash and HMAC state). Licenses as declared in each crate's Cargo.toml (checked with `cargo metadata`). Crates marked "also above" are already listed for another part.
+Standard primitives only (spec section 7), from the RustCrypto and dalek projects. chacha20poly1305 has default features off (`alloc`, `zeroize` on); ed25519-dalek has default features off (`fast`, `zeroize`); x25519-dalek has default features off (`precomputed-tables`, `getrandom`, `zeroize`); sha2 has `zeroize` on (wipes hash and HMAC state); hmac has `zeroize` on; spake2 has default features off (`getrandom` on). Licenses as declared in each crate's Cargo.toml (checked with `cargo metadata`). Crates marked "also above" are already listed for another part.
 
 | Crate | Version | License | Why |
 |-------|---------|---------|-----|
@@ -86,7 +86,8 @@ Standard primitives only (spec section 7), from the RustCrypto and dalek project
 | chacha20 | 0.10.2 | MIT OR Apache-2.0 | Stream cipher, via chacha20poly1305 (also above, sim tests) |
 | poly1305, universal-hash | 0.9.1, 0.6.1 | Apache-2.0 OR MIT, MIT OR Apache-2.0 | Authenticator, via chacha20poly1305 |
 | aead, cipher, inout | 0.6.1, 0.5.2, 0.2.6 | MIT OR Apache-2.0 | AEAD and cipher traits, via chacha20poly1305 |
-| hkdf, hmac | 0.13.0, 0.13.0 | MIT OR Apache-2.0 | HKDF-SHA256 for the two direction keys |
+| hkdf, hmac | 0.13.0, 0.13.0 | MIT OR Apache-2.0 | HKDF-SHA256 for the two direction keys and the link keys; hmac is also a direct dependency for the HMAC-SHA256 key confirm when linking devices (`voice/src/link.rs`) |
+| spake2 | 0.5.0-pre.0 (a prerelease, pinned exactly: the stable 0.4 is built on curve25519-dalek 4, sha2 0.10 and hkdf 0.12, which would add a second copy of each) | MIT OR Apache-2.0 | SPAKE2 (Ed25519 group) keyed by the 6 digit code when linking your own devices (spec 7.2, `voice/src/link.rs`) |
 | sha2 | 0.11.1 | MIT OR Apache-2.0 | SHA-256 (commit, words, HKDF) and SHA-512 (Ed25519) |
 | digest, block-buffer, crypto-common, hybrid-array, typenum, const-oid | 0.11.3, 0.12.1, 0.2.2, 0.4.15, 1.20.1, 0.10.3 | MIT OR Apache-2.0 (const-oid Apache-2.0 OR MIT) | Hash and array plumbing, via sha2 and the others |
 | cmov, ctutils | 0.5.4, 0.4.8 | Apache-2.0 OR MIT | Constant time helpers, via the RustCrypto crates |
