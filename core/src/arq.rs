@@ -69,6 +69,14 @@ impl ArqTx {
 
     /// Queue bytes; returns how many were accepted.
     pub fn push(&mut self, data: &[u8]) -> usize {
+        self.push_max(data, CHUNK)
+    }
+
+    /// Queue bytes in chunks of at most `max` bytes (1 to `CHUNK`); returns
+    /// how many were accepted. A voice call's listener frames carry small
+    /// chunks (`voice::sched`).
+    pub fn push_max(&mut self, data: &[u8], max: usize) -> usize {
+        let max = max.clamp(1, CHUNK);
         let mut done = 0;
         while done < data.len() {
             // Reuse the newest slot if it is unsent and has room.
@@ -76,7 +84,7 @@ impl ArqTx {
             if self.count > 0 {
                 let r = self.ring(self.count - 1);
                 if let Some(s) = self.slots.get(r) {
-                    if !s.sent && (s.len as usize) < CHUNK {
+                    if !s.sent && (s.len as usize) < max {
                         idx = Some(r);
                     }
                 }
@@ -97,7 +105,10 @@ impl ArqTx {
                 break;
             };
             let at = s.len as usize;
-            let n = (CHUNK - at).min(data.len() - done);
+            let n = max.saturating_sub(at).min(data.len() - done);
+            if n == 0 {
+                break;
+            }
             if let (Some(dst), Some(src)) = (b.get_mut(at..at + n), data.get(done..done + n)) {
                 dst.copy_from_slice(src);
             }
@@ -171,6 +182,15 @@ impl ArqTx {
                 }
             }
         }
+    }
+
+    /// Length of the longest chunk queued or awaiting acknowledgement.
+    pub fn longest(&self) -> usize {
+        (0..self.count)
+            .filter_map(|i| self.slots.get(self.ring(i)))
+            .map(|s| s.len as usize)
+            .max()
+            .unwrap_or(0)
     }
 
     /// True when nothing is queued or awaiting acknowledgement.

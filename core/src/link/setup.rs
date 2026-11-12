@@ -522,6 +522,16 @@ impl Link {
                 }
                 _ => false,
             },
+            // A late pickup that never got its TierSet: the call's Hangup
+            // means another device had it. Stop, silently.
+            State::AwaitTierSet
+                if self.role == Role::Answerer && !self.got_tierset && ft == FrameType::Hangup =>
+            {
+                self.q_retain(|f| f.urgent);
+                self.emit(Event::AnsweredElsewhere);
+                self.go_idle();
+                true
+            }
             State::AwaitTierSet | State::Probe
                 if self.role == Role::Answerer && ft == FrameType::TierSet =>
             {

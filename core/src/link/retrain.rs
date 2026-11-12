@@ -13,6 +13,11 @@ impl Link {
         }
     }
 
+    /// A TierSet waits in the queue.
+    fn q_has_tierset(&self) -> bool {
+        (0..self.q_len).any(|i| self.q.get((self.q_head + i) % QLEN).is_some_and(is_tierset))
+    }
+
     /// Drop the pending retrain and any of its TierSets still queued.
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
@@ -43,8 +48,18 @@ impl Link {
     }
 
     pub(super) fn connected_timers(&mut self, sregs: &SRegs, now: u32) {
+        if self.voice.on && !self.vs.slots {
+            self.voice_ready_tick(now);
+        }
         let rto = rto_ms(self.tier);
-        let silent = since(now, self.last_rx);
+        // Voice slots: only slots in which the peer was due to send count
+        // as silence, and missed ones stand for unanswered pings (an
+        // answerer still waiting for the caller's clock counts time).
+        let (silent, pings) = if self.vs.slots && self.vs.synced() {
+            (self.vs.quiet_ms, self.vs.missed)
+        } else {
+            (since(now, self.last_rx), self.ping_out)
+        };
         if silent >= rto.saturating_mul(8) {
             self.resync_prev = self.tier;
             self.tier = Tier::ROBUST;
@@ -66,6 +81,9 @@ impl Link {
             if since(now, self.pend_last) >= self.pend_wait {
                 if self.pend_tries >= 3 {
                     self.clear_pending(); // resync recovers if the peer moved
+                } else if self.vs.slots && self.q_has_tierset() {
+                    // Still waiting for our sub-slot: no second copy.
+                    self.pend_last = now;
                 } else {
                     self.pend_tries += 1;
                     self.pend_last = now;
@@ -78,10 +96,7 @@ impl Link {
         }
         // Real loss: 4 RTOs silent and at least two probes unanswered (one
         // lost keepalive reply is not enough).
-        if silent >= rto.saturating_mul(4).saturating_add(off)
-            && self.ping_out >= 2
-            && !self.silence_done
-        {
+        if silent >= rto.saturating_mul(4).saturating_add(off) && pings >= 2 && !self.silence_done {
             self.silence_done = true;
             if let Some(s) = self.tier.slower() {
                 self.request(s, now);

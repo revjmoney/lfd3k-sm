@@ -33,7 +33,9 @@
 //! Voice calls (see `voice::call`): set up with type 15 sub-types (voice
 //! CallReq, Answer, Decline) handed in by the Modem, which owns the
 //! registrations; then today's Train, TierSet and TierAck, the voice Train
-//! and setup TierSet carrying the answer token.
+//! and setup TierSet carrying the answer token. Once connected the call
+//! runs on data timing until both apps are ready for voice, then on the
+//! voice scheduler's fixed slots (see `voice::sched`; wiring in `data.rs`).
 
 use crate::arq::{ArqRx, ArqTx, CHUNK};
 use crate::at::{SRegs, REG_LZ};
@@ -41,6 +43,7 @@ use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
 use crate::voice::call::{self as vcall, VoiceCallInfo, VoiceLink};
+use crate::voice::sched::VoiceSched;
 
 mod data;
 mod retrain;
@@ -282,6 +285,8 @@ pub struct Link {
     moved: u32,
     /// Voice call state (see `voice::call`).
     voice: VoiceLink,
+    /// Voice slots, floor and voice buffers (see `voice::sched`).
+    vs: VoiceSched,
 }
 
 impl Default for Link {
@@ -355,6 +360,7 @@ impl Link {
             lz_air: 0,
             moved: 0,
             voice: VoiceLink::new(),
+            vs: VoiceSched::new(),
         }
     }
 
@@ -481,7 +487,7 @@ impl Link {
     /// Queue host bytes for the peer; returns bytes accepted.
     pub fn push_data(&mut self, data: &[u8]) -> usize {
         let n = if self.is_connected() {
-            self.tx.push(data)
+            self.arq_push(data)
         } else {
             0
         };
@@ -612,6 +618,7 @@ impl Link {
         self.ka_reply = false;
         self.got_tierset = false;
         self.voice.on = false;
+        self.vs.reset();
         self.start = now;
         self.last_periodic = now;
         self.tier = Tier::ROBUST;
@@ -620,6 +627,7 @@ impl Link {
 
     fn go_idle(&mut self) {
         self.state = State::Idle;
+        self.vs.reset();
         self.call_id = 0;
         self.tier = Tier::ROBUST;
         self.pending = None;

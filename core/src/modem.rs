@@ -43,7 +43,8 @@
 //! handed to the link, which rings (`Event::VoiceRing`); `voice_dial`,
 //! `voice_answer`, `voice_decline` and `voice_call` are the voice app's
 //! side, `ATDV` the terminal's. A voice call keeps the host in command
-//! mode.
+//! mode. Once connected, its voice data and listener frames (the voice
+//! scheduler, `voice/sched.rs`) go to the link (`Link::on_voice_air`).
 //!
 //! Setup menu (see `menu/`): `AT+MENU` (or, with S32 = 1, the first host
 //! byte after boot) opens a full-screen ANSI menu. While it is open every
@@ -1330,7 +1331,7 @@ impl Modem {
             // Voice frames never reach `Link::on_frame`; voice call setup
             // frames go to the link from `on_voice`.
             FrameType::Voice => {
-                self.on_voice(f.payload, h.call_id, info, now);
+                self.on_voice(f.payload, h, info, now);
                 false
             }
             FrameType::CallReq => self.screen_call_req(f.payload, h.call_id, info, now),
@@ -1478,7 +1479,8 @@ impl Modem {
 
     /// A type 15 frame heard: voice beacons and voice scan answers feed the
     /// directories; voice call setup frames go to the link.
-    fn on_voice(&mut self, p: &[u8], call_id: u8, info: RxInfo, now: u32) {
+    fn on_voice(&mut self, p: &[u8], h: Header, info: RxInfo, now: u32) {
+        let call_id = h.call_id;
         let Some((&s, body)) = p.split_first() else {
             return;
         };
@@ -1502,6 +1504,11 @@ impl Modem {
             Some(VSub::CallReq) => self.on_voice_req(body, call_id, info, now),
             Some(s @ (VSub::Answer | VSub::Decline)) => {
                 self.link.on_voice_frame(s, call_id, body, now);
+            }
+            // The voice scheduler's frames of a call in progress.
+            Some(s @ (VSub::Data | VSub::Listener)) => {
+                self.link
+                    .on_voice_air(s, h, body, info, &self.cfg.sregs, now);
             }
             _ => {}
         }
