@@ -1,12 +1,12 @@
 # Installing the multimode image
 
-For the controller and Rev. The image `multimode/out/full-16mb.bin` holds the bootloader,
+The image `multimode/out/full-16mb.bin` holds the bootloader,
 the partition table, the picker, and the four modes (MESH, LFD3K-SM, SIMIAN RADAR, RNODE),
 plus Simian's camera database. It covers all 16 MB of the flash, so writing it replaces
 everything on the board, including the old LFD3K-SM settings, RNode and Meshtastic data.
 
 Nothing here runs by itself. The build script never opens a port; only these steps do,
-and only the controller runs them, after Rev says go on the wipe.
+and only once you have a verified backup and have decided to wipe the board.
 
 ## 0. Before anything
 
@@ -14,7 +14,8 @@ and only the controller runs them, after Rev says go on the wipe.
   (add `-Build` to rebuild every piece first). It stops if a piece is missing or a
   size or layout check fails. Result: `multimode\out\full-16mb.bin`, `flash_args.txt`, `manifest.txt`.
 * Read `manifest.txt` and keep it with the backup. It lists the SHA-256 of every piece and of the image.
-* Identify the board: USB VID 303A, PID 1001, MAC 88:56:A6:96:16:FC. If any of these differ, stop.
+* Identify the board: a Heltec V4 shows USB VID 303A, PID 1001. Note its MAC (`esptool.py -p COMn read_mac`)
+  and check it again before every write, so the right board is the one being wiped.
 * Esptool is the PlatformIO copy: `%USERPROFILE%\.platformio\packages\tool-esptoolpy\esptool.py` (version 4.11.0, PlatformIO `tool-esptoolpy`).
   Below, `COMn` is the board's port.
 
@@ -38,7 +39,7 @@ Keep the file somewhere safe, outside `multimode\out`. Record its SHA-256 in the
 
 ## 3. Erase
 
-Only after Rev confirms the wipe again, right before this step. Use only this esptool line,
+Only after a verified backup, and once you are sure you want the wipe. Use only this esptool line,
 never `pio run -d firmware -e heltec_v4 -t erase` (or `-t upload`) later: on a board that already
 runs the multimode layout that would wipe every mode (the env refuses both, see
 `firmware/platformio.ini`).
@@ -83,7 +84,7 @@ counts as a crash for the picker, so the first boot would show LAST MODE CRASHED
   appended SHA-256, last 32 bytes of the .bin) is
   `f312de7d8ec431fe1b80a84067cb01932cdeeaa7cb24f69e1b499f11c0e61d12`. Read what the device reports
   first, compare, and only then set the hash.
-  Done on Rev's V4 (2026-11-11, rnodeconf 1.3.5): `rnodeconf COMn -i` (read only), then
+  Tested on a V4 (2026-11-11, rnodeconf 1.3.5): `rnodeconf COMn -i` (read only), then
   `rnodeconf COMn -r --product c3 --model c8 --hwrev 1` (Heltec LoRa32 v4 with PA), then
   `rnodeconf COMn -L` (must print the hash above), then `rnodeconf COMn -H <that hash>`.
   TRAP: on the V4's native USB, `-H` closes the port right after sending and only the first 4 bytes

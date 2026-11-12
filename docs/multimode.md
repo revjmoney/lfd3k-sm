@@ -1,7 +1,7 @@
 # Multimode: four firmwares on one Heltec V4
 
-For Rev. One board, four firmwares, one small program in front that lets you pick. This is the
-plain language guide. The engineering details are in `multimode/README.md`, and the install steps
+One board, four firmwares, one small program in front that lets you pick. This is the plain
+language guide. The engineering details are in `multimode/README.md`, and the install steps
 (backup, erase, write) are in `multimode/INSTALL.md`.
 
 ## The four modes
@@ -9,7 +9,7 @@ plain language guide. The engineering details are in `multimode/README.md`, and 
 | Menu name | What it is | Lives in |
 |---|---|---|
 | LFD3K-SM | The LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM, the Hayes style LoRa and Wi-Fi modem. The default. | slot ota_1 |
-| SIMIAN RADAR | Your listen only pocket scanner: license plate cameras, trackers, smart glasses. | slot ota_2 |
+| SIMIAN RADAR | A listen only pocket scanner: license plate cameras, trackers, smart glasses. | slot ota_2 |
 | RNODE | The RNode firmware (official 1.86 Heltec V4PA build) so the board works as a Reticulum LoRa interface. | slot ota_3 |
 | MESH | Meshtastic 2.7.26 for the Heltec V4, patched so it lives politely next to the others. | slot ota_0 |
 
@@ -127,7 +127,7 @@ Two cautions that follow from the layout:
 * **In RNODE mode, do not long-press PRG.** That may start RNode's console feature, which may mount and
   format the first SPIFFS partition, which is Meshtastic's data (unverified against the 1.86 source).
 
-## Your settings stay yours
+## Each mode keeps its own settings
 
 * LFD3K-SM keeps its settings and station directory in its own storage area (`lfd3k_nvs`). The other
   modes only use the shared area, so nothing they do to it can touch the modem's Wi-Fi name, password,
@@ -136,7 +136,7 @@ Two cautions that follow from the layout:
   shared area.
 * The picker's own "last mode" lives in a separate small area of its own.
 * After a full install the settings area is empty, so the modem comes up with defaults. Retype
-  `AT+WSTA` (Wi-Fi name and password) and your other settings. Your old ones are in the backup.
+  `AT+WSTA` (Wi-Fi name and password) and the other settings. The old ones are in the backup.
 
 ## Meshtastic and the shared Bluetooth bonds
 
@@ -153,21 +153,19 @@ other modes.
 
 ## Source code and licences
 
-* **LFD3K-SM, the picker and the bootloader override, and the install tools** are yours: closed
-  source, private, never pushed.
-* **Simian Radar** is your own project, licensed GPL v3, in `F:\simian-radar` (branch `multimode`). Its
-  source goes with its binary.
-* **MESH** is Meshtastic, GPL v3, and the image is patched, so the patched source is kept in its own
-  repository, `F:\meshtastic-axis` (branch `axis-multimode`, based on tag v2.7.26.54e0d8d). `PATCHES.md`
-  there lists every change. Anyone who is given that binary must also be given that source.
-* **RNODE** is the official RNode firmware 1.86 for the Heltec V4PA, GPL v3, installed exactly as
+* **LFD3K-SM, the picker, the bootloader override and the install tools** are all in this repository:
+  free software, GPLv3 or later with an attribution term (see `NOTICE.md`).
+* **Simian Radar** is Rev. J. Money's own project, GPLv3, at https://github.com/revjmoney/simian-radar
+  (branch `multimode` has the build that runs from its slot here).
+* **MESH** is Meshtastic, GPLv3. The image here is patched, so the patched source is kept as its own
+  fork of meshtastic/firmware (branch `axis-multimode`, based on tag v2.7.26.54e0d8d), with a
+  `PATCHES.md` that lists every change. Anyone given that binary is also given that source.
+* **RNODE** is the official RNode firmware 1.86 for the Heltec V4PA, GPLv3, installed exactly as
   released (the application image only, not changed). Its source is the upstream RNode_Firmware
-  project at the 1.86 release. If the binary is ever handed to someone, hand them the matching source
-  or an offer for it too.
+  project at the 1.86 release.
 
-The closed parts and the open parts are separate programs in separate slots. They never link together:
-the picker only starts an image, it does not contain one. That is what keeps the GPL images GPL and the
-closed parts closed.
+Each mode is a separate program in its own slot. They never link together: the picker only starts an
+image, it does not contain one, so every image keeps its own licence.
 
 ## Where things are
 
