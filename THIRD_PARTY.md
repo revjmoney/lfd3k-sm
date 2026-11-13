@@ -75,6 +75,7 @@ Standard primitives only (spec section 7), from the RustCrypto and dalek project
 | Crate | Version | License | Why |
 |-------|---------|---------|-----|
 | x25519-dalek | 3.0.0 | BSD-3-Clause | Per call X25519 key exchange |
+| rand_core | 0.10.1 (already in the tree through x25519-dalek; default features off) | MIT OR Apache-2.0 | Only its random source trait, for a fixed byte source that feeds the V223.LRA.92 Annex C ephemeral secrets into the handshake in a test (`Handshake::start_with_ephemeral_for_test_vectors`, never used by an app) |
 | ed25519-dalek | 3.0.0 | BSD-3-Clause | Device and person keys, hello and cert signatures |
 | curve25519-dalek | 5.0.0 | BSD-3-Clause | Curve arithmetic, via the two dalek crates |
 | curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | Proc macro of curve25519-dalek, build time only |

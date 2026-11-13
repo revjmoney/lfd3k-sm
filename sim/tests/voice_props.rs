@@ -168,7 +168,7 @@ proptest! {
             .collect();
         prop_assert!(frames.iter().any(|f| f.first() == Some(&msg::HELLO_ACK)), "HelloAck after the garbage");
         // An app's engine takes any modem bytes.
-        let mut e = Engine::new(Identity::generate("REV", "PC").unwrap(), std::env::temp_dir().join("lfd3k-props-trust.json"));
+        let mut e = Engine::new(Identity::generate("REV", "PC").unwrap(), std::env::temp_dir().join(format!("lfd3k-props-trust-{}.json", std::process::id())));
         e.on_modem_bytes(&garbage);
         e.on_modem_bytes(&out);
         e.tick(100);

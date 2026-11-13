@@ -102,9 +102,23 @@ impl Link {
     }
 
     /// Hang up. True if a call (or call attempt) was up.
-    pub fn hangup(&mut self, _now: u32) -> bool {
+    pub fn hangup(&mut self, now: u32) -> bool {
         match self.state {
             State::Idle => false,
+            // Voice slots running: the far side may be sending (a push to
+            // talk holder fills the slots), so a Hangup sent the moment the
+            // user hangs up is easily lost. It goes in our own next
+            // sub-slots instead, twice; then idle (`tick`).
+            State::Connected if self.voice.on && self.vs.slots => {
+                if self.slot_hangup.is_none() {
+                    let t = self.tier;
+                    self.q_len = 0;
+                    self.enq(t, FrameType::Hangup, 0, &[], false, false);
+                    self.enq(t, FrameType::Hangup, 0, &[], false, false);
+                    self.slot_hangup = Some(now);
+                }
+                true
+            }
             // A voice ring stays silent (CallReject would mean BUSY).
             State::Ringing if self.voice.on => {
                 self.go_idle();
@@ -416,6 +430,9 @@ impl Link {
             self.lz_peer = peer_lz;
             self.my_snr = info.snr_x4;
             self.voice.start(peer);
+            // The request just ended: an answer waits for a quiet channel
+            // from here (`voice_await_tick`).
+            self.voice.busy_at = now;
             self.voice.ring_mask = mask;
             self.voice.me_station = me_station;
             self.voice.me_label = me_label;
@@ -432,6 +449,7 @@ impl Link {
             && (self.state == State::Ringing || self.role == Role::Answerer)
         {
             self.last_req = now;
+            self.voice.busy_at = now;
             self.my_snr = info.snr_x4;
             if !self.is_connected() {
                 self.lz_peer = peer_lz;
@@ -584,8 +602,11 @@ impl Link {
         if busy {
             self.voice.busy_at = now;
             if self.voice_answer_queued() {
+                // Taken back: try again once the channel has been quiet
+                // for `quiet_ms`, not at the 3 to 4 s resend.
                 self.q_retain(|f| f.urgent);
                 self.voice.sends = self.voice.sends.saturating_sub(1);
+                self.voice.next_at = now;
                 return;
             }
         }

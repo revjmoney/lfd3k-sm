@@ -1306,7 +1306,7 @@ fn rf_trace_marks_tx() {
     assert!(before >= 3);
     // SimNet branch: the simulated radio is transmitting for the frame's
     // airtime on the HAL clock, which the fake advances by hand. (The chip
-    // branch is f_trace_marks_tx_on_the_chip.)
+    // branch is rf_trace_marks_tx_on_the_chip.)
     cmd("AT+SIMNET=10.0.0.2", 210);
     lfd3k_poll(215);
     host_out();
@@ -1680,4 +1680,169 @@ fn mode_abi_slot_mask_decides_no_image() {
     assert_eq!(lfd3k_take_mode_request(), 3);
     lfd3k_mode_result(true);
     host_out();
+}
+
+/// COBS frame on the wire (with its zero).
+fn cobs(f: &[u8]) -> Vec<u8> {
+    let mut w = [0u8; 300];
+    let n = lfd3k_core::voice::host::cobs_encode(f, &mut w).unwrap();
+    w[..n].to_vec()
+}
+
+fn frames(b: &[u8]) -> Vec<Vec<u8>> {
+    b.split(|&x| x == 0)
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let mut f = [0u8; 300];
+            lfd3k_core::voice::host::cobs_decode(p, &mut f).map(|n| f[..n].to_vec())
+        })
+        .collect()
+}
+
+#[test]
+fn regression_host_in_passes_voice_frames_whole() {
+    // a316123: after AT+VOICE the host stream carries COBS frames, not
+    // lines: lfd3k_host_in hands them to the core whole, so a frame with a
+    // 0x0D byte in it (here a Register whose 13 character name has the
+    // length byte 0x0D) arrives intact, in the same write as AT+VOICE.
+    use lfd3k_core::voice::host::msg;
+    let _g = serial();
+    assert_eq!(init("ALPHA"), 0);
+    lfd3k_poll(1);
+    host_in(b"ATE0\r", 2);
+    lfd3k_poll(3);
+    host_out();
+    let name = "ABCDEFGHIJKLM";
+    assert_eq!(name.len(), 0x0D);
+    let mut reg = vec![msg::REGISTER, name.len() as u8];
+    reg.extend_from_slice(name.as_bytes());
+    reg.extend_from_slice(&[2, b'P', b'C']);
+    let mut write = b"AT+VOICE\r".to_vec();
+    write.push(0);
+    write.extend(cobs(&[msg::HELLO, 1]));
+    write.extend(cobs(&reg));
+    write.extend(cobs(&[msg::CALL, 3, b'B', b'O', b'B', 0]));
+    assert!(write.contains(&0x0D));
+    let took = host_in(&write, 10);
+    assert_eq!(took, write.len());
+    for t in 11..60 {
+        lfd3k_poll(t);
+    }
+    let out = host_out();
+    // The AT+VOICE answer, then the frames.
+    let ok = out
+        .windows(4)
+        .position(|w| w == b"OK\r\n")
+        .expect("OK after AT+VOICE")
+        + 4;
+    let f = frames(&out[ok..]);
+    assert!(f.iter().any(|f| f[0] == msg::HELLO_ACK), "{f:x?}");
+    assert!(
+        f.iter().all(|f| f[0] != msg::ERROR),
+        "no Error: the Register and the Call were taken whole: {f:x?}"
+    );
+    let st = f
+        .iter()
+        .find(|f| f[0] == msg::CALL_STATE)
+        .expect("CallState for the call");
+    assert_eq!(st[1], 1, "dialing");
+}
+
+#[test]
+fn regression_held_control_session_takes_frames_with_cr() {
+    // a316123: while a ControlOut is held (the call's stream is full), the
+    // core takes only whole frames from the host stream; the FFI used to cut
+    // command mode input at each 0x0D, so a frame with a 0x0D byte in it was
+    // never offered whole and the session stalled. Framed input now goes to
+    // the core in one piece.
+    use lfd3k_core::voice::host::msg;
+    let _g = serial();
+    let mut rig = Rig::new();
+    rig.run_ms(5);
+    // BOB's app on the peer modem, session 1.
+    let now = rig.now;
+    assert!(rig.peer.voice_open(1, now));
+    let mut peer_in = vec![0u8];
+    peer_in.extend(cobs(&[msg::HELLO, 1]));
+    let mut reg = vec![msg::REGISTER, 3];
+    reg.extend_from_slice(b"BOB");
+    reg.extend_from_slice(&[5]);
+    reg.extend_from_slice(b"PHONE");
+    peer_in.extend(cobs(&reg));
+    let n = rig.peer.voice_input(1, &peer_in, &mut rig.pr, now);
+    assert_eq!(n, peer_in.len());
+    // REV's app on the FFI modem's host stream.
+    host_in(b"ATE0\r", rig.now);
+    let mut w = b"AT+VOICE\r".to_vec();
+    w.push(0);
+    w.extend(cobs(&[msg::HELLO, 1]));
+    w.extend(cobs(&[msg::REGISTER, 3, b'R', b'E', b'V', 2, b'P', b'C']));
+    w.extend(cobs(&[msg::CALL, 3, b'B', b'O', b'B', 0]));
+    assert_eq!(rig.ffi_in(&w), w.len());
+    let mut peer_frames = Vec::new();
+    let mut answered = false;
+    let mut connected = false;
+    for k in 0..30_000u32 {
+        rig.step();
+        let mut buf = [0u8; 600];
+        let n = rig.peer.voice_output(1, &mut buf);
+        peer_frames.extend_from_slice(&buf[..n]);
+        if !answered && frames(&peer_frames).iter().any(|f| f[0] == msg::RING) {
+            let a = cobs(&[msg::ANSWER]);
+            let now = rig.now;
+            rig.peer.voice_input(1, &a, &mut rig.pr, now);
+            answered = true;
+        }
+        if k % 1_000 == 999 {
+            let hb = cobs(&[msg::HEARTBEAT]);
+            let now = rig.now;
+            rig.peer.voice_input(1, &hb, &mut rig.pr, now);
+            rig.ffi_in(&hb);
+        }
+        let ok = rig
+            .ffi_out
+            .windows(4)
+            .position(|w| w == b"OK\r\n")
+            .map_or(0, |p| p + 4);
+        if frames(&rig.ffi_out[ok..])
+            .iter()
+            .any(|f| f[0] == msg::CALL_STATE && f[1] == 4)
+        {
+            connected = true;
+            break;
+        }
+    }
+    assert!(
+        answered && connected,
+        "the voice call connects through the FFI"
+    );
+    // Fill the call's stream until a ControlOut is held: the next one is
+    // then not taken at all.
+    let big = cobs(&{
+        let mut c = vec![msg::CONTROL_OUT];
+        c.extend(std::iter::repeat_n(0x41, 255));
+        c
+    });
+    let mut held = false;
+    for _ in 0..20 {
+        if rig.ffi_in(&big) < big.len() {
+            held = true;
+            break;
+        }
+    }
+    assert!(held, "a ControlOut is held");
+    // A frame with 0x0D in it (a Register for a 13 character name) is
+    // still taken whole while the control bytes are held.
+    let mut reg = vec![msg::REGISTER, 13];
+    reg.extend_from_slice(b"ABCDEFGHIJKLM");
+    reg.extend_from_slice(&[2, b'P', b'C']);
+    let f = cobs(&reg);
+    assert!(f.contains(&0x0D));
+    // (The held ControlOut was the last bytes offered and not taken; the
+    // firmware offers them again first. Here they are dropped, and the
+    // Register goes after a zero.)
+    let mut again = vec![0u8];
+    again.extend_from_slice(&f);
+    let took = rig.ffi_in(&again);
+    assert_eq!(took, again.len(), "the frame with a CR byte was taken");
 }

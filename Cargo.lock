@@ -1396,6 +1396,7 @@ dependencies = [
  "hmac",
  "lfd3k-core 0.1.0",
  "opus",
+ "rand_core",
  "serde",
  "serde_json",
  "sha2",

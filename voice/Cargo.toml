@@ -22,6 +22,10 @@ hmac = { version = "0.13", features = ["zeroize"] }
 spake2 = { version = "=0.5.0-pre.0", features = ["getrandom"] }
 # zeroize: wipes hash and HMAC state (through digest), so HKDF state is wiped too.
 sha2 = { version = "0.11", features = ["zeroize"] }
+# Only the trait a fixed test-vector byte source implements
+# (`Handshake::start_with_ephemeral_for_test_vectors`); the same version
+# x25519-dalek already uses.
+rand_core = { version = "0.10", default-features = false }
 x25519-dalek = { version = "3", default-features = false, features = ["precomputed-tables", "getrandom", "zeroize"] }
 zeroize = "1"
 # Trust store file.

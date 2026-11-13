@@ -70,10 +70,10 @@ fn voice_subtypes_roundtrip() {
     for v in 0..=255u8 {
         match VSub::from_u8(v) {
             Some(s) => {
-                assert!(v <= 6, "sub-type {v} known");
+                assert!(v <= 6, "sub-type {v} is reserved but decoded as known");
                 assert_eq!(s as u8, v);
             }
-            None => assert!(v >= 7, "sub-type {v} must be known"),
+            None => assert!(v >= 7, "sub-type {v} is not decoded (0 to 6 must be)"),
         }
     }
     let subs = [

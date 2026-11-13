@@ -276,6 +276,11 @@ pub struct Link {
     /// The modem is busy with a Wi-Fi call: an incoming CallReq is
     /// rejected (the caller sees BUSY) even while the link is idle.
     engaged: bool,
+    /// A Hangup asked for while the voice slots run: when (ms). The two
+    /// Hangup frames wait in the queue for our own sub-slots (the far side
+    /// may be sending: a push to talk holder fills its slots), then the link
+    /// goes idle (`tick`).
+    slot_hangup: Option<u32>,
     /// We offered compression on this call (own S31 at dial or answer).
     lz_mine: bool,
     /// The peer offered compression (CallReq or CallAck capability byte).
@@ -365,6 +370,7 @@ impl Link {
             ev_head: 0,
             ev_len: 0,
             engaged: false,
+            slot_hangup: None,
             lz_mine: false,
             lz_peer: false,
             lz: false,
@@ -659,6 +665,7 @@ impl Link {
     }
 
     fn go_idle(&mut self) {
+        self.slot_hangup = None;
         self.state = State::Idle;
         self.vs.reset();
         self.call_id = 0;
@@ -797,6 +804,26 @@ impl Link {
         if self.voice.on && radio.busy() {
             // A voice answer waits for a quiet channel (`voice_await_tick`).
             self.voice.busy_at = now;
+        }
+        if let Some(at) = self.slot_hangup {
+            // Both Hangups went out in our sub-slots (or the call ended some
+            // other way): idle now. If no sub-slot came within three listen
+            // periods, send one at once, as outside the slots.
+            let lay = crate::voice::slot_layout(self.tier);
+            let limit = lay
+                .frame_ms
+                .saturating_mul(u32::from(lay.listen_every.max(1)))
+                .saturating_mul(3)
+                .saturating_add(500);
+            let stuck = since(now, at) >= limit;
+            if self.q_len == 0 || stuck || self.state != State::Connected || !self.vs.slots {
+                if stuck && self.q_len > 0 {
+                    let t = self.tier;
+                    self.q_len = 0;
+                    self.enq(t, FrameType::Hangup, 0, &[], false, true);
+                }
+                self.go_idle();
+            }
         }
         match self.state {
             State::Idle => {}

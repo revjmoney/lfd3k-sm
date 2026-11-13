@@ -1083,3 +1083,33 @@ fn regression_voice_out_never_blocks_hangup_or_talk_key_behind_held_control() {
         "the floor went free"
     );
 }
+
+#[test]
+fn regression_at_voice_first_with_boot_to_menu() {
+    // a316123: with S32 = 1 (boot to menu) a first host write that is
+    // AT+VOICE and CR starts framed mode instead of opening the menu.
+    let mut net = boot_to_menu();
+    net.type_in(0, "AT+VOICE\r");
+    let t = net.host_text(0);
+    assert!(t.contains("OK"), "{t:?}");
+    assert!(!t.contains('\x1b'), "the menu did not open: {t:?}");
+    net.type_in(0, "\0");
+    net.send(0, 0, &[msg::HELLO, 1]);
+    assert_eq!(types(&net.read(0, 0)), vec![msg::HELLO_ACK]);
+    // Any other first input (a CR here) still opens the menu.
+    let mut net = boot_to_menu();
+    net.type_in(0, "\r");
+    net.run(100);
+    let t = net.host_text(0);
+    assert!(t.contains('\x1b'), "the menu opened: {t:?}");
+}
+
+/// A modem booted from a saved profile with S32 = 1 (boot to menu).
+fn boot_to_menu() -> Net {
+    let mut net = Net::one("ALPHA");
+    let mut s = net.m[0].settings().clone();
+    s.sregs.set(32, 1);
+    net.m[0].load_settings(s);
+    net.host_text(0);
+    net
+}

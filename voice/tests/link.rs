@@ -40,7 +40,8 @@ fn handshake(caller: &Identity, answerer: &Identity) -> (Session, Session) {
 }
 
 /// Run a whole link: `offer_id` shows `offer_code`, `join_id` types
-/// `join_code`. Returns the offer's result (the SEALED message or why not).
+/// `join_code`. Returns the joiner's result: Ok once `join_id` holds the
+/// person key, or the first error (from the offer's step or the join's).
 fn link(
     offer_id: &Identity,
     offer_code: &str,
@@ -168,8 +169,8 @@ fn regression_wrong_link_code_reveals_nothing() {
     // An offer from a device without a person key gives nothing either.
     let (mut j, _) = LinkJoin::start("333333");
     let lonely = {
-        // A linked phone holds the person key; an identity file without one
-        // is the case here: load a saved device with the person flag 0.
+        // A device without a person key: an identity file with the person
+        // and cert flags 0.
         let dir = std::env::temp_dir().join(format!("lfd3k-link-np-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("np.id");
@@ -448,4 +449,39 @@ fn regression_link_request_before_peer_live_is_ignored() {
         }
     }
     assert!(code_shown);
+}
+
+#[test]
+fn regression_link_code_lives_until_an_explicit_end() {
+    // 496dc47 (the code was never shown): a code shown on this device stays
+    // until it is used, cancelled, or LINK_CODE_MS passes; ticks, a call
+    // and its end do not wipe it. The PC app shows it while
+    // `Engine::linking()` is true.
+    use lfd3k_core::voice::host::msg;
+    let dir = std::env::temp_dir().join(format!("lfd3k-link-life-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut e = lfd3k_voice::Engine::new(
+        Identity::generate("REV", "PC").unwrap(),
+        dir.join("trust.json"),
+    );
+    e.tick(1_000);
+    let code = e.start_link_offer();
+    assert_eq!(code.len(), 6);
+    for t in (2_000..200_000).step_by(1_000) {
+        e.tick(t);
+    }
+    assert!(e.linking(), "still shown after 199 s");
+    // A call and its end leave the code alone.
+    e.call("BOB", None);
+    e.on_modem_bytes(&vhp(&[msg::ENDED]));
+    e.tick(201_000);
+    assert!(e.linking(), "still shown after a call");
+    e.cancel_link();
+    assert!(!e.linking(), "cancel wipes it");
+    // A new code times out after LINK_CODE_MS.
+    e.start_link_offer();
+    e.tick(201_000 + lfd3k_voice::client::LINK_CODE_MS - 1);
+    assert!(e.linking());
+    e.tick(201_000 + lfd3k_voice::client::LINK_CODE_MS);
+    assert!(!e.linking(), "gone after LINK_CODE_MS");
 }

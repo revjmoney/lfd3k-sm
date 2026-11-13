@@ -394,10 +394,27 @@ fn drop_answers_and_first_tierset(t: u32, b: &[u8]) -> bool {
 #[test]
 fn late_pickup_sends_at_most_twice_then_elsewhere() {
     // BOB/PHONE picks up; its Answers and REV's first TierSet are lost, so
-    // BOB/PC still rings and picks up late, on a quiet channel, after REV
-    // already bound BOB/PHONE by its Train. BOB/PC's Answer goes out at
-    // most twice; REV's next TierSet (BOB/PHONE's token) ends it: answered
+    // BOB/PC still rings and picks up late, after REV already bound
+    // BOB/PHONE by its Train. BOB/PC's Answer goes out at most twice (only
+    // once the channel has been quiet long enough, between REV's TierSet
+    // resends); REV's next TierSet (BOB/PHONE's token) ends it: answered
     // elsewhere, silently, never NO CARRIER, never over the live call.
+    // Several pickup moments (each draws another token and quiet time), so
+    // some of them do get an answer on the air.
+    let mut sent_any = 0;
+    for delay in [100u32, 250, 400, 550, 700] {
+        let sends = late_pickup(delay);
+        assert!(sends <= 2, "pickup {delay} ms late answered {sends} times");
+        if sends > 0 {
+            sent_any += 1;
+        }
+    }
+    assert!(sent_any >= 1, "no late pickup got an answer on the air");
+}
+
+/// One late pickup `delay` ms after REV's first (dropped) TierSet; the
+/// Answers the late device sent.
+fn late_pickup(delay: u32) -> usize {
     TIERSET_DROP.with(|d| *d.borrow_mut() = 1);
     let chan = SimChannel {
         profile: SnrProfile::Constant(40),
@@ -419,7 +436,7 @@ fn late_pickup_sends_at_most_twice_then_elsewhere() {
     w.apps[phone].eng.answer();
     // REV's first TierSet (dropped) has gone out and ended.
     assert!(w.run_until(5_000, |_| TIERSET_DROP.with(|d| *d.borrow()) == 0));
-    w.run(400);
+    w.run(delay);
     assert!(
         !w.has(pc, |e| matches!(e, UiEvent::AnsweredElsewhere)),
         "BOB/PC still rings"
@@ -430,10 +447,6 @@ fn late_pickup_sends_at_most_twice_then_elsewhere() {
         .has(pc, |e| matches!(e, UiEvent::AnsweredElsewhere))));
     w.run(20_000);
     let sends = count_sent(&w, 2, 15, Some(3), t_pc);
-    assert!(
-        (1..=2).contains(&sends),
-        "the late pickup answered {sends} times"
-    );
     assert!(!w.has(pc, is_connected));
     assert!(w.has(rev, is_connected) && w.has(phone, is_connected));
     assert!(!w.has(pc, |e| matches!(e, UiEvent::Ended)));
@@ -446,6 +459,7 @@ fn late_pickup_sends_at_most_twice_then_elsewhere() {
             .all(|x| x.0 < up || x.1 == 12 || (x.1 == 15 && x.2 == 0)),
         "BOB/PC kept quiet"
     );
+    sends
 }
 
 #[test]
@@ -550,17 +564,23 @@ fn connect_to_first_audio_each_tier() {
             .map(|(t, h)| (t, h.join().unwrap()))
             .collect()
     });
-    // Bounds a little over what this build measures (see the Task 9a report).
+    // Bounds about a quarter over what this build measures (the plan's own
+    // target is SF12 under 60 s).
     for (t, (slots, audio)) in &rows {
         println!(
             "SF{}: CONNECT to slots {slots} ms, to first audio {audio} ms",
             t.sf()
         );
+        // Measured: 740, 990, 1120, 1380, 2320, 3370, 6700, 13120 ms.
         let limit = match t {
-            Tier::Sf5 | Tier::Sf6 | Tier::Sf7 | Tier::Sf8 => 5_000,
-            Tier::Sf9 | Tier::Sf10 => 10_000,
-            Tier::Sf11 => 25_000,
-            Tier::Sf12 => 60_000,
+            Tier::Sf5 => 1_000,
+            Tier::Sf6 => 1_300,
+            Tier::Sf7 => 1_500,
+            Tier::Sf8 => 1_800,
+            Tier::Sf9 => 3_000,
+            Tier::Sf10 => 4_300,
+            Tier::Sf11 => 8_500,
+            Tier::Sf12 => 16_500,
         };
         assert!(
             *audio < limit,
@@ -1376,7 +1396,7 @@ thread_local! {
     static LISTENER_DROP: RefCell<(u32, u32)> = const { RefCell::new((u32::MAX, 0)) };
 }
 
-fn drop_two_listeners(t: u32, b: &[u8]) -> bool {
+fn drop_listeners(t: u32, b: &[u8]) -> bool {
     if b.get(1).map(|x| x >> 4) != Some(15) || b.get(5) != Some(&6) {
         return false;
     }
@@ -1392,14 +1412,18 @@ fn drop_two_listeners(t: u32, b: &[u8]) -> bool {
 }
 
 #[test]
-fn regression_two_lost_listener_frames_at_sf9_no_stepdown() {
+fn regression_lost_listener_frames_at_sf9_no_stepdown() {
     // Task 6 review (due-only silence, 44b58ef): the floor holder misses
-    // two Listener frames in a row: that is not a fade.
+    // two, then later three, Listener frames in a row: that is not a fade.
+    // Only slots in which the peer was due count as silence; counting every
+    // slot (before the fix) makes three lost Listener frames (11 slots,
+    // 4.4 s) pass the 4 RTO step down line, which this test then catches
+    // (two alone stay just under it, 3.2 s).
     LISTENER_DROP.with(|d| *d.borrow_mut() = (u32::MAX, 0));
     let chan = SimChannel {
         profile: SnrProfile::Constant(SF9_SNR),
         seed: 41,
-        drop: Some(drop_two_listeners),
+        drop: Some(drop_listeners),
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", Some(Tier::Sf9)), cfg("BRAVO", Some(Tier::Sf9))],
@@ -1416,11 +1440,19 @@ fn regression_two_lost_listener_frames_at_sf9_no_stepdown() {
     w.run(5_000);
     let t = w.now();
     LISTENER_DROP.with(|d| *d.borrow_mut() = (t, 2));
-    w.run(40_000);
+    w.run(20_000);
     assert_eq!(
         LISTENER_DROP.with(|d| d.borrow().1),
         0,
         "two Listener frames were dropped"
+    );
+    let t3 = w.now();
+    LISTENER_DROP.with(|d| *d.borrow_mut() = (t3, 3));
+    w.run(20_000);
+    assert_eq!(
+        LISTENER_DROP.with(|d| d.borrow().1),
+        0,
+        "three Listener frames were dropped"
     );
     assert_eq!(
         count_sent(&w, 0, 8, None, t) + count_sent(&w, 1, 8, None, t),
@@ -1606,7 +1638,14 @@ fn regression_pickup_gives_up_at_s7_on_a_busy_channel() {
     let took = w.raw_frames(r, msg::ANSWERED_ELSEWHERE)[0].0 - t0;
     let sends = count_sent(&w, 2, 15, Some(3), t0);
     println!("BOB/TAB gave up {took} ms after picking up, {sends} answers sent");
-    assert!(took <= 11_000, "gave up after {took} ms (S7 10 s)");
+    assert!(
+        sends < 2,
+        "the busy channel kept it under ANSWER_SENDS: {sends}"
+    );
+    assert!(
+        (10_000..=11_000).contains(&took),
+        "gave up after {took} ms (S7 10 s)"
+    );
     let t1 = w.now();
     w.run(10_000);
     assert!(
@@ -1617,4 +1656,29 @@ fn regression_pickup_gives_up_at_s7_on_a_busy_channel() {
     );
     assert!(w.raw_frames(r, msg::ENDED).is_empty());
     assert!(!w.net.host_text(2).contains("NO CARRIER"));
+}
+
+#[test]
+fn regression_non_holder_hangup_during_ptt_hold_reaches_peer() {
+    // Controller ruling R1 (Task 9a review): BOB, not holding the floor,
+    // hangs up while REV holds it on SF9 (REV's voice frames fill the
+    // slots). REV hears the Hangup and ends at once, not after resync and
+    // S22 (27.7 s on the harness that first showed it). Hangup moments
+    // spread over a whole listen period.
+    for k in 0..12u32 {
+        let (mut w, rev, bob) = rev_calls_bob(Some(Tier::Sf9), SF9_SNR);
+        w.apps[rev].mic = Mic::Tone;
+        w.apps[rev].eng.talk_key(true);
+        assert!(w.run_until(20_000, |w| w.apps[rev].eng.floor() == Floor::Mine));
+        w.run(2_000 + k * 100);
+        let t0 = w.now();
+        w.apps[bob].eng.hangup();
+        let ended = w.run_until(10_000, |w| w.has(rev, |e| matches!(e, UiEvent::Ended)));
+        let took = w.now() - t0;
+        assert!(
+            ended && took < 3_000,
+            "offset {} ms: REV ended after {took} ms",
+            k * 100
+        );
+    }
 }

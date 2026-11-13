@@ -128,6 +128,31 @@ impl std::fmt::Display for ScrambleError {
 
 impl std::error::Error for ScrambleError {}
 
+/// Hands out the same 32 bytes as "random" data, for
+/// `Handshake::start_with_ephemeral_for_test_vectors` only. Wiped on drop.
+struct FixedBytes(Zeroizing<[u8; 32]>);
+
+impl rand_core::TryRng for FixedBytes {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(0)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        for (d, s) in dst.iter_mut().zip(self.0.iter().cycle()) {
+            *d = *s;
+        }
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for FixedBytes {}
+
 /// A checked peer hello.
 struct PeerHello {
     body: Vec<u8>,
@@ -168,7 +193,24 @@ impl Handshake {
     /// the answerer gets its hello message (send it only after the commit has
     /// arrived and `on_peer` took it).
     pub fn start(id: &Identity, role: Role) -> (Handshake, Vec<u8>) {
-        let eph = EphemeralSecret::random();
+        Self::start_eph(id, role, EphemeralSecret::random())
+    }
+
+    /// `start` with a given ephemeral X25519 secret instead of a fresh
+    /// random one. Only for the V223.LRA.92 Annex C test vectors: an app
+    /// must never call it (a reused ephemeral secret breaks every call
+    /// made with it).
+    #[doc(hidden)]
+    pub fn start_with_ephemeral_for_test_vectors(
+        id: &Identity,
+        role: Role,
+        secret: [u8; 32],
+    ) -> (Handshake, Vec<u8>) {
+        let mut src = FixedBytes(Zeroizing::new(secret));
+        Self::start_eph(id, role, EphemeralSecret::random_from_rng(&mut src))
+    }
+
+    fn start_eph(id: &Identity, role: Role, eph: EphemeralSecret) -> (Handshake, Vec<u8>) {
         let eph_pub = PublicKey::from(&eph);
         let mut hello = Vec::with_capacity(256);
         hello.push(VERSION);

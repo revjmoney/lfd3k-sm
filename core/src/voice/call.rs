@@ -338,3 +338,43 @@ pub fn ring_mask(regs: &[Option<VoiceReg>; VOICE_REGS], r: &VoiceReq<'_>, me_sta
     }
     mask
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_ms_range_and_formula() {
+        // V223.LRA.90 clause 9.3: Q = 150 + (xorshift32((token XOR k) OR 1)
+        // mod 1200) ms, k = (n + 1) * 0x9E3779B9, n the sends so far.
+        let mut v = VoiceLink::new();
+        let mut seen = [false; 12];
+        let mut tok = 0x1234_5678u32;
+        for _ in 0..5_000 {
+            tok = crate::link::xorshift32(tok);
+            v.info.token = tok;
+            for n in 0..3u8 {
+                v.sends = n;
+                let q = v.quiet_ms();
+                assert!((150..=1349).contains(&q), "{q}");
+                let k = u32::from(n).wrapping_add(1).wrapping_mul(0x9E37_79B9);
+                assert_eq!(q, 150 + crate::link::xorshift32((tok ^ k) | 1) % 1200);
+                if let Some(b) = seen.get_mut(((q - 150) / 100) as usize) {
+                    *b = true;
+                }
+            }
+        }
+        assert!(seen.iter().all(|&b| b), "the whole range is used");
+        // Drawn again per send: the same token gives different waits.
+        v.info.token = 0xDEAD_BEEF;
+        v.sends = 0;
+        let a = v.quiet_ms();
+        v.sends = 1;
+        assert_ne!(a, v.quiet_ms());
+        // Known values, so a port can check its xorshift32.
+        v.sends = 0;
+        v.info.token = 1;
+        let k = 0x9E37_79B9u32;
+        assert_eq!(v.quiet_ms(), 150 + crate::link::xorshift32(k | 1) % 1200);
+    }
+}

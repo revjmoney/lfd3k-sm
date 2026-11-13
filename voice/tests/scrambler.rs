@@ -662,3 +662,63 @@ fn v223_lra_92_annex_c_derived_values() {
         )
     );
 }
+
+#[test]
+fn v223_lra_92_annex_c_reference_session_matches() {
+    // The reference handshake itself, run with the document's fixed
+    // ephemeral secrets (a test-only seam), gives the document's commit,
+    // hellos, words and sealed frames byte for byte.
+    let rev = fixed_identity("c4-rev", [0x11; 32], [0x22; 32], "REV", "PC");
+    let bob = fixed_identity("c4-bob", [0x33; 32], [0x44; 32], "BOB", "PHONE");
+    let (mut c, commit) =
+        Handshake::start_with_ephemeral_for_test_vectors(&rev, Role::Caller, [0x55; 32]);
+    let (mut a, hello) =
+        Handshake::start_with_ephemeral_for_test_vectors(&bob, Role::Answerer, [0x66; 32]);
+    assert_eq!(
+        commit,
+        unhex("014fede2a6f4cd6e9e3943db7cc0580be459b5a507bfea33796bf9ab4278c55fa8")
+    );
+    assert_eq!(&hello[1..], &unhex(ANSWERER_HELLO)[..]);
+    assert_eq!(a.on_peer(&commit), Ok(None));
+    let reveal = c.on_peer(&hello).unwrap().unwrap();
+    assert_eq!(&reveal[1..], &unhex(CALLER_HELLO)[..]);
+    let mut sc = c.finish(&hello).expect("caller session");
+    let mut sa = a.finish(&reveal).expect("answerer session");
+    assert_eq!(sc.words, ["rebirth", "souvenir"]);
+    assert_eq!(sa.words, sc.words);
+    let tag = lfd3k_voice::control::HELLO_TAG;
+    assert_eq!(
+        sc.seal(tag),
+        unhex("0000000018b4575221c800411ce213b4de21ab1aade22edef8644fe5fe88064ed43a924c18")
+    );
+    assert_eq!(
+        sa.seal(tag),
+        unhex("000000003cba648bf609cea03f4cc8cf80150b97ea6c1be59896c932b7d6206b45c27ca087")
+    );
+    let v = sc.seal(&[1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        v,
+        unhex("01000000c372a8cb3d34ab74dd03943674da8f26f4d870413d2c")
+    );
+    assert_eq!(
+        sa.seal(&[1]),
+        unhex("01000000d40351336a813c93cc7f64a7149414e729")
+    );
+    let mut body = vec![0x99u8; 32];
+    body.extend_from_slice(
+        &SigningKey::from_bytes(&[0x22; 32])
+            .sign(&lfd3k_voice::control::removal_signed_bytes(&[0x99; 32]))
+            .to_bytes(),
+    );
+    assert_eq!(
+        sc.seal(&body),
+        unhex(
+            "02000000a14539c12588df4885054cfe8210f3f1a4829357e9432335cd66b7ed\
+             5d21169cfcb6687ebb4f766f33959c21c704ebdb9b53b4ced8af77aef66400d3\
+             dd90b79a83121253d47dfb7f5d9e1bec1e9d2a2368efe0e2a8626e00b3f4a728\
+             820406007236977cfabcf8ed4813e426a9b2d84f"
+        )
+    );
+    // And the answerer opens the caller's vector frames.
+    assert_eq!(sa.open(&v), Some(vec![1, 2, 3, 4, 5, 6]));
+}

@@ -448,7 +448,23 @@ fn old_and_new_discover_each_other() {
             net.text(i)
         );
     }
-    // The old build answered the voice-flagged scan with a plain ScanResp.
+    // The new build's ScanReq carries FLAG_VOICE (header flag bit 3) on
+    // the air, and the old build answered it with a plain ScanResp.
+    let reqs: Vec<u8> = net
+        .log
+        .iter()
+        .filter(|e| e.1 == 0 && e.3.get(1).map(|b| b >> 4) == Some(13))
+        .map(|e| e.3[1] & 0x0F)
+        .collect();
+    assert!(
+        !reqs.is_empty() && reqs.iter().all(|f| f & lfd3k_core::frame::FLAG_VOICE != 0),
+        "flags {reqs:?}"
+    );
+    assert!(net
+        .log
+        .iter()
+        .filter(|e| e.1 == 1 && e.3.get(1).map(|b| b >> 4) == Some(13))
+        .all(|e| e.3[1] & 0x0F == 0));
     assert!(net.sent(1, 0).iter().any(|&(t, _)| t == 14));
     // The new build answered the old scan (no voice flag) the plain way too.
     assert!(net.sent(0, 0).iter().any(|&(t, _)| t == 14));

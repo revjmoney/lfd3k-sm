@@ -518,28 +518,15 @@ impl Worker {
         if !self.o.sounds {
             return None;
         }
-        if END_TYPES.contains(&a.ftype) {
-            // A Hangup or CallReject sounds only while this app has a call
-            // or an attempt (dialing, ringing, training, connected, resync)
-            // or the end window it opened itself. Other stations' hangups
-            // heard while idle stay silent.
-            let ours = st >= 4 || self.setting_up() || before(self.sound_until, now);
-            if !ours {
-                return None;
-            }
-            self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
-            return Some(false);
-        }
-        let connected = st >= 4 && !self.setting_up();
-        if connected {
-            if RETRAIN_TYPES.contains(&a.ftype) {
-                self.retrain_until = Some(now.wrapping_add(SOUND_AFTER_MS));
-                return Some(true);
-            }
-            let probe = a.ftype == KEEPALIVE && before(self.retrain_until, now);
-            return probe.then_some(true);
-        }
-        (self.setting_up() || before(self.sound_until, now)).then_some(false)
+        let up = self.setting_up();
+        chirp_rule(
+            a.ftype,
+            st,
+            up,
+            &mut self.sound_until,
+            &mut self.retrain_until,
+            now,
+        )
     }
 
     /// Engine bytes to the modem's session, the modem's back to the engine.
@@ -966,6 +953,43 @@ impl Worker {
     }
 }
 
+/// `chirp_for` without the app: whether a frame of header type `ftype`
+/// chirps (`Some(ducked)`) given the engine's call state `st` and whether a
+/// call is being set up; it opens the end window (`sound_until`) on a
+/// Hangup or CallReject of our own call and the retrain window
+/// (`retrain_until`) on a TierSet or TierAck while connected.
+fn chirp_rule(
+    ftype: u8,
+    st: u8,
+    setting_up: bool,
+    sound_until: &mut Option<u32>,
+    retrain_until: &mut Option<u32>,
+    now: u32,
+) -> Option<bool> {
+    if END_TYPES.contains(&ftype) {
+        // A Hangup or CallReject sounds only while this app has a call
+        // or an attempt (dialing, ringing, training, connected, resync)
+        // or the end window it opened itself. Other stations' hangups
+        // heard while idle stay silent.
+        let ours = st >= 4 || setting_up || before(*sound_until, now);
+        if !ours {
+            return None;
+        }
+        *sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
+        return Some(false);
+    }
+    let connected = st >= 4 && !setting_up;
+    if connected {
+        if RETRAIN_TYPES.contains(&ftype) {
+            *retrain_until = Some(now.wrapping_add(SOUND_AFTER_MS));
+            return Some(true);
+        }
+        let probe = ftype == KEEPALIVE && before(*retrain_until, now);
+        return probe.then_some(true);
+    }
+    (setting_up || before(*sound_until, now)).then_some(false)
+}
+
 /// The hotspot password written to disk in place of any real one (this
 /// modem has no Wi-Fi; a saved profile needs 8 to 63 characters there).
 const AP_PLACEHOLDER: &str = "NO-WIFI-ON-THIS-MODEM";
@@ -1033,4 +1057,158 @@ fn open_private(p: &Path) -> std::io::Result<std::fs::File> {
 /// `until` is set and not reached yet at `now`.
 fn before(until: Option<u32>, now: u32) -> bool {
     until.is_some_and(|t| t.wrapping_sub(now) < u32::MAX / 2 && t != now)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_scrubbed_profile_carries_no_wifi_password() {
+        // 496dc47: modem-settings.bin never holds a real Wi-Fi password: the
+        // hotspot password is the placeholder and there is no client network.
+        let mut s = Settings::defaults("REV-PC", "defaultpass1");
+        assert!(s.set_ap("SHOPNET", "hunter2hunter2"));
+        assert!(s.set_sta("HOMEWIFI", "correct horse battery"));
+        let c = scrubbed(&s);
+        assert_eq!(c.ap_ssid(), "SHOPNET", "the hotspot name stays");
+        assert_eq!(c.ap_pass(), AP_PLACEHOLDER);
+        assert_eq!(c.sta_ssid(), "");
+        assert_eq!(c.sta_pass(), "");
+        let mut b = [0u8; BLOB_LEN];
+        let n = c.to_blob(&mut b).min(BLOB_LEN);
+        let blob = &b[..n];
+        for secret in [
+            &b"hunter2hunter2"[..],
+            b"correct horse battery",
+            b"HOMEWIFI",
+        ] {
+            assert!(
+                !blob.windows(secret.len()).any(|w| w == secret),
+                "a secret reached the blob"
+            );
+        }
+        // The original is untouched (the modem keeps its own profile).
+        assert_eq!(s.ap_pass(), "hunter2hunter2");
+    }
+
+    /// Run the rule for `ftype` at `now` with fresh or given windows.
+    fn rule(
+        ftype: u8,
+        st: u8,
+        up: bool,
+        w: &mut (Option<u32>, Option<u32>),
+        now: u32,
+    ) -> Option<bool> {
+        chirp_rule(ftype, st, up, &mut w.0, &mut w.1, now)
+    }
+
+    #[test]
+    fn regression_connected_chirps_only_retrain_and_own_end_frames() {
+        // 303a9f6: while connected (state 4 or 5, not setting up) voice,
+        // Data, Ack and Listener frames (type 15 voice and Listener, 6
+        // Data, 7 Ack, 11 Keepalive outside a retrain) never chirp; TierSet
+        // and TierAck chirp ducked and open a 2 s window in which Keepalive
+        // probes chirp; Hangup and CallReject chirp only during our own call.
+        let mut w = (None, None);
+        for t in [15, 6, 7, 11, 1, 2, 4, 5, 12, 13, 14] {
+            assert_eq!(
+                rule(t, 4, false, &mut w, 1_000),
+                None,
+                "type {t} while connected"
+            );
+        }
+        assert_eq!(
+            rule(8, 4, false, &mut w, 1_000),
+            Some(true),
+            "TierSet, ducked"
+        );
+        assert_eq!(
+            rule(11, 4, false, &mut w, 1_500),
+            Some(true),
+            "a probe in the retrain window"
+        );
+        assert_eq!(
+            rule(15, 4, false, &mut w, 1_500),
+            None,
+            "voice never, even then"
+        );
+        assert_eq!(rule(6, 4, false, &mut w, 1_500), None);
+        assert_eq!(rule(11, 4, false, &mut w, 3_100), None, "window over");
+        assert_eq!(rule(9, 4, false, &mut w, 4_000), Some(true), "TierAck");
+        // End frames: ours while connected, not when idle with no window.
+        assert_eq!(rule(10, 4, false, &mut w, 5_000), Some(false));
+        let mut idle = (None, None);
+        assert_eq!(
+            rule(10, 0, false, &mut idle, 5_000),
+            None,
+            "another station's Hangup"
+        );
+        assert_eq!(rule(3, 0, false, &mut idle, 5_000), None);
+        assert_eq!(
+            rule(10, 0, true, &mut idle, 5_000),
+            Some(false),
+            "while dialing"
+        );
+        // Setting up: every frame chirps, at full level.
+        let mut s = (None, None);
+        for t in [1, 4, 8, 15] {
+            assert_eq!(
+                rule(t, 1, true, &mut s, 100),
+                Some(false),
+                "type {t} while setting up"
+            );
+        }
+        // The end window: the frames after our Hangup chirp for 2 s, then stop.
+        let mut e = (None, None);
+        assert_eq!(rule(10, 4, false, &mut e, 10_000), Some(false));
+        assert_eq!(rule(12, 0, false, &mut e, 11_000), Some(false));
+        assert_eq!(rule(12, 0, false, &mut e, 12_100), None);
+    }
+
+    #[test]
+    fn regression_chirp_mix_never_clips_call_audio() {
+        // 303a9f6: a chirp mixed under call audio never takes a sample past
+        // full scale (and never wraps it around).
+        use crate::monitor::Chirps;
+        for &(base, gain) in &[
+            (32_767i16, 1.0f32),
+            (-32_768, 1.0),
+            (32_000, 1.0),
+            (-31_000, 0.25),
+            (0, 1.0),
+        ] {
+            let mut ch = Chirps::default();
+            let a = lfd3k_voice::AirFrame {
+                rx: false,
+                sf: 7,
+                ftype: 8,
+                sub: 0xFF,
+                len: 6,
+                start_ms: 1,
+                air_ms: 300,
+                rssi_dbm: None,
+                snr_x4: None,
+            };
+            ch.start(&a, gain);
+            let mut buf = vec![base; 16 * 400];
+            ch.mix(&mut buf);
+            // Loud call audio stays on its side of zero: no wrap around.
+            if base > 0 {
+                assert!(buf.iter().all(|&s| s >= 0), "base {base}: wrapped");
+            } else if base < 0 {
+                assert!(buf.iter().all(|&s| s <= 0), "base {base}: wrapped");
+            }
+            if base == 0 {
+                assert!(buf.iter().any(|&s| s != 0), "the chirp plays over silence");
+                assert!(
+                    buf.iter().all(|&s| s.unsigned_abs() < 32_000),
+                    "a chirp alone stays under full scale"
+                );
+            }
+            if base == i16::MAX {
+                assert!(buf.iter().all(|&s| s > 0));
+            }
+        }
+    }
 }
