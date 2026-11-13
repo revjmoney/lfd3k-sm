@@ -785,7 +785,7 @@ impl Worker {
             self.ring_until = None;
         }
         let linking = self.engine.linking();
-        if self.was_linking && !linking {
+        if link_ended(self.was_linking, linking) {
             self.send(Ev::LinkEnded);
         }
         self.was_linking = linking;
@@ -953,6 +953,13 @@ impl Worker {
     }
 }
 
+/// The engine's linking went from on to off since the last pass (a code
+/// used, cancelled, timed out, or the link done or failed): tell the window
+/// once, so it stops showing the code.
+fn link_ended(was_linking: bool, linking: bool) -> bool {
+    was_linking && !linking
+}
+
 /// `chirp_for` without the app: whether a frame of header type `ftype`
 /// chirps (`Some(ducked)`) given the engine's call state `st` and whether a
 /// call is being set up; it opens the end window (`sound_until`) on a
@@ -1062,6 +1069,17 @@ fn before(until: Option<u32>, now: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_link_ended_fires_once_on_the_falling_edge() {
+        // 496dc47: LinkEnded goes out once, when linking goes from on to
+        // off, never while it stays off (a code arriving before the engine
+        // reports linking must not be ended by it).
+        assert!(link_ended(true, false));
+        assert!(!link_ended(false, false));
+        assert!(!link_ended(false, true));
+        assert!(!link_ended(true, true));
+    }
 
     #[test]
     fn regression_scrubbed_profile_carries_no_wifi_password() {

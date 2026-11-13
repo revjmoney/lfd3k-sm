@@ -1682,3 +1682,67 @@ fn regression_non_holder_hangup_during_ptt_hold_reaches_peer() {
         );
     }
 }
+
+#[test]
+fn regression_hangup_in_the_slots_ends_for_the_app_at_once() {
+    // Fix round 2: on SF12 BOB (not holding the floor) hangs up; his slotted
+    // Hangups may take one or two listen periods (4 s each) to go out, but
+    // his app hears Ended at once. A new Call in that window is refused
+    // (Error 4, the link is still busy); once the link is idle it works. REV
+    // ends promptly too.
+    let mut w = World::with_channel(
+        vec![
+            cfg("ALPHA", Some(Tier::Sf12)),
+            cfg("BRAVO", Some(Tier::Sf12)),
+        ],
+        chan_x4(SF12_ONLY, 71),
+    );
+    let (a, b) = raw_call(&mut w);
+    w.raw_send(a, &[msg::TALK_KEY, 1]);
+    assert!(w.run_until(20_000, |w| raw_floor(w, a) == Some(1)));
+    w.run(3_000);
+    let t0 = w.now();
+    w.raw_send(b, &[msg::HANGUP]);
+    assert!(w.run_until(1_000, |w| w
+        .raw_frames(b, msg::ENDED)
+        .iter()
+        .any(|(t, _)| *t >= t0)));
+    let took = w.raw_frames(b, msg::ENDED).last().unwrap().0 - t0;
+    assert!(
+        took <= 100,
+        "BOB's app heard Ended {took} ms after its Hangup"
+    );
+    let st = w.raw_frames(b, msg::CALL_STATE).last().unwrap().1.clone();
+    assert_eq!(st[0], call_state::IDLE);
+    // The link is still sending its Hangups: a new call is refused now.
+    let busy = w.net.modems[1].voice_call().is_some();
+    assert!(busy, "BRAVO's Hangups are still waiting for its sub-slots");
+    w.raw_send(b, &strs(msg::CALL, &["REV", ""]));
+    w.run(50);
+    assert!(
+        w.raw_frames(b, msg::ERROR)
+            .iter()
+            .any(|(_, p)| p[0] == msg::CALL && p[1] == 4),
+        "a Call while the Hangups go out is refused"
+    );
+    // REV hears a Hangup and ends within two listen periods plus a slot.
+    assert!(
+        w.run_until(12_000, |w| !w.raw_frames(a, msg::ENDED).is_empty()),
+        "REV ends"
+    );
+    println!(
+        "SF12: BOB's Ended after {took} ms, REV's after {} ms, BRAVO busy at first: {busy}",
+        w.raw_frames(a, msg::ENDED)[0].0 - t0
+    );
+    assert!(w.run_until(15_000, |w| w.net.modems[1].voice_call().is_none()));
+    let n_err = w.raw_frames(b, msg::ERROR).len();
+    w.run(1_000);
+    w.raw_send(b, &strs(msg::CALL, &["REV", ""]));
+    w.run(500);
+    assert_eq!(
+        w.raw_frames(b, msg::ERROR).len(),
+        n_err,
+        "a Call once idle is taken"
+    );
+    assert!(w.net.modems[1].voice_call().is_some());
+}

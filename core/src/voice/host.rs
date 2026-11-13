@@ -1341,7 +1341,9 @@ impl Modem {
             return;
         };
         let o = usize::from(o);
-        if self.link.voice().is_none() {
+        // A hang-up in the voice slots ends the call for its owner at once;
+        // the link sends its Hangups in our next sub-slots in the background.
+        if self.link.voice().is_none() || self.link.hanging_up() {
             let bit = if self.vhp.call_end != 0 {
                 self.vhp.call_end
             } else {

@@ -387,6 +387,13 @@ impl Link {
 
     /// The far end of the voice call ringing, being set up or up; None
     /// otherwise (also during a data call).
+    /// A Hangup asked for in the voice slots is still waiting for our
+    /// sub-slots (`hangup`): the call is over for the apps, the link is not
+    /// idle yet (a new call is refused until it is).
+    pub fn hanging_up(&self) -> bool {
+        self.slot_hangup.is_some()
+    }
+
     pub fn voice(&self) -> Option<&VoiceCallInfo> {
         (self.voice.on && self.state != State::Idle).then_some(&self.voice.info)
     }

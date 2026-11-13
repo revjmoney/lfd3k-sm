@@ -768,9 +768,16 @@ impl App {
                 }
                 Ev::At { tag, text, ok } => self.on_at(tag, text, ok),
                 Ev::Note(n) => self.note = n,
-                Ev::LinkEnded => self.link_code = None,
+                Ev::LinkEnded => {
+                    if !link_code_stays(true, Some(LinkSig::Ended), self.s.linking) {
+                        self.link_code = None;
+                    }
+                }
                 Ev::Stopped => self.stopped = true,
             }
+        }
+        if !link_code_stays(self.link_code.is_some(), None, self.s.linking) {
+            self.link_code = None;
         }
         if self
             .banner
@@ -826,13 +833,17 @@ impl App {
             }
             UiEvent::LinkCode(_) => {}
             UiEvent::Linked => {
-                self.link_code = None;
+                if !link_code_stays(true, Some(LinkSig::Linked), self.s.linking) {
+                    self.link_code = None;
+                }
                 self.link_note = "Linked. This device now carries your name.".into();
                 self.banner("LINKED", false);
             }
             UiEvent::Error(t) => {
                 let warn = t.starts_with("NOT THE");
-                if t.starts_with("link failed") {
+                if t.starts_with("link failed")
+                    && !link_code_stays(true, Some(LinkSig::Failed), self.s.linking)
+                {
                     self.link_code = None;
                     self.link_note = t.clone();
                 }
@@ -3204,7 +3215,9 @@ impl App {
             .clicked()
             {
                 self.cmd(Cmd::CancelLink);
-                self.link_code = None;
+                if !link_code_stays(true, Some(LinkSig::Cancelled), self.s.linking) {
+                    self.link_code = None;
+                }
                 self.link_note = "Cancelled. The code is gone.".into();
             }
         } else {
@@ -3938,5 +3951,66 @@ impl eframe::App for App {
         self.run_script(&ctx);
         // Live numbers and the moving scope: redraw 20 times a second.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Why a shown link code may go (see `link_code_stays`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LinkSig {
+    /// The modem thread says the engine stopped linking (`Ev::LinkEnded`).
+    Ended,
+    Linked,
+    Failed,
+    /// The user pressed CANCEL.
+    Cancelled,
+}
+
+/// Whether a link code (shown or not, `shown`) is still shown after `sig`
+/// (None: a pass of the window with no link event). Only an explicit end
+/// clears it. `snapshot_linking` (the modem thread's last snapshot) is
+/// deliberately not used: it lags the events, so a code that just came
+/// would vanish while the snapshot still says "not linking" (the bug fixed
+/// in 496dc47).
+fn link_code_stays(shown: bool, sig: Option<LinkSig>, snapshot_linking: bool) -> bool {
+    let _ = snapshot_linking;
+    match sig {
+        Some(LinkSig::Ended | LinkSig::Linked | LinkSig::Failed | LinkSig::Cancelled) => false,
+        None => shown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_link_code_stays_until_an_explicit_end() {
+        // 496dc47: the code stays on screen whatever the (lagging) snapshot
+        // says, until LinkEnded, Linked, a link failure or CANCEL.
+        for snap in [false, true] {
+            assert!(
+                link_code_stays(true, None, snap),
+                "a pass with snapshot linking {snap}"
+            );
+            for sig in [
+                LinkSig::Ended,
+                LinkSig::Linked,
+                LinkSig::Failed,
+                LinkSig::Cancelled,
+            ] {
+                assert!(!link_code_stays(true, Some(sig), snap), "{sig:?}");
+            }
+        }
+        assert!(
+            !link_code_stays(false, None, true),
+            "nothing shown stays nothing"
+        );
+        // The code just came (Ev::LinkCode) and the snapshot still says not
+        // linking: many passes later it is still shown.
+        let mut shown = true;
+        for _ in 0..100 {
+            shown = link_code_stays(shown, None, false);
+        }
+        assert!(shown);
     }
 }
