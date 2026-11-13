@@ -190,6 +190,12 @@ fn is_tierset(f: &QFrame) -> bool {
         .is_some_and(|b| b >> 4 == FrameType::TierSet as u8)
 }
 
+fn is_ping(f: &QFrame) -> bool {
+    f.buf
+        .get(1)
+        .is_some_and(|b| b >> 4 == FrameType::Keepalive as u8 && b & FLAG_PING != 0)
+}
+
 fn reg(s: &SRegs, n: u8, d: u16) -> u32 {
     u32::from(s.get(n).unwrap_or(d))
 }

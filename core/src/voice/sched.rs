@@ -64,6 +64,25 @@
 //! run on `quiet_ms` (the summed length of the consecutive slots in which
 //! the peer was due to send and was not heard; slots in which it was not
 //! due add nothing) and `missed` (how many) in place of wall-clock silence.
+//! In push to talk a wall clock cap rides on top (`WallCaps`, from no frame
+//! of any kind heard; L = listen period): PINGs from 3 L (one per L, the
+//! peer answers at once), a step down from 5 L with two PINGs unanswered,
+//! a resync from 7 L, capped at 40, 50 and 60 % of S22 so the resync comes
+//! well before S22 ends the call. Worst case with S22 = 20 s (the due-slot
+//! counter may act first):
+//!
+//! | Tier | PING from | step down from | resync from |
+//! |---|---|---|---|
+//! | SF9, SF10 | 3.6 s | 6.0 s | 8.4 s |
+//! | SF11 | 3.0 s | 5.0 s | 7.0 s |
+//! | SF12 | 8.0 s | (slowest) | 12.0 s |
+//!
+//! Duplex tiers have no cap: every slot is due both ways, so the due-slot
+//! count is wall time (resync at 8 RTOs: SF5 1.5 s, SF6 2.0 s, SF7 2.8 s,
+//! SF8 4.3 s). Measured (fade under the floor 10 s into a talk spell):
+//! resync after 7.2 s at SF9, 8.0 s at SF10, 6.0 s at SF11, 10.0 s at SF12
+//! (then NO CARRIER at 18 s, S22 counted from the last frame heard); 300 s
+//! at steady SNR with 10 % loss: no step down at SF9 or SF12.
 //! A Listener frame carries an ARQ chunk only up to the tier's chunk size,
 //! except in a voice sub-slot or with the floor free (a longer chunk queued
 //! on a faster tier gets through there and never overruns a listener
@@ -285,6 +304,21 @@ fn reached(a: u32, b: u32) -> bool {
     a.wrapping_sub(b) < u32::MAX / 2
 }
 
+/// Wall clock silence ladder while push to talk slots run (no frame of any
+/// kind heard, in ms): from `ping` a Keepalive PING every `every` (one
+/// listen period; the peer answers at once), from `step` with two PINGs
+/// unanswered a step down a tier, from `resync` a resync. `L` is the listen
+/// period (`listen_every` x `frame_ms`): ping 3 L, step 5 L, resync 7 L,
+/// capped at 40, 50 and 60 % of S22 so a resync always comes well before
+/// S22 ends the call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct WallCaps {
+    pub ping: u32,
+    pub step: u32,
+    pub resync: u32,
+    pub every: u32,
+}
+
 /// What our turn in a slot may carry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Turn {
@@ -489,6 +523,27 @@ impl VoiceSched {
             .saturating_sub(self.lay.voice_ms)
             .saturating_sub(SLOT_GUARD_MS);
         self.lay.listen_every >= 2 && over <= spare
+    }
+
+    /// Push to talk with the slots running: the wall clock silence ladder
+    /// (`WallCaps`) for `s22_ms`, the S22 limit in ms. None in duplex,
+    /// where every slot is due both ways and the due-slot count already is
+    /// wall time.
+    pub(crate) fn wall_caps(&self, s22_ms: u32) -> Option<WallCaps> {
+        if !self.slots || !self.synced || self.duplex() {
+            return None;
+        }
+        let l = self
+            .lay
+            .frame_ms
+            .saturating_mul(u32::from(self.lay.listen_every.max(1)));
+        let cap = |pct: u32| s22_ms / 100 * pct;
+        Some(WallCaps {
+            ping: l.saturating_mul(3).min(cap(40)),
+            step: l.saturating_mul(5).min(cap(50)),
+            resync: l.saturating_mul(7).min(cap(60)),
+            every: l,
+        })
     }
 
     /// The slot clock runs here (always on the caller; on the answerer

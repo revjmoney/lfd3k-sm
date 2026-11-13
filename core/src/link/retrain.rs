@@ -60,7 +60,29 @@ impl Link {
         } else {
             (since(now, self.last_rx), self.ping_out)
         };
-        if silent >= rto.saturating_mul(8) {
+        // Push to talk slots: a wall clock cap on top (no frame of any kind
+        // heard): PINGs, then a step down, then a resync (`WallCaps`).
+        let s22 = reg(sregs, 22, 20).saturating_mul(1000);
+        let wall = self.vs.wall_caps(s22);
+        let quiet = since(now, self.last_rx);
+        let (wall_step, wall_resync) = match wall {
+            Some(w) => {
+                if quiet >= w.ping
+                    && (self.ping_out == 0 || since(now, self.ping_last) >= self.ping_wait)
+                    && self.q_len < QLEN
+                {
+                    self.ping_out = self.ping_out.saturating_add(1);
+                    self.ping_last = now;
+                    self.ping_wait = w.every;
+                    let p = self.ka_payload();
+                    let t = self.tier;
+                    self.enq(t, FrameType::Keepalive, FLAG_PING, &p, true, false);
+                }
+                (quiet >= w.step && self.ping_out >= 2, quiet >= w.resync)
+            }
+            None => (false, false),
+        };
+        if silent >= rto.saturating_mul(8) || wall_resync {
             self.resync_prev = self.tier;
             self.tier = Tier::ROBUST;
             self.state = State::Resync;
@@ -72,6 +94,10 @@ impl Link {
             };
             self.last_periodic = now.wrapping_sub(u32::MAX / 2);
             self.clear_pending();
+            if self.vs.slots {
+                // Our wall clock PINGs were for the old tier.
+                self.q_retain(|f| !is_ping(f));
+            }
             self.turn = true;
             self.need_listen = true;
             return;
@@ -96,7 +122,8 @@ impl Link {
         }
         // Real loss: 4 RTOs silent and at least two probes unanswered (one
         // lost keepalive reply is not enough).
-        if silent >= rto.saturating_mul(4).saturating_add(off) && pings >= 2 && !self.silence_done {
+        let due_step = silent >= rto.saturating_mul(4).saturating_add(off) && pings >= 2;
+        if (due_step || wall_step) && !self.silence_done {
             self.silence_done = true;
             if let Some(s) = self.tier.slower() {
                 self.request(s, now);
