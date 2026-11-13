@@ -725,6 +725,16 @@ impl Engine {
         }
     }
 
+    /// TALK went up while we waited for the floor with words kept: once the
+    /// floor is ours (or we stop waiting), send them and let the key go up,
+    /// without waiting for more mic audio (the mic may have stopped). Run
+    /// from `tick` and on every Floor change.
+    fn settle_release(&mut self) {
+        if self.call.as_ref().is_some_and(|c| c.release_pending) {
+            self.mic(&[]);
+        }
+    }
+
     /// Encode, seal and send one frame (short input is padded).
     fn send_voice(&mut self, frame: &[i16]) {
         let Some(c) = self.call.as_mut() else {
@@ -1174,6 +1184,7 @@ impl Engine {
             self.link_failed("");
         }
         self.link_kick();
+        self.settle_release();
         if now_ms.wrapping_sub(self.last_tx_ms) >= HEARTBEAT_MS {
             self.send(msg::HEARTBEAT, &[]);
         }
@@ -1229,6 +1240,7 @@ impl Engine {
                         c.floor = fl;
                         c.mic_buf.clear();
                         self.event(UiEvent::Floor(fl));
+                        self.settle_release();
                     }
                 }
             }

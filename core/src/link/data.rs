@@ -362,6 +362,11 @@ impl Link {
         self.vs.set_key(down);
     }
 
+    /// Our push to talk key is down (the app's last TalkKey).
+    pub fn talk_key(&self) -> bool {
+        self.vs.key()
+    }
+
     /// The talk plan of the current tier while a voice call is up (it
     /// takes effect on the air at the next slot boundary).
     pub fn talk_plan(&self) -> Option<TalkPlan> {

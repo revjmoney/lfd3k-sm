@@ -52,6 +52,8 @@ pub fn temp_dir() -> PathBuf {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mic {
     Silent,
+    /// No mic audio at all (`Engine::mic` is not called).
+    Off,
     /// A 400 Hz tone, about -12 dBFS.
     Tone,
 }
@@ -188,7 +190,9 @@ impl World {
                     a.phase = a.phase.wrapping_add(1);
                 }
             }
-            a.eng.mic(&mic);
+            if a.mic != Mic::Off {
+                a.eng.mic(&mic);
+            }
             let mut spk = [0i16; CHUNK];
             a.eng.speaker(&mut spk);
             a.heard_samples += spk.iter().filter(|&&v| v != 0).count() as u64;

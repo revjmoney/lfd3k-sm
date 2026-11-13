@@ -23,7 +23,7 @@ mod voice_common;
 use std::cell::RefCell;
 
 use lfd3k_core::voice::host::{call_state, msg};
-use lfd3k_core::voice::{slot_layout, CodecId, Floor, TalkMode, LISTEN_CHUNK};
+use lfd3k_core::voice::{slot_layout, CodecId, Floor, TalkMode, VSub, LISTEN_CHUNK};
 use lfd3k_core::Tier;
 use lfd3k_sim::{SimChannel, SnrProfile};
 use lfd3k_voice::{Trust, UiEvent};
@@ -1278,6 +1278,45 @@ fn raw_call(w: &mut World) -> (usize, usize) {
     (a, b)
 }
 
+#[test]
+fn regression_ptt_voice_out_after_key_up_is_refused() {
+    // Final review 9b: in push to talk the modem takes VoiceOut only while
+    // the floor is ours and the key is down. The tail sent just before the
+    // key goes up still goes out; VoiceOut after the key went up is
+    // dropped, even while the floor is still ours (the holder keeps it
+    // until its queue is empty).
+    let mut w = World::with_channel(
+        vec![
+            cfg("ALPHA", Some(Tier::Sf12)),
+            cfg("BRAVO", Some(Tier::Sf12)),
+        ],
+        chan_x4(SF12_ONLY, 71),
+    );
+    let (a, b) = raw_call(&mut w);
+    w.raw_send(a, &[msg::TALK_KEY, 1]);
+    assert!(w.run_until(20_000, |w| raw_floor(w, a) == Some(1)));
+    let t0 = w.now();
+    let mut tail = vec![msg::VOICE_OUT];
+    tail.extend_from_slice(&[0x11; 30]);
+    let mut late = vec![msg::VOICE_OUT];
+    late.extend_from_slice(&[0x22; 30]);
+    w.raw_send(a, &tail);
+    w.raw_send(a, &[msg::TALK_KEY, 0]);
+    w.raw_send(a, &late);
+    w.raw_send(a, &late);
+    assert!(w.run_until(30_000, |w| raw_floor(w, a) == Some(0)));
+    w.run(10_000);
+    let data = count_sent(&w, 0, 15, Some(VSub::Data as u8), t0);
+    assert_eq!(data, 1, "only the tail went on the air");
+    let heard: Vec<Vec<u8>> = w
+        .raw_frames(b, msg::VOICE_IN)
+        .into_iter()
+        .filter(|(t, _)| *t >= t0)
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(heard, vec![vec![0x11; 30]], "BOB hears the tail only");
+}
+
 fn raw_floor(w: &World, r: usize) -> Option<u8> {
     w.raw_frames(r, msg::FLOOR).last().map(|(_, p)| p[0])
 }
@@ -1758,6 +1797,7 @@ fn alternating_turns(cap: Tier, snr_x4: i16) {
     let (mut w, rev, bob) = rev_calls_bob(Some(cap), snr_x4);
     let frame = u32::from(lfd3k_core::voice::talk_plan(cap).frame_ms);
     let mut said = [0u64; 2];
+    let mut last = (rev, 0u32);
     for turn in 0..6 {
         let sp = if turn % 2 == 0 { rev } else { bob };
         assert!(
@@ -1779,9 +1819,30 @@ fn alternating_turns(cap: Tier, snr_x4: i16) {
         }
         w.apps[sp].mic = Mic::Silent;
         w.apps[sp].eng.talk_key(false);
+        last = (sp, w.apps[sp].eng.stats().frames_sent);
         said[usize::from(sp != rev)] += u64::from(talk) * 16;
     }
     w.run(12 * frame);
+    // The last key up is done: the floor is free at both ends, and after
+    // it only the words kept while waiting (at most 3 frames) and the tail
+    // went out.
+    for a in [rev, bob] {
+        assert_eq!(w.apps[a].eng.floor(), Floor::Free, "{cap:?}: the floor is free at the end");
+    }
+    let after = w.apps[last.0].eng.stats().frames_sent - last.1;
+    assert!(after <= 4, "{cap:?}: {after} frames sent after the last key up");
+    // With the key up nothing more goes out, even with the mic live.
+    let sent = [w.apps[rev].eng.stats().frames_sent, w.apps[bob].eng.stats().frames_sent];
+    w.apps[rev].mic = Mic::Tone;
+    w.apps[bob].mic = Mic::Tone;
+    w.run(4 * frame);
+    w.apps[rev].mic = Mic::Silent;
+    w.apps[bob].mic = Mic::Silent;
+    assert_eq!(
+        [w.apps[rev].eng.stats().frames_sent, w.apps[bob].eng.stats().frames_sent],
+        sent,
+        "{cap:?}: no frames with the key up"
+    );
     for (a, b) in [(rev, bob), (bob, rev)] {
         let (s, h) = (
             w.apps[a].eng.stats().frames_sent,
@@ -1797,6 +1858,39 @@ fn alternating_turns(cap: Tier, snr_x4: i16) {
         heard * 100 >= total * 95,
         "{cap:?}: {heard} of {total} samples of words heard"
     );
+}
+
+/// Push to talk, TALK let go before the floor came and then no more mic
+/// audio at all (the sound card stopped): the words kept while waiting
+/// still go out once the floor comes, and the key goes up on its own (from
+/// the Floor event and `tick`, not only from `mic`).
+#[test]
+fn regression_ptt_release_resolves_with_the_mic_stopped_sf12() {
+    let (mut w, rev, bob) = rev_calls_bob(Some(Tier::Sf12), SF12_ONLY);
+    let frame = u32::from(lfd3k_core::voice::talk_plan(Tier::Sf12).frame_ms);
+    assert!(w.run_until(60_000, |w| w.apps[rev].eng.floor() == Floor::Free));
+    w.apps[rev].eng.talk_key(true);
+    w.apps[rev].mic = Mic::Tone;
+    w.run(frame / 2);
+    assert_ne!(w.apps[rev].eng.floor(), Floor::Mine, "let go before the floor came");
+    w.apps[rev].mic = Mic::Off;
+    w.apps[rev].eng.talk_key(false);
+    assert!(
+        w.run_until(30_000, |w| w.apps[rev].eng.floor() == Floor::Mine),
+        "the floor comes for the kept words"
+    );
+    assert!(
+        w.run_until(30_000, |w| w.apps[rev].eng.floor() == Floor::Free
+            && w.apps[bob].eng.floor() == Floor::Free),
+        "the key went up without more mic audio"
+    );
+    w.run(4 * frame);
+    let (s, h) = (
+        w.apps[rev].eng.stats().frames_sent,
+        w.apps[bob].eng.stats().frames_heard,
+    );
+    assert!(s >= 1, "the kept words went out");
+    assert_eq!(s, h, "every frame sent is heard");
 }
 
 #[test]

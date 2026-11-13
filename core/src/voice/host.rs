@@ -1149,12 +1149,16 @@ impl Modem {
             }
             msg::VOICE_OUT => {
                 // Lossy by design: anything that cannot go now is dropped,
-                // silently (no Error per voice frame).
+                // silently (no Error per voice frame). Push to talk: only
+                // with the floor ours and the key down; frames that came
+                // before the key went up (the tail) are already queued and
+                // still go out, anything after it is refused.
                 let duplex = self
                     .link
                     .talk_plan()
                     .is_some_and(|pl| pl.mode == TalkMode::Duplex);
-                if up && !p.is_empty() && (duplex || self.link.floor() == Floor::Mine) {
+                let ptt_ok = self.link.floor() == Floor::Mine && self.link.talk_key();
+                if up && !p.is_empty() && (duplex || ptt_ok) {
                     self.link.voice_push(p);
                 }
             }

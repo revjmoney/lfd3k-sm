@@ -647,6 +647,11 @@ impl VoiceSched {
         self.key = down;
     }
 
+    /// Our push to talk key (the app's last TalkKey).
+    pub(crate) fn key(&self) -> bool {
+        self.key
+    }
+
     /// Queue one sealed voice frame; false if the queue is full
     /// (`VOICE_QUEUE_DUPLEX` in duplex, `VOICE_QUEUE` in push to talk) or it
     /// is empty or too long.
