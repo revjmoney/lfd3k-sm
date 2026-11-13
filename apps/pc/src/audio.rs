@@ -18,11 +18,13 @@ pub type Queue = Arc<Mutex<VecDeque<i16>>>;
 /// Most samples a queue holds (half a second); older ones are dropped.
 pub const QUEUE_MAX: usize = 8_000;
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn new_queue() -> Queue {
     Arc::new(Mutex::new(VecDeque::new()))
 }
 
 /// Push samples, dropping the oldest past [`QUEUE_MAX`].
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn push(q: &Queue, s: impl IntoIterator<Item = i16>) {
     if let Ok(mut q) = q.lock() {
         q.extend(s);
