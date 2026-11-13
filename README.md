@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="docs/img/simian-logo.png" alt="Simian Tactical Unit monkey logo" width="160"><br>
-  <b>v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M</b><br>
+  <b>v0.5.0 r.420 BL4Z3B4ND ULTR4M0D3M</b><br>
   <i>S0N1C B00M R4D10 PR0 MAX</i><br>
   by Rev. J. Money / <a href="https://jmscnc.com">jmscnc.com</a><br>
   <b>Website: <a href="https://revjmoney.github.io/lfd3k-sm/">revjmoney.github.io/lfd3k-sm</a></b>

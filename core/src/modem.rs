@@ -3646,7 +3646,7 @@ mod tests {
             output(&mut m),
             "ATI\r\
              \r\nLRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM\
-             \r\nv0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M\
+             \r\nv0.5.0 r.420 BL4Z3B4ND ULTR4M0D3M\
              \r\nS0N1C B00M R4D10 PR0 MAX\r\n\
              \r\nOK\r\n"
         );
@@ -3660,7 +3660,7 @@ mod tests {
             lines,
             [
                 "LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM",
-                "v0.1.0 r.420 BL4Z3B4ND ULTR4M0D3M",
+                "v0.5.0 r.420 BL4Z3B4ND ULTR4M0D3M",
                 "S0N1C B00M R4D10 PR0 MAX",
                 "OK",
             ]
