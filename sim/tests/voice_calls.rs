@@ -1746,3 +1746,65 @@ fn regression_hangup_in_the_slots_ends_for_the_app_at_once() {
     );
     assert!(w.net.modems[1].voice_call().is_some());
 }
+
+/// Push to talk, turns taking turns (Task 9b fix): each speaker presses
+/// TALK as soon as the screen shows the other let go (floor free) and talks
+/// at once (before the floor is theirs), for 4 frames, or for 1 frame and
+/// let go (turns 4 and 5, before the floor came at SF12), right after the
+/// last word. Every frame an app sends must be heard (the words said while waiting for the
+/// floor, and the last frame at key up), in both directions, and the far
+/// end must hear (nearly) all of the words.
+fn alternating_turns(cap: Tier, snr_x4: i16) {
+    let (mut w, rev, bob) = rev_calls_bob(Some(cap), snr_x4);
+    let frame = u32::from(lfd3k_core::voice::talk_plan(cap).frame_ms);
+    let mut said = [0u64; 2];
+    for turn in 0..6 {
+        let sp = if turn % 2 == 0 { rev } else { bob };
+        assert!(
+            w.run_until(60_000, |w| w.apps[sp].eng.floor() == Floor::Free),
+            "{cap:?} turn {turn}: the other side lets go"
+        );
+        let long = turn < 4;
+        let talk = if long { 4 * frame } else { frame };
+        w.apps[sp].eng.talk_key(true);
+        w.apps[sp].mic = Mic::Tone;
+        let t0 = w.now();
+        w.run_until(10 * frame, |w| w.now() >= t0 + talk);
+        if long {
+            assert_eq!(
+                w.apps[sp].eng.floor(),
+                Floor::Mine,
+                "{cap:?} turn {turn}: the floor came while talking"
+            );
+        }
+        w.apps[sp].mic = Mic::Silent;
+        w.apps[sp].eng.talk_key(false);
+        said[usize::from(sp != rev)] += u64::from(talk) * 16;
+    }
+    w.run(12 * frame);
+    for (a, b) in [(rev, bob), (bob, rev)] {
+        let (s, h) = (
+            w.apps[a].eng.stats().frames_sent,
+            w.apps[b].eng.stats().frames_heard,
+        );
+        println!("{cap:?}: {s} frames sent, {h} heard");
+        assert_eq!(s, h, "{cap:?}: every frame sent is heard");
+    }
+    let heard = w.apps[bob].heard_samples + w.apps[rev].heard_samples;
+    let total = said[0] + said[1];
+    println!("{cap:?}: {heard} of {total} samples of words heard");
+    assert!(
+        heard * 100 >= total * 95,
+        "{cap:?}: {heard} of {total} samples of words heard"
+    );
+}
+
+#[test]
+fn regression_ptt_alternating_turns_lose_no_words_sf12() {
+    alternating_turns(Tier::Sf12, SF12_ONLY);
+}
+
+#[test]
+fn regression_ptt_alternating_turns_lose_no_words_sf9() {
+    alternating_turns(Tier::Sf9, SF9_SNR);
+}

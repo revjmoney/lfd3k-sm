@@ -91,6 +91,12 @@ const CTRL_CHUNK: usize = 240;
 const AT_LINE_MAX: usize = 128;
 /// Most frames concealed in a row in the middle of speech.
 const CONCEAL_MAX: u8 = 4;
+/// Push to talk: frames of speech kept from the key going down until the
+/// floor is ours (sent first then; the far end hears the turn that much
+/// later, but from its first word). Three: at SF12 the answerer may wait
+/// about 6 s for the floor (its key reaches the caller in its listener
+/// slot, every 4 s, and the caller announces the change in the next slot).
+const PRE_FRAMES: usize = 3;
 
 /// One line of the directory: a person's device, or a plain station.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -336,6 +342,14 @@ struct Call {
     dec: Option<Box<dyn VoiceCodec>>,
     jitter: Jitter,
     mic_buf: Vec<i16>,
+    /// Push to talk: what was said with the key down while the floor was
+    /// not ours yet (at most `PRE_FRAMES` frames, the newest), sent first
+    /// once the floor is ours, so the first words of a turn are not lost.
+    pre: Vec<i16>,
+    /// TALK went up while we still waited for the floor with words kept:
+    /// the modem keeps our key down until the floor comes and they are
+    /// sent, then the key goes up.
+    release_pending: bool,
     play: VecDeque<i16>,
     conceal_run: u8,
     peer_muted: bool,
@@ -367,6 +381,8 @@ impl Call {
             dec: None,
             jitter: Jitter::new(2),
             mic_buf: Vec::new(),
+            pre: Vec::new(),
+            release_pending: false,
             play: VecDeque::new(),
             conceal_run: 0,
             peer_muted: false,
@@ -388,6 +404,7 @@ impl Call {
         self.dec = Some(new_codec(plan.codec, plan.frame_ms));
         self.jitter = Jitter::new(if plan.mode == TalkMode::Duplex { 2 } else { 1 });
         self.mic_buf.clear();
+        self.pre.clear();
         self.conceal_run = 0;
     }
 
@@ -404,6 +421,19 @@ impl Call {
                 // must not open the mic).
                 p.mode == TalkMode::Duplex || (self.floor == Floor::Mine && self.key_down)
             })
+    }
+
+    /// Push to talk with our key down but the floor not ours yet: the mic
+    /// is kept (`pre`) for when it is.
+    fn waiting_for_floor(&self, muted: bool) -> bool {
+        self.session.is_some()
+            && self.audio_ok
+            && !muted
+            && self.connected()
+            && self.slots()
+            && self.key_down
+            && self.floor != Floor::Mine
+            && self.plan.is_some_and(|p| p.mode != TalkMode::Duplex)
     }
 }
 
@@ -620,12 +650,36 @@ impl Engine {
         let Some(c) = self.call.as_mut() else {
             return;
         };
+        let fs = c.enc.as_ref().map_or(0, |e| e.frame_samples());
         if !c.can_send(muted) {
             c.mic_buf.clear();
+            if c.waiting_for_floor(muted) {
+                if !c.release_pending {
+                    c.pre.extend_from_slice(pcm);
+                    let over = c.pre.len().saturating_sub(fs * PRE_FRAMES);
+                    c.pre.drain(..over);
+                }
+            } else {
+                c.pre.clear();
+                if std::mem::take(&mut c.release_pending) {
+                    // No longer waiting (muted, or the call changed): the
+                    // key the modem still holds goes up now.
+                    self.talk_key(false);
+                }
+            }
             return;
         }
-        c.mic_buf.extend_from_slice(pcm);
-        let fs = c.enc.as_ref().map_or(0, |e| e.frame_samples());
+        if !c.pre.is_empty() {
+            // The floor just became ours: what was said while waiting goes
+            // out first.
+            let mut b = std::mem::take(&mut c.pre);
+            b.append(&mut c.mic_buf);
+            c.mic_buf = b;
+        }
+        let release = std::mem::take(&mut c.release_pending);
+        if !release {
+            c.mic_buf.extend_from_slice(pcm);
+        }
         if fs == 0 {
             return;
         }
@@ -635,6 +689,11 @@ impl Engine {
         }
         for f in frames {
             self.send_voice(&f);
+        }
+        if release {
+            // TALK went up while waiting: the kept words are out, now the
+            // key goes up (the rest goes out as the last frame).
+            self.talk_key(false);
         }
     }
 
@@ -806,7 +865,18 @@ impl Engine {
         let Some(c) = self.call.as_mut() else {
             return;
         };
+        if down && c.release_pending {
+            // Down again before the kept words went out: go on talking.
+            c.release_pending = false;
+            return;
+        }
         if c.key_down == down {
+            return;
+        }
+        if !down && c.waiting_for_floor(muted) && !c.pre.is_empty() {
+            // Let go before the floor came: keep the key down at the modem
+            // until the words said meanwhile are sent (`mic`).
+            c.release_pending = true;
             return;
         }
         let ptt = c.plan.is_some_and(|p| p.mode != TalkMode::Duplex);
@@ -824,6 +894,8 @@ impl Engine {
         }
         if let Some(c) = self.call.as_mut() {
             c.key_down = down;
+            c.pre.clear();
+            c.release_pending = false;
             if !down {
                 c.mic_buf.clear();
             }

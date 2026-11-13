@@ -40,17 +40,24 @@
 //! - **Replies:** a TierAck or a Keepalive reply goes out at once (after
 //!   the hold), never waiting for a sub-slot: the end that asked listens.
 //!
-//! **Voice buffers.** `Link::voice_push` holds up to `VOICE_QUEUE` (2)
-//! sealed frames: our send time moves within the slot (a listener sub-slot
-//! first, a slot that ran long), and one frame of slack keeps the app's
-//! steady frame clock from losing a frame each time it does. Each slot
+//! **Voice buffers.** `Link::voice_push` holds up to `VOICE_QUEUE_DUPLEX`
+//! (2) sealed frames in duplex and `VOICE_QUEUE` (6) in push to talk: our
+//! send time moves within the slot (a listener sub-slot first, a slot that
+//! ran long), and one frame of slack keeps the app's steady frame clock
+//! from losing a frame each time it does; in push to talk the app also
+//! sends, at once, the words it kept while waiting for the floor and the
+//! short last frame at key up, and the holder keeps the floor until its
+//! queue is empty. Each slot
 //! sends the oldest. `Link::voice_pop` hands out the last frame heard, once.
 //!
 //! **Floor (push to talk).** The caller arbitrates. Every frame carries
-//! `VF_KEY` (the sender's talk key is down); the caller's frames carry the
+//! `VF_KEY` (the sender's talk key is down, or the holder's voice frames
+//! still wait to go out); the caller's frames carry the
 //! owner (none, caller, answerer) in bits 4 and 5. At each slot boundary
 //! the caller decides: a free floor goes to the first key down (its own
-//! first, then the answerer's); a holder keeps it until its key is up; a
+//! first, then the answerer's); a holder keeps it until its key is up and
+//! its last queued frames are sent (nothing said before the key went up is
+//! dropped); a
 //! key down while the other holds waits. A change is announced in the next
 //! slot. The answerer reads the floor from the caller's frames.
 //!
@@ -172,10 +179,15 @@ use super::plan::DATA_HEAD;
 const LIS_HEAD: usize = 5;
 /// Longest sealed voice packet a Data frame carries.
 pub const VOICE_MAX: usize = MAX_PAYLOAD - 1 - DATA_HEAD;
-/// Voice frames `Link::voice_push` holds: one slot of jitter (our send time
-/// moves within the slot when a listener sub-slot comes first) on top of
-/// the frame for the next slot.
-pub const VOICE_QUEUE: usize = 2;
+/// Voice frames `Link::voice_push` holds in push to talk: one slot of
+/// jitter (our send time moves within the slot when a listener sub-slot
+/// comes first) on top of the frame for the next slot, the app's words
+/// kept while it waited for the floor (up to three frames, sent at once
+/// when the floor comes) and the short last frame at key up.
+pub const VOICE_QUEUE: usize = 6;
+/// Duplex uses only this many of them (a deeper queue there would only
+/// add delay).
+pub const VOICE_QUEUE_DUPLEX: usize = 2;
 /// Spare time a slot needs beyond voice and listener sub-slots before a
 /// non-holder may use it outside its listener slots ("room"): two 10 ms
 /// ticks of jitter, since the holder then runs on its own clock.
@@ -635,10 +647,16 @@ impl VoiceSched {
         self.key = down;
     }
 
-    /// Queue one sealed voice frame; false if `VOICE_QUEUE` frames are
-    /// already waiting or it is empty or too long.
+    /// Queue one sealed voice frame; false if the queue is full
+    /// (`VOICE_QUEUE_DUPLEX` in duplex, `VOICE_QUEUE` in push to talk) or it
+    /// is empty or too long.
     pub(crate) fn push_voice(&mut self, sealed: &[u8]) -> bool {
-        if self.tx_count >= VOICE_QUEUE || sealed.is_empty() || sealed.len() > VOICE_MAX {
+        let cap = if self.duplex() {
+            VOICE_QUEUE_DUPLEX
+        } else {
+            VOICE_QUEUE
+        };
+        if self.tx_count >= cap || sealed.is_empty() || sealed.len() > VOICE_MAX {
             return false;
         }
         let i = (self.tx_head + self.tx_count) % VOICE_QUEUE;
@@ -765,10 +783,12 @@ impl VoiceSched {
             self.lay = slot_layout(t);
         }
         if self.caller && !self.duplex() {
-            // A holder keeps the floor while its key is down (a key down at
-            // the other end waits); a free floor goes to our key first.
+            // A holder keeps the floor while its key is down or its voice
+            // frames still wait to go out (the last words, queued when the
+            // key went up, are sent, not dropped; a key down at the other
+            // end waits); a free floor goes to our key first.
             let next = match self.owner {
-                Owner::Caller if self.key => Owner::Caller,
+                Owner::Caller if self.key || self.voice_queued() => Owner::Caller,
                 Owner::Answerer if self.peer_key => Owner::Answerer,
                 _ if self.key => Owner::Caller,
                 _ if self.peer_key => Owner::Answerer,
@@ -932,6 +952,13 @@ impl VoiceSched {
         self.hold = now.wrapping_add(hold);
     }
 
+    /// Our talk key as the peer should see it: down, or up with our voice
+    /// frames still waiting while we hold the floor (the holder keeps the
+    /// floor until its last words are out).
+    fn key_flag(&self) -> bool {
+        self.key || (self.voice_queued() && self.owner == self.me_owner())
+    }
+
     /// Our body flags.
     fn flags(&self, chunk: bool) -> u8 {
         let mut f = 0;
@@ -941,7 +968,7 @@ impl VoiceSched {
         if self.slots {
             f |= VF_SLOTS;
         }
-        if self.key {
+        if self.key_flag() {
             f |= VF_KEY;
         }
         if chunk {

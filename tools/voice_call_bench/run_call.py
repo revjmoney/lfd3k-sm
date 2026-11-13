@@ -3,8 +3,8 @@
 py -3.14 run_call.py SF7 [shot_every_s]
 
 Environment: LFD3K_CALL_WORK (work folder), LFD3K_CALL_SRC (side_a.wav,
-side_b.wav, timeline.csv), LEAD_MS (push to talk: wait this long after the
-floor is ours before speaking, default 0), RUN_SUFFIX (run folder name
+side_b.wav, timeline.csv), LEAD_MS (push to talk: wait this long after TALK
+goes down before speaking, default 0), RUN_SUFFIX (run folder name
 suffix), PORT_ADD (added to the UDP ports).
 """
 import csv
@@ -135,15 +135,20 @@ def body(sf, d, me, tag, every):
     frame = PTT[sf]
     for n, who, a, b in turns():
         if who == me:
+            # Talk at once when TALK goes down, like a person: the floor
+            # comes a moment later (the app keeps what was said meanwhile);
+            # let go right after the last word.
+            d = b - a + 200
             s += [
                 "until floor_free 120000",
                 "talk down",
-                "until floor_mine 60000",
                 f"wait {LEAD}",
                 f"play {max(0, a - 100)} {b + 100}",
-                "wait 400",
+                "wait 300",
+                f"shot {tag}_{100 + n:03d}_turn{n:02d}_waiting",
+                f"wait {max(0, d // 2 - 300)}",
                 f"shot {tag}_{100 + n:03d}_turn{n:02d}_talking",
-                f"wait {b - a + 200 - 400 + frame}",
+                f"wait {d - d // 2}",
                 "talk up",
             ]
         else:

@@ -342,7 +342,8 @@ impl Link {
     }
 
     /// Queue one sealed voice frame for the next slot we may talk in;
-    /// false if `VOICE_QUEUE` (2) frames are already waiting (or no voice
+    /// false if the queue is full (2 frames in duplex, 6 in push to talk;
+    /// `VoiceSched::push_voice`) (or no voice
     /// call is up, or it is empty or longer than `VOICE_MAX`). In push to
     /// talk, frames queued while the floor is not ours are dropped at our
     /// next sub-slot.
