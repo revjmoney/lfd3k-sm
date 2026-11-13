@@ -441,19 +441,15 @@ pub struct Modem {
     pub(crate) vhp: Vhp,
 }
 
-/// The host input starts with an `AT+VOICE` line (any case, after any CR
-/// or LF, the line ending with CR or LF): with S32 = 1 such a first input
-/// starts the voice host protocol instead of opening the menu.
+/// The host input begins with the `AT+VOICE` line: `AT+VOICE` in any case,
+/// nothing before it, then CR. With S32 = 1 such a first input starts the
+/// voice host protocol instead of opening the menu.
 fn voice_line(bytes: &[u8]) -> bool {
-    let start = bytes
-        .iter()
-        .position(|&b| b != b'\r' && b != b'\n')
-        .unwrap_or(bytes.len());
-    let rest = bytes.get(start..).unwrap_or(&[]);
     let cmd = b"AT+VOICE";
-    rest.get(..cmd.len())
+    bytes
+        .get(..cmd.len())
         .is_some_and(|h| h.eq_ignore_ascii_case(cmd))
-        && matches!(rest.get(cmd.len()), Some(b'\r' | b'\n'))
+        && bytes.get(cmd.len()) == Some(&b'\r')
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -1896,14 +1892,15 @@ impl Modem {
     /// Room for listing text: the host output, or the AtLine capture.
     fn text_room(&self) -> usize {
         if self.vhp.cap.on {
-            self.vhp.cap.free()
+            self.vhp.cap.free().saturating_sub(host::CAP_FINAL)
         } else {
             self.out.free()
         }
     }
 
     fn pump_rows(&mut self) {
-        let reserve = if self.vhp.cap.on { 16 } else { OUT_RESERVE };
+        // The capture keeps its own room for the final OK (`text_room`).
+        let reserve = if self.vhp.cap.on { 0 } else { OUT_RESERVE };
         // Station slots 0 to 31, then voice slots 32 to 47.
         const END: usize = DIR_MAX + VOICE_DIR_MAX;
         fn voice_slot(d: &Directory, i: usize) -> Option<&VoiceEntry> {
@@ -2888,8 +2885,13 @@ impl Modem {
         } else {
             None
         };
+        // ATH and ATZ would end the terminal's own data or Wi-Fi call (and
+        // print its NO CARRIER into the reply): not through an AtLine then.
+        let other_call =
+            self.wire.call != Call::None || (!self.link.is_idle() && self.link.voice().is_none());
         if let Some(Ok(cmd)) = parsed {
-            if host::at_refused(&cmd) {
+            let ends_call = matches!(cmd, AtCmd::Hangup | AtCmd::Reset) && other_call;
+            if host::at_refused(&cmd) || ends_call {
                 buf.fill(0);
                 return Err(host::err::AT_REFUSED);
             }
@@ -2932,7 +2934,7 @@ impl Modem {
             if !self.vhp.cap.fin {
                 let mut b = [0u8; 64];
                 let n = format_result(&code, self.verbose, &mut b);
-                self.vhp.cap.text(b.get(..n).unwrap_or(&[]));
+                self.vhp.cap.text_final(b.get(..n).unwrap_or(&[]));
                 self.vhp.cap.finish();
             }
             return;

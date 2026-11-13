@@ -74,6 +74,9 @@ pub const VHP_CONTROL_MAX: usize = 255;
 /// The AtLine capture buffer: the longest output of a command that answers
 /// at once (AT+FWD? with 8 forwards, about 780 bytes) fits.
 pub(crate) const CAP_BUF: usize = 832;
+/// Capture bytes kept free for the final result code (verbose
+/// `\r\nNO CARRIER\r\n` is 14).
+pub(crate) const CAP_FINAL: usize = 16;
 /// Errors waiting per session (more are dropped).
 const ERRQ: usize = 4;
 /// While connected, CallState goes out again this often (fresh SNR and
@@ -153,7 +156,8 @@ pub mod call_state {
 /// away (AT+MODE=, AT+SIMNET=, AT+MENU, AT+VOICE), start or rejoin a data
 /// call (ATD, ATDT, ATDP, ATDV, ATA, ATO) or dump the screen onto the host
 /// stream (AT+FB, binary, which would break session 0's framing). The
-/// queries AT+MODE? and AT+SIMNET? are allowed.
+/// queries AT+MODE? and AT+SIMNET? are allowed. ATH and ATZ are refused
+/// too while a data or Wi-Fi call is up (`Modem::vhp_at_line`).
 pub fn at_refused(cmd: &AtCmd<'_>) -> bool {
     matches!(
         cmd,
@@ -495,9 +499,25 @@ impl Capture {
     }
 
     /// Add printed text, all or nothing (a line that does not fit is
-    /// dropped). Nothing after the final result code.
+    /// dropped), keeping `CAP_FINAL` bytes for the final result code.
+    /// Nothing after the final result code.
     pub(crate) fn text(&mut self, t: &[u8]) {
-        if self.fin || t.len() > self.free() {
+        if t.len() + CAP_FINAL > self.free() {
+            return;
+        }
+        self.put(t);
+    }
+
+    /// The final result code's text: it may use the kept bytes.
+    pub(crate) fn text_final(&mut self, t: &[u8]) {
+        if t.len() > self.free() {
+            return;
+        }
+        self.put(t);
+    }
+
+    fn put(&mut self, t: &[u8]) {
+        if self.fin {
             return;
         }
         let at = usize::from(self.len);
@@ -723,7 +743,7 @@ impl Modem {
     /// `host_input` pumps once at its end). Stops after a frame that closed
     /// the session (Leave). While a ControlOut is held, whole frames are
     /// still taken and acted on (Hangup, Decline, Leave, TalkKey, Heartbeat
-    /// and the rest), except a ControlOut or VoiceOut, which waits behind
+    /// and the rest, VoiceOut too), except a ControlOut, which waits behind
     /// the held bytes, with everything after it.
     pub(crate) fn vhp_input<R: Radio>(
         &mut self,
@@ -788,7 +808,7 @@ impl Modem {
     /// bytes between frames, or one whole frame from `rest`, decoded from
     /// the slice (the session's decoder buffer holds the held bytes). The
     /// bytes taken, or None to take nothing more now: no whole frame yet,
-    /// or a ControlOut or VoiceOut, which waits. Offered bytes keep the
+    /// or a ControlOut, which waits (the stream keeps its order). Offered bytes keep the
     /// session alive.
     fn vhp_held_frame<R: Radio>(
         &mut self,
@@ -813,7 +833,7 @@ impl Modem {
         let mut f = [0u8; VHP_FRAME_MAX];
         let n = cobs_decode(rest.get(..z).unwrap_or(&[]), &mut f).unwrap_or(0);
         if n > 0 {
-            if matches!(f.first(), Some(&(msg::CONTROL_OUT | msg::VOICE_OUT))) {
+            if f.first() == Some(&msg::CONTROL_OUT) {
                 f.fill(0);
                 return None;
             }
@@ -1032,10 +1052,12 @@ impl Modem {
         if !self.vhp.s.get(i).is_some_and(|s| s.open) {
             return;
         }
+        // NO CARRIER for session 0 only when its call was up (connected),
+        // not for one still dialing or training.
         let mut had_call = false;
         if self.vhp.owner == Some(session) {
-            had_call = self.link.voice().is_some();
-            if had_call {
+            had_call = self.link.voice().is_some() && self.link.is_connected();
+            if self.link.voice().is_some() {
                 self.link.hangup(now);
             }
             self.vhp.owner = None;
@@ -1297,11 +1319,16 @@ impl Modem {
                 return 1;
             }
         }
+        // CallState and Floor describe the call only to its owner: a
+        // session that no longer owns one (its call ended, another session's
+        // began) hears idle and free.
+        let owner = self.vhp.owner == Some(sid);
         if self.take_pend(i, P_STATE) {
-            return self.vhp_call_state(f);
+            return self.vhp_call_state(f, owner);
         }
         if self.take_pend(i, P_FLOOR) {
-            let fl = match self.vhp.floor {
+            let floor = if owner { self.vhp.floor } else { Floor::Free };
+            let fl = match floor {
                 Floor::Free => 0,
                 Floor::Mine => 1,
                 Floor::Theirs => 2,
@@ -1355,7 +1382,9 @@ impl Modem {
                 w.u8(msg::AT_REPLY)
                     .u8(u8::from(last))
                     .bytes(c.buf.get(..k).unwrap_or(&[]));
-                c.buf.copy_within(k..len, 0);
+                if k < len && len <= c.buf.len() {
+                    c.buf.copy_within(k..len, 0);
+                }
                 c.len = (len - k) as u16;
                 if last {
                     c.reset();
@@ -1366,10 +1395,14 @@ impl Modem {
         self.vhp_dir_next(i, f)
     }
 
-    /// CallState for the owner, into `f`.
-    fn vhp_call_state(&self, f: &mut [u8; VHP_FRAME_MAX]) -> usize {
-        let k = self.call_key();
-        let v = self.link.voice().copied();
+    /// CallState into `f`: the call's for its owner, idle for anyone else.
+    fn vhp_call_state(&self, f: &mut [u8; VHP_FRAME_MAX], owner: bool) -> usize {
+        let k = if owner {
+            self.call_key()
+        } else {
+            CallKey::IDLE
+        };
+        let v = self.link.voice().copied().filter(|_| owner);
         let id = self.link.call_id();
         let rx = self
             .call_rx
