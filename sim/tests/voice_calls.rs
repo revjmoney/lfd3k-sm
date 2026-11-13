@@ -1568,3 +1568,53 @@ fn regression_late_pickup_hearing_hangup_is_elsewhere_not_no_carrier() {
     let st = w.raw_frames(r, msg::CALL_STATE);
     assert!(st.iter().all(|(_, p)| p[0] != call_state::CONNECTED));
 }
+
+#[test]
+fn regression_pickup_gives_up_at_s7_on_a_busy_channel() {
+    // Found in this task's review of its own fix (ca89514): an answer waits
+    // for a quiet channel, so on a channel that is never quiet for long
+    // enough it may never go out; the pickup must still give up S7 after
+    // picking up (V223.LRA.90 clause 9.3 item 4), not wait for the caller.
+    // Every Answer and TierSet is lost, so REV keeps resending its TierSet
+    // (about one every second) to BOB/PHONE; BOB/TAB on CHARLIE (S7 = 10 s)
+    // picks up late and never hears a TierSet.
+    let chan = SimChannel {
+        profile: SnrProfile::Constant(40),
+        seed: 19,
+        drop: Some(drop_answers_and_tiersets),
+    };
+    let mut charlie = cfg("CHARLIE", None);
+    charlie.sregs.set(7, 10);
+    let mut w = World::with_channel(vec![cfg("ALPHA", None), cfg("BRAVO", None), charlie], chan);
+    let rev = w.app(0, 1, "REV", "PC");
+    let phone = w.app(1, 1, "BOB", "PHONE");
+    w.apps[phone].auto_answer = false;
+    let r = w.raw(2, 1);
+    w.raw_send(r, &strs(msg::REGISTER, &["BOB", "TAB"]));
+    w.run(1_000);
+    w.apps[rev].eng.call("BOB", None);
+    assert!(w.run_until(15_000, |w| w.has(phone, is_ring)
+        && !w.raw_frames(r, msg::RING).is_empty()));
+    w.apps[phone].eng.answer();
+    assert!(w.run_until(5_000, |w| count_sent(w, 1, 4, None, 0) > 0));
+    w.run(500);
+    let t0 = w.now();
+    w.raw_send(r, &[msg::ANSWER]);
+    assert!(w.run_until(15_000, |w| !w
+        .raw_frames(r, msg::ANSWERED_ELSEWHERE)
+        .is_empty()));
+    let took = w.raw_frames(r, msg::ANSWERED_ELSEWHERE)[0].0 - t0;
+    let sends = count_sent(&w, 2, 15, Some(3), t0);
+    println!("BOB/TAB gave up {took} ms after picking up, {sends} answers sent");
+    assert!(took <= 11_000, "gave up after {took} ms (S7 10 s)");
+    let t1 = w.now();
+    w.run(10_000);
+    assert!(
+        w.sent(2)
+            .iter()
+            .all(|x| x.0 < t1 || x.1 == 12 || (x.1 == 15 && x.2 == 0)),
+        "quiet after giving up"
+    );
+    assert!(w.raw_frames(r, msg::ENDED).is_empty());
+    assert!(!w.net.host_text(2).contains("NO CARRIER"));
+}

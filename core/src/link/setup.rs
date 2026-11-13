@@ -589,12 +589,15 @@ impl Link {
                 return;
             }
         }
-        if self.voice.sends < ANSWER_SENDS {
+        // S7 after picking up, whatever was sent: a channel that never went
+        // quiet for long enough must not keep us waiting.
+        let late = since(now, self.start) >= s7;
+        if self.voice.sends < ANSWER_SENDS && !late {
             let quiet = since(now, self.voice.busy_at) >= self.voice.quiet_ms();
             if quiet && vcall::reached(now, self.voice.next_at) {
                 self.send_voice_answer(now);
             }
-        } else if since(now, self.voice.sent_at) >= 2 * PERIOD_MS || since(now, self.start) >= s7 {
+        } else if late || since(now, self.voice.sent_at) >= 2 * PERIOD_MS {
             self.q_retain(|f| f.urgent);
             self.emit(Event::AnsweredElsewhere);
             self.go_idle();
