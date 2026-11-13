@@ -350,8 +350,10 @@ impl Identity {
     }
 }
 
+/// A new file only its owner may read (mode 0600 on Unix; Windows keeps the
+/// folder's permissions).
 #[cfg(unix)]
-fn open_private(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_private(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .write(true)
@@ -362,7 +364,7 @@ fn open_private(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_private(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_private(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)
         .create(true)

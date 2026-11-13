@@ -442,6 +442,9 @@ pub struct Engine {
     id: Identity,
     trust: TrustStore,
     trust_path: PathBuf,
+    /// The trust file could not be read and is still in place: never saved
+    /// over.
+    trust_locked: bool,
     name: String,
     label: String,
     station: String,
@@ -474,7 +477,13 @@ impl Engine {
     /// and Register (the cert's name and label; a name or label the
     /// protocol refuses gives an Error event and no Register).
     pub fn new(id: Identity, trust_path: PathBuf) -> Self {
-        let trust = TrustStore::load(&trust_path);
+        let (trust, trust_err) = match TrustStore::load(&trust_path) {
+            Ok(t) => (t, None),
+            Err(e) => (TrustStore::default(), Some(e)),
+        };
+        // A file that could not be read and is still in place is never
+        // saved over (the user may get it back).
+        let trust_locked = trust_err.as_ref().is_some_and(|e| e.kept.is_none());
         let (name, label) = id
             .cert()
             .map(|c| (c.name.clone(), c.label.clone()))
@@ -483,6 +492,7 @@ impl Engine {
             id,
             trust,
             trust_path,
+            trust_locked,
             name,
             label,
             station: String::new(),
@@ -505,9 +515,27 @@ impl Engine {
             link_join: None,
             removals: Vec::new(),
         };
+        if let Some(err) = trust_err {
+            e.event(UiEvent::Error(err.to_string()));
+        }
         e.send(msg::HELLO, &[VHP_VERSION]);
         e.register();
         e
+    }
+
+    /// Save the trust store, or say why it was not.
+    fn save_trust(&mut self) {
+        if self.trust_locked {
+            self.event(UiEvent::Error(
+                "the checked contacts were not saved: the file that is there could not be read and is kept as it is".into(),
+            ));
+            return;
+        }
+        if let Err(e) = self.trust.save(&self.trust_path) {
+            self.event(UiEvent::Error(format!(
+                "could not save the checked contacts: {e}"
+            )));
+        }
     }
 
     fn register(&mut self) {
@@ -924,11 +952,7 @@ impl Engine {
         self.trust.mark_checked(&c.peer_name, &c.peer_label, s);
         c.trust = Some(Trust::Checked);
         c.audio_ok = true;
-        if let Err(e) = self.trust.save(&self.trust_path) {
-            self.event(UiEvent::Error(format!(
-                "could not save the checked contacts: {e}"
-            )));
-        }
+        self.save_trust();
         self.after_trust();
     }
 
@@ -1107,11 +1131,7 @@ impl Engine {
     /// a Conflict).
     pub fn remove_contact_device(&mut self, name: &str, device_pub: [u8; 32]) {
         self.trust.remove_device(name, device_pub);
-        if let Err(e) = self.trust.save(&self.trust_path) {
-            self.event(UiEvent::Error(format!(
-                "could not save the checked contacts: {e}"
-            )));
-        }
+        self.save_trust();
     }
 
     /// Close the session (the app is quitting): the modem drops our

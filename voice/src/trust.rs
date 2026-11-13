@@ -87,6 +87,37 @@ fn unhex(s: &str) -> Option<[u8; 32]> {
     Some(k)
 }
 
+/// Why [`TrustStore::load`] gave no store.
+#[derive(Debug)]
+pub struct TrustLoadError {
+    /// What went wrong reading or parsing the file.
+    pub error: io::Error,
+    /// Where the unreadable file was moved (it is kept, never deleted).
+    /// `None`: the file is still at its path (it could not be read, or not
+    /// moved), so it must not be saved over.
+    pub kept: Option<PathBuf>,
+}
+
+impl std::fmt::Display for TrustLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kept {
+            Some(p) => write!(
+                f,
+                "the checked contacts file could not be read ({}); it was kept as {} and the list starts empty",
+                self.error,
+                p.display()
+            ),
+            None => write!(
+                f,
+                "the checked contacts file could not be read ({}); it was left as it is and nothing is saved over it",
+                self.error
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TrustLoadError {}
+
 /// One contact as an app lists it ([`TrustStore::contacts`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactView {
@@ -105,22 +136,61 @@ impl TrustStore {
         identity_path.with_file_name("trust.json")
     }
 
-    /// Read the store. A missing or unreadable file gives an empty store
-    /// (everyone NOT CHECKED), never an error.
-    pub fn load(path: &Path) -> Self {
-        fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    /// Read the store. No file yet gives an empty store (everyone NOT
+    /// CHECKED). A file that is not a trust store is moved aside to
+    /// `trust.json.bad` (or `trust.json.bad.<unix seconds>` when that is
+    /// taken), so it is kept for the user and never written over, and the
+    /// error says where it went. Any other read error is returned with the
+    /// file left where it is ([`TrustLoadError::kept`] is `None`); do not
+    /// save over it.
+    pub fn load(path: &Path) -> Result<Self, TrustLoadError> {
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(TrustLoadError { error, kept: None }),
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                let error = io::Error::new(io::ErrorKind::InvalidData, e);
+                let mut bad = path.as_os_str().to_owned();
+                bad.push(".bad");
+                let mut bad = PathBuf::from(bad);
+                if bad.exists() {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let mut b = bad.into_os_string();
+                    b.push(format!(".{secs}"));
+                    bad = PathBuf::from(b);
+                }
+                match fs::rename(path, &bad) {
+                    Ok(()) => Err(TrustLoadError {
+                        error,
+                        kept: Some(bad),
+                    }),
+                    // Could not move it: leave it, and say so (kept None).
+                    Err(_) => Err(TrustLoadError { error, kept: None }),
+                }
+            }
+        }
     }
 
-    /// Write the store (side file first, then moved over `path`).
+    /// Write the store: a private side file (owner only on Unix), synced to
+    /// the disk, then moved over `path`.
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        use std::io::Write;
         let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
-        fs::write(&tmp, json)?;
+        // A stale side file could carry looser permissions; start fresh.
+        let _ = fs::remove_file(&tmp);
+        {
+            let mut f = crate::identity::open_private(&tmp)?;
+            f.write_all(&json)?;
+            f.sync_all()?;
+        }
         fs::rename(&tmp, path)
     }
 

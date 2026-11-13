@@ -350,7 +350,7 @@ fn squatter_gets_not_checked_no_audio() {
     let dir = tmp("squatter");
     let rev = Identity::generate("REV", "PC").unwrap();
     let bob = Identity::generate("BOB", "PHONE").unwrap();
-    let mut store = TrustStore::load(&dir.join("trust.json"));
+    let mut store = TrustStore::load(&dir.join("trust.json")).unwrap();
     let (_, s) = handshake(&rev, &bob);
     store.mark_checked("REV", "PC", &s);
     // Someone else takes the name REV on a new label, with their own person
@@ -376,7 +376,7 @@ fn changed_device_key_is_conflict() {
     let (_, s) = handshake(&rev, &bob);
     store.mark_checked("rev", "pc", &s);
     store.save(&path).unwrap();
-    let store = TrustStore::load(&path);
+    let store = TrustStore::load(&path).unwrap();
     // Same device: still checked after a save and load (names any case).
     let (_, s) = handshake(&rev, &bob);
     assert_eq!(store.verdict("REV", "PC", &s), Trust::Checked);
@@ -721,4 +721,65 @@ fn v223_lra_92_annex_c_reference_session_matches() {
     );
     // And the answerer opens the caller's vector frames.
     assert_eq!(sa.open(&v), Some(vec![1, 2, 3, 4, 5, 6]));
+}
+
+#[test]
+fn trust_store_missing_file_is_empty_and_save_is_private() {
+    let dir = tmp("trust-io");
+    let path = dir.join("trust.json");
+    let _ = std::fs::remove_file(&path);
+    // No file yet: an empty store, not an error.
+    let mut store = TrustStore::load(&path).unwrap();
+    assert!(store.contacts().is_empty());
+    let rev = Identity::generate("REV", "PC").unwrap();
+    let bob = Identity::generate("BOB", "PHONE").unwrap();
+    let (_, s) = handshake(&rev, &bob);
+    store.mark_checked("REV", "PC", &s);
+    // A stale side file is replaced, and none is left behind.
+    let mut tmp_side = path.as_os_str().to_owned();
+    tmp_side.push(".tmp");
+    std::fs::write(&tmp_side, b"stale").unwrap();
+    store.save(&path).unwrap();
+    assert!(!std::path::Path::new(&tmp_side).exists());
+    assert_eq!(TrustStore::load(&path).unwrap().contacts().len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "trust.json is owner only");
+    }
+}
+
+#[test]
+fn trust_store_bad_file_is_kept_and_reported() {
+    let dir = tmp("trust-bad");
+    let path = dir.join("trust.json");
+    let bad = dir.join("trust.json.bad");
+    let _ = std::fs::remove_file(&bad);
+    std::fs::write(&path, b"{ not json").unwrap();
+    let err = TrustStore::load(&path).unwrap_err();
+    // Moved aside, contents intact, and the error names where it went.
+    assert_eq!(err.kept.as_deref(), Some(bad.as_path()));
+    assert!(!path.exists());
+    assert_eq!(std::fs::read(&bad).unwrap(), b"{ not json");
+    assert!(err.to_string().contains("trust.json.bad"), "{err}");
+    // A second bad file does not write over the first one.
+    std::fs::write(&path, b"also bad").unwrap();
+    let err = TrustStore::load(&path).unwrap_err();
+    let kept = err.kept.expect("kept");
+    assert_ne!(kept, bad);
+    assert_eq!(std::fs::read(&kept).unwrap(), b"also bad");
+    assert_eq!(std::fs::read(&bad).unwrap(), b"{ not json");
+
+    // The engine starts with an empty list and says so (UiEvent::Error).
+    std::fs::write(&path, b"[1, 2").unwrap();
+    let mut e = lfd3k_voice::Engine::new(Identity::generate("REV", "PC").unwrap(), path.clone());
+    let mut said = false;
+    while let Some(ev) = e.poll_event() {
+        if let lfd3k_voice::UiEvent::Error(t) = ev {
+            said |= t.contains("checked contacts") && t.contains("kept as");
+        }
+    }
+    assert!(said, "the engine reports the unreadable trust file");
+    assert!(e.contacts().is_empty());
 }
