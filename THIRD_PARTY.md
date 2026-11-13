@@ -103,6 +103,140 @@ Standard primitives only (spec section 7), from the RustCrypto and dalek project
 
 The PGP word list in `voice/src/words.rs` (the two words) is public domain (Juola and Zimmermann); checked word for word against a published copy.
 
+## The PC voice app (`apps/pc`, `lfd3k-voice-pc`; PC only, never in the firmware)
+
+eframe has default features off (`glow`, `wayland`, `x11` on); egui's own fonts are not built in. cpal is a Windows-only dependency, so a Linux build needs no ALSA headers (the app then runs without sound devices). getrandom (already above) makes the built-in modem's first hotspot password. Licenses as declared in each crate's Cargo.toml (`cargo tree -f '{p} {l}'`); crates already listed above for the voice crate or sim are not repeated. "Where": built on Windows, on Linux, or both.
+
+| Crate | Version | License | Where | Why |
+|-------|---------|---------|-------|-----|
+| accesskit | 0.25.2 | MIT OR Apache-2.0 | both | Accessibility types, via egui |
+| adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| ahash | 0.8.12 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| arrayvec | 0.7.8 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| as-raw-xcb-connection | 1.0.1 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| bytemuck_derive | 1.12.1 | Zlib OR Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| byteorder-lite | 0.1.0 | Unlicense OR MIT | both | Via eframe, egui, winit or cpal |
+| calloop | 0.13.0 | MIT | linux | Via eframe, egui, winit or cpal |
+| calloop-wayland-source | 0.3.0 | MIT | linux | Via eframe, egui, winit or cpal |
+| cfg_aliases | 0.2.2 | MIT | both | Via eframe, egui, winit or cpal |
+| color | 0.3.3 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| cpal | 0.18.2 | Apache-2.0 | win | Sound in and out (Windows only, WASAPI) |
+| crc32fast | 1.5.5 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| cursor-icon | 1.2.0 | MIT OR Apache-2.0 OR Zlib | both | Via eframe, egui, winit or cpal |
+| dasp_sample | 0.11.0 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| dlib | 0.5.3 | MIT | linux | Via eframe, egui, winit or cpal |
+| downcast-rs | 1.2.1 | MIT/Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| dpi | 0.1.2 | Apache-2.0 AND MIT | both | Via eframe, egui, winit or cpal |
+| ecolor | 0.37.0 | MIT OR Apache-2.0 | both | Colors, via egui |
+| eframe | 0.37.0 | MIT OR Apache-2.0 | both | The window (glow renderer; default features off: glow, wayland, x11) |
+| egui | 0.37.0 | MIT OR Apache-2.0 | both | Immediate mode GUI, via eframe |
+| egui_glow | 0.37.0 | MIT OR Apache-2.0 | both | OpenGL painter, via eframe |
+| egui-winit | 0.37.0 | MIT OR Apache-2.0 | both | Window events, via eframe |
+| either | 1.19.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| emath | 0.37.0 | MIT OR Apache-2.0 | both | Math, via egui |
+| epaint | 0.37.0 | MIT OR Apache-2.0 | both | Shapes and text, via egui |
+| euclid | 0.22.14 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| fdeflate | 0.3.7 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| fearless_simd | 0.4.1 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| flate2 | 1.1.11 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| foldhash | 0.2.0 | Zlib | both | Via eframe, egui, winit or cpal |
+| font-types | 0.12.7 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| gethostname | 1.1.0 | Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| gl_generator | 0.14.0 | Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib | both | OpenGL bindings, via eframe |
+| glutin | 0.32.3 | Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| glutin_egl_sys | 0.7.1 | Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| glutin_glx_sys | 0.6.1 | Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| glutin_wgl_sys | 0.6.1 | Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| glutin-winit | 0.5.0 | MIT | both | Via eframe, egui, winit or cpal |
+| guillotiere | 0.7.0 | MIT/Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| harfrust | 0.12.0 | MIT | both | Text shaping, via epaint |
+| hashbrown | 0.17.1 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| image | 0.25.10 | MIT OR Apache-2.0 | both | Image types, via eframe (icon) |
+| itertools | 0.15.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| khronos_api | 3.1.0 | Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| kurbo | 0.13.1 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| libloading | 0.8.9 | ISC | both | Via eframe, egui, winit or cpal |
+| linebender_resource_handle | 0.1.1 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| memmap2 | 0.9.12 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| moxcms | 0.8.1 | BSD-3-Clause OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| nohash-hasher | 0.2.0 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| once_cell | 1.21.4 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| peniko | 0.6.1 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| percent-encoding | 2.3.2 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| png | 0.18.1 | MIT OR Apache-2.0 | both | Decodes the Simian logo, encodes the script screenshots |
+| polling | 3.11.0 | Apache-2.0 OR MIT | linux | Via eframe, egui, winit or cpal |
+| polycool | 0.4.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| profiling | 1.0.18 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| pxfm | 0.1.30 | BSD-3-Clause OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| quick-xml | 0.41.0 | MIT | linux | Via eframe, egui, winit or cpal |
+| raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | both | Via eframe, egui, winit or cpal |
+| read-fonts | 0.41.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| scoped-tls | 1.0.1 | MIT/Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| self_cell | 1.3.0 | Apache-2.0 OR GPL-2.0-only (used under Apache-2.0) | both | Via epaint (used under Apache-2.0) |
+| simd-adler32 | 0.3.10 | MIT | both | Via eframe, egui, winit or cpal |
+| skrifa | 0.44.0 | MIT OR Apache-2.0 | both | Font outlines (variable Archivo), via epaint |
+| slab | 0.4.12 | MIT | linux | Via eframe, egui, winit or cpal |
+| smithay-client-toolkit | 0.19.2 | MIT | linux | Via eframe, egui, winit or cpal |
+| smol_str | 0.2.2 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| static_assertions | 1.1.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| thiserror | 1.0.69 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| thiserror | 2.0.21 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| tracing | 0.1.44 | MIT | both | Via eframe, egui, winit or cpal |
+| tracing-core | 0.1.36 | MIT | both | Via eframe, egui, winit or cpal |
+| unicode-general-category | 1.1.0 | Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| unicode-properties | 0.1.5 | (MIT OR Apache-2.0) AND Unicode-3.0 | both | Via eframe, egui, winit or cpal |
+| unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| uuid | 1.29.2 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| vello_common | 0.2.0 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| vello_cpu | 0.2.0 | Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+| version_check | 0.9.5 | MIT/Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| wayland-backend | 0.3.17 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-client | 0.31.15 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-csd-frame | 0.3.0 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-cursor | 0.31.14 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-protocols | 0.32.13 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-protocols-plasma | 0.3.12 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-protocols-wlr | 0.3.12 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-scanner | 0.31.11 | MIT | linux | Via eframe, egui, winit or cpal |
+| wayland-sys | 0.31.11 | MIT | linux | Via eframe, egui, winit or cpal |
+| web-time | 1.1.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| windows | 0.62.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-collections | 0.3.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-core | 0.62.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-future | 0.3.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-implement | 0.60.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-interface | 0.59.3 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-numerics | 0.3.1 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-result | 0.4.1 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-strings | 0.5.1 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-targets | 0.52.6 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| windows-threading | 0.2.1 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
+| winit | 0.30.13 | Apache-2.0 | both | Windows and input, via eframe |
+| x11-dl | 2.21.0 | MIT | linux | Via eframe, egui, winit or cpal |
+| x11rb | 0.13.2 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| x11rb-protocol | 0.13.2 | MIT OR Apache-2.0 | linux | Via eframe, egui, winit or cpal |
+| xcursor | 0.3.11 | MIT | linux | Via eframe, egui, winit or cpal |
+| xkbcommon-dl | 0.4.2 | MIT | linux | Via eframe, egui, winit or cpal |
+| xkeysym | 0.2.1 | MIT OR Apache-2.0 OR Zlib | linux | Via eframe, egui, winit or cpal |
+| xml-rs | 0.8.29 | MIT | both | Via eframe, egui, winit or cpal |
+| zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
+
+Fonts bundled in `apps/pc/assets/fonts/` (built into the app with `include_bytes!`), downloaded from the official google/fonts GitHub repository on 2026-11-12:
+
+| Font | File | License | Used in |
+|------|------|---------|---------|
+| Archivo (variable, wdth and wght axes; shown at weights 450 and 820) | `Archivo-Variable.ttf` (google/fonts `ofl/archivo/Archivo[wdth,wght].ttf`, 658,596 bytes) | SIL Open Font License 1.1, Copyright 2020 The Archivo Project Authors (`Archivo-OFL.txt`) | the app's text |
+| IBM Plex Mono Regular and SemiBold | `IBMPlexMono-Regular.ttf` (135,580 bytes), `IBMPlexMono-SemiBold.ttf` (140,216 bytes) | SIL Open Font License 1.1, Copyright 2017 IBM Corp. with Reserved Font Name "Plex" (`IBMPlexMono-OFL.txt`) | numbers, tiers, codes |
+
 ## Toolchain and firmware components (not crates)
 
 | Component | Version | License | Used in |

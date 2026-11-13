@@ -43,6 +43,7 @@ across town on 918.5 MHz.
   (`ATDT AXIS` opens a telnet call), and a published forward so radio callers reach a telnet BBS.
 - **Find your friends.** Beacons, `AT+SCAN`, a station directory with pinning, dial by name, and a
   privacy mode.
+- **Voice calls by name.** Your own encrypted radio (cell) phone network!! Call anyone with a modem. No carrier. No tower. No one listening. Call a person by name (REV rings whatever REV is on), talk like a phone call on the fast tiers and push to talk on the slow ones, scrambled end to end by the FLOWTRON SCRAMBLER with a two word check; the PC app `lfd3k-voice-pc` runs today with its own simulated modem ([docs/voice-pc.md](docs/voice-pc.md)).
 - **A full-screen setup menu.** `AT+MENU` opens an 80x24 ANSI lightbar menu (CP437, 16 colors) for
   SyncTERM: directory and scan, live link status, settings, forwards, Wi-Fi.
 - **A front panel with attitude.** The OLED shows modem lights (OH CD SD RD HS EC DC AA), the call
@@ -124,6 +125,7 @@ ESP-IDF and takes a while; later builds take seconds.
 - [Heltec V3](docs/heltec-v3.md): the modem on a V3, what differs from the V4, build and flash
 - [Multimode](docs/multimode.md): four firmwares on one radio (V4)
 - [SimNet](docs/simnet.md): call a real V4 or V3 from the PC over Wi-Fi with a simulated radio
+- [Voice calls on the PC](docs/voice-pc.md): `lfd3k-voice-pc`, call by name, push to talk, linking devices
 - Bench sheets: [phase 2](docs/phase2-bench.md), [phase 3](docs/phase3-bench.md), [phase 4](docs/phase4-bench.md)
 - [A full demo call transcript](docs/phase1-demo.txt)
 

@@ -1,0 +1,101 @@
+# Voice calls on the PC: lfd3k-voice-pc
+
+**Your own encrypted radio (cell) phone network!! Call anyone with a modem. No carrier. No tower. No one listening.**
+
+`lfd3k-voice-pc` is the PC voice app of the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM. It calls people by name, like a phone. In this first part it carries its own modem inside: a real LFD3K-SM core on a simulated radio over UDP (SimNet, the same as `lfd3k-pcmodem`), so two copies of the app call each other with no radio at all, on one PC or on two. The phone app and the USB link to a real modem come later.
+
+Everything in a call is scrambled by the FLOWTRON SCRAMBLER (end to end, keys made fresh for every call). Ham mode does not exist yet, so the scrambler is always on.
+
+## Build
+
+From PowerShell in the repo (the voice crate needs clang-cl, see the voice notes in `docs/FEATURES.md`):
+
+```powershell
+$env:LFD3K_CLANG_CL = 'D:\android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang-cl.exe'
+cargo build --release -p lfd3k-voice-pc
+```
+
+The program is `target\release\lfd3k-voice-pc.exe`. Use the release build for calls: Opus and Codec2 are slow in a debug build.
+
+## Options
+
+```
+lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
+    [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
+    [--auto-answer] [--play <wav>] [--record <wav>]
+```
+
+| Option | Meaning |
+|---|---|
+| `--name`, `--label` | Your voice name (a person, like REV) and this device's label (like PC). Used the first time only, to make this device's keys; after that change them in Settings, Voice and keys. Default REV and PC |
+| `--bind`, `--peer` | This app's UDP address and the other app's (both `addr:port`). Defaults 127.0.0.1:4211 and 127.0.0.1:4210 |
+| `--snr <dB>` | What the other modem hears from ours (default 8). Lower is slower: the tier, codec and talk mode follow it |
+| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away |
+| `--data <dir>` | Where this device keeps its keys, checked contacts and the modem's saved settings. Default `%APPDATA%\lfd3k-voice-pc\<NAME>-<LABEL>` |
+| `--station <NAME>` | The built-in modem's station name. Default `PCMODEM-<port>` |
+| `--auto-answer` | Test helper: the app picks up by itself and talks anyway (the two words still show). The modem's S0 still never answers voice; this is the app's choice |
+| `--play <wav>` | Test helper: the WAV is the mic (looped while we may talk). The real mic is not opened |
+| `--record <wav>` | Test helper: what the app hears goes into this WAV (written at the end of each call). The speakers are not used |
+| `--script <file> --shots <dir>` | Test helper: drives the window from a file, one action per line (call, words_match, talk down, set ATS30=5, save, shot <name>...), through the same code as the buttons; the command list is at the top of the script code in `apps/pc/src/ui.rs` |
+
+## Two apps on this PC
+
+Open two PowerShell windows in the repo.
+
+Window 1, the far end, which answers by itself and plays a recording:
+
+```powershell
+target\release\lfd3k-voice-pc.exe --name ANN --label PC --bind 127.0.0.1:4210 --peer 127.0.0.1:4211 --auto-answer --play sim\testdata\speech-16k.wav --record ann-heard.wav
+```
+
+Window 2, you:
+
+```powershell
+target\release\lfd3k-voice-pc.exe --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
+```
+
+The ANN copy uses no sound devices (`--play` replaces its mic, `--record` its speakers), so your mic never hears it and nothing feeds back. **Use a headset in CALL mode**: the PC app has no echo canceller in this part.
+
+## Calling by name
+
+1. Wait for ANN/PC to show under PEOPLE AND STATIONS NEARBY (a new name is announced within about 15 s; SCAN on the DIRECTORY screen asks right away). The list shows `CALL` (a phone call) or `PTT` (push to talk) for the best tier.
+2. Press CALL on that row, or type the name under CALL BY NAME (`ANN` rings every device of ANN; add the label `PC` for one device).
+3. The two words show once the scrambler is up, with `ANN/PC (NOT CHECKED)` the first time. Read them out; both screens show the same two. Press WORDS MATCH (remembered for next time) or TALK ANYWAY (this call only). Audio is held both ways until then. `NOT THE ANN YOU CHECKED` means a checked device now shows a different key, or a removed one: the call stays muted.
+4. The line under the name shows the real tier, codec and mode, for example `SF7 BW500 21875   CODEC2 2400   CALL`. HANG UP ends it. ANSWERED ELSEWHERE, DECLINED, NO ANSWER and CALL ENDED show in the banner.
+5. Someone calling you fills the right side with INCOMING CALL, ANSWER and DECLINE.
+
+## Slow tiers and push to talk
+
+Start your copy with `--cap-tier SF9` (or `--snr -12`). From SF9 down the call is push to talk: hold the big TALK button, or the space bar, and let go to listen. `WAITING FOR THE FLOOR` means the other side holds it; you get it when they let go. At SF12 the line reads `PTT DELAYED`: the listener hears you about 2 s late. The `--auto-answer --play` copy takes the floor, plays the whole WAV, lets go for 8 s so you can answer, and starts again.
+
+## Listening to the tiers without a call
+
+`lfd3k-voicesim` runs the whole path in the simulator and writes one WAV per tier:
+
+```powershell
+cargo run --release -p lfd3k-sim --bin lfd3k-voicesim -- --tier all --in sim/testdata/speech-16k.wav --out target/voicesim
+```
+
+Play `target\voicesim\SF5.wav` to `SF12.wav` in any player. The table it prints gives the codec, mode, frames lost and the mouth-to-ear delay for each.
+
+## Linking your own devices
+
+Linking makes your second device count as checked for everyone who checked your first one.
+
+1. On the device you set up first (it holds your person key): Settings, Voice and keys, LINK A DEVICE. A 6 digit code shows. It works once, for 5 minutes; CANCEL wipes it.
+2. On the new device: type the code in the CODE box and press JOIN.
+3. From the new device, call the first one by name. The link runs inside that call. When it is done both show LINKED, and the new device carries your name.
+
+A wrong code fails with nothing learned (`link failed` after about a minute); start again with a new code.
+
+## Settings
+
+SETTINGS runs the whole modem, with the same AT lines the AT+MENU sends: tabs Radio (station name, S30 TX power with a warning above the safe default of 2, S21, S0, S31, S32, S20, S7, S22), Privacy (ON, QUIET, HIDDEN, pinned names), Wi-Fi (hotspot, client network, the live status; passwords never shown, and wiped from the app once sent), Forwards (8 slots, publish), Voice and keys (your name and label, linking, checked contacts, remove a lost device), About (ATI, AT&V). The DIRECTORY screen dials, pins, deletes and scans.
+
+A change is live at once. When the settings differ from the saved ones a bar shows SAVE (AT&W, kept after a restart: the built-in modem keeps its saved settings and directory in the data folder, passwords as is, as a real modem does in its flash) and DISCARD (ATZ, back to the saved ones; not during a call, as ATZ ends it).
+
+Removed devices (REMOVE DEVICE on one of your own) are kept in `removed.json` in the data folder and told to each contact at your next call with them.
+
+## Two PCs
+
+Same as above with each app's `--bind` on its own LAN address and `--peer` the other PC's, for example `--bind 192.168.1.20:4210 --peer 192.168.1.30:4210`. Let UDP through the firewall on both.

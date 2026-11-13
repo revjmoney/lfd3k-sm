@@ -22,4 +22,4 @@ pub use identity::{valid_voice_name, DeviceCert, Identity};
 pub use jitter::Jitter;
 pub use link::{new_link_code, LinkError, LinkJoin, LinkOffer};
 pub use scrambler::{Handshake, Role, ScrambleError, Session};
-pub use trust::{Trust, TrustStore};
+pub use trust::{ContactView, Trust, TrustStore};

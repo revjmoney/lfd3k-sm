@@ -487,6 +487,14 @@ impl Engine {
         self.call.as_ref().is_some_and(|c| c.peer_muted)
     }
 
+    /// The far side of the call: voice name, device label and modem
+    /// station (as CallState gives them; label and station may be empty).
+    pub fn peer(&self) -> Option<(String, String, String)> {
+        self.call
+            .as_ref()
+            .map(|c| (c.peer_name.clone(), c.peer_label.clone(), c.peer_station.clone()))
+    }
+
     /// True while a call is placed, ringing out, or up.
     pub fn in_call(&self) -> bool {
         self.call.is_some()
@@ -954,6 +962,24 @@ impl Engine {
         if !self.removals.contains(&device_pub) {
             self.removals.push(device_pub);
         }
+    }
+
+    /// Stop linking: the code shown here (if any) is wiped and an offer or
+    /// a join in progress is dropped. Nothing is sent.
+    pub fn cancel_link(&mut self) {
+        self.link_code = None;
+        self.link_offer = None;
+        self.link_join = None;
+    }
+
+    /// A link code is shown or a link is running on this device.
+    pub fn linking(&self) -> bool {
+        self.link_code.is_some() || self.link_offer.is_some() || self.link_join.is_some()
+    }
+
+    /// The user's checked contacts (for the app's list).
+    pub fn contacts(&self) -> Vec<crate::trust::ContactView> {
+        self.trust.contacts()
     }
 
     /// Remove a device from a contact in our trust store (it then shows as

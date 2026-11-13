@@ -73,6 +73,32 @@ fn hex(k: &[u8; 32]) -> String {
     s
 }
 
+fn unhex(s: &str) -> Option<[u8; 32]> {
+    let b = s.as_bytes();
+    if b.len() != 64 {
+        return None;
+    }
+    let mut k = [0u8; 32];
+    for (i, o) in k.iter_mut().enumerate() {
+        let hi = char::from(*b.get(2 * i)?).to_digit(16)?;
+        let lo = char::from(*b.get(2 * i + 1)?).to_digit(16)?;
+        *o = (hi * 16 + lo) as u8;
+    }
+    Some(k)
+}
+
+/// One contact as an app lists it ([`TrustStore::contacts`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContactView {
+    pub name: String,
+    /// Checked devices: label and device key.
+    pub devices: Vec<(String, [u8; 32])>,
+    /// A person key is checked (linked devices count as checked).
+    pub person: bool,
+    /// Devices removed from this contact.
+    pub removed: usize,
+}
+
 impl TrustStore {
     /// The trust file that goes with an identity file (same folder).
     pub fn path_next_to(identity_path: &Path) -> PathBuf {
@@ -159,6 +185,25 @@ impl TrustStore {
         if let Some(cert) = &s.peer_cert {
             c.person = Some(hex(&cert.person_pub));
         }
+    }
+
+    /// Every contact, for an app's list: name, checked devices (label and
+    /// device key), whether a person key is checked, and how many devices
+    /// were removed.
+    pub fn contacts(&self) -> Vec<ContactView> {
+        self.contacts
+            .iter()
+            .map(|c| ContactView {
+                name: c.name.clone(),
+                devices: c
+                    .devices
+                    .iter()
+                    .filter_map(|d| Some((d.label.clone(), unhex(&d.key)?)))
+                    .collect(),
+                person: c.person.is_some(),
+                removed: c.removed.len(),
+            })
+            .collect()
     }
 
     /// Remove a device from a contact: it is no longer checked, and from now

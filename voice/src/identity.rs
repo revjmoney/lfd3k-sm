@@ -212,6 +212,23 @@ impl Identity {
         Some(())
     }
 
+    /// A new voice name and device label for this device: a new cert for
+    /// the same device key, signed by this device's own person key (keys
+    /// are kept). `None`, and nothing changes, when this device holds no
+    /// person key or the protocol would refuse the name or the label.
+    pub fn rename(&mut self, name: &str, label: &str) -> Option<()> {
+        if !valid_voice_name(name) || !lfd3k_core::voice::valid_label(label) {
+            return None;
+        }
+        let person = self.person.as_ref()?;
+        let cert = DeviceCert::sign(person, self.device_pub(), name, label)?;
+        if !cert.verify() {
+            return None;
+        }
+        self.cert = Some(cert);
+        Some(())
+    }
+
     /// Sign with the device key.
     pub(crate) fn sign_device(&self, msg: &[u8]) -> [u8; 64] {
         self.device.sign(msg).to_bytes()

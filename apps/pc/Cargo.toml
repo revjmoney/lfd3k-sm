@@ -1,0 +1,31 @@
+[package]
+name = "lfd3k-voice-pc"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Rev. J. Money <https://jmscnc.com>"]
+publish = false
+description = "LFD3K-SM voice calls on the PC: the voice app with an embedded modem on SimNet UDP"
+
+[[bin]]
+name = "lfd3k-voice-pc"
+path = "src/main.rs"
+
+[dependencies]
+lfd3k-core = { path = "../../core" }
+lfd3k-voice = { path = "../../voice" }
+# UdpPort (SimNet over UDP), the same one lfd3k-pcmodem uses.
+lfd3k-sim = { path = "../../sim" }
+# The window (MIT OR Apache-2.0). glow renderer only; no persistence.
+eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11"] }
+# The Simian logo (PNG decode only).
+png = "0.18"
+zeroize = "1"
+# The built-in modem's first hotspot password (as the firmware makes one).
+getrandom = "0.4"
+
+# Audio in and out (Apache-2.0). Windows only: on other systems the app runs
+# without sound devices (WAV play and record still work), so a Linux build
+# needs no ALSA headers.
+[target.'cfg(windows)'.dependencies]
+cpal = "0.18"
