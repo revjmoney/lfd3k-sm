@@ -113,6 +113,14 @@ impl TrustStore {
         &mut self.contacts[i]
     }
 
+    /// True when the user has checked at least one device (or the person
+    /// key) of `name`: the directory shows such a name as checked. Only a
+    /// hint; the verdict on a call comes from [`TrustStore::verdict`].
+    pub fn name_checked(&self, name: &str) -> bool {
+        self.find(name)
+            .is_some_and(|c| !c.devices.is_empty() || c.person.is_some())
+    }
+
     /// The verdict for `name`/`label` on a finished handshake.
     pub fn verdict(&self, name: &str, label: &str, s: &Session) -> Trust {
         let Some(c) = self.find(name) else {

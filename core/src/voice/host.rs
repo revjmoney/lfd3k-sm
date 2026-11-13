@@ -193,8 +193,9 @@ const ENDS: [(u16, u8); 5] = [
 ];
 
 /// COBS encode `src` into `dst` and add the zero delimiter. None when
-/// `dst` is too small.
-fn cobs_encode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
+/// `dst` is too small. Public so the apps (the `voice` crate) frame the
+/// same way.
+pub fn cobs_encode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
     let mut code_at = 0usize;
     let mut o = 1usize;
     let mut code = 1u8;
@@ -223,7 +224,7 @@ fn cobs_encode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
 
 /// Decode one COBS frame (without its zero delimiter) into `dst`. None for
 /// a zero inside, a block cut short, or a frame longer than `dst`.
-fn cobs_decode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
+pub fn cobs_decode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
     let mut o = 0usize;
     while i < src.len() {

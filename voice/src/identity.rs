@@ -109,6 +109,12 @@ impl DeviceCert {
     }
 }
 
+/// A voice name the voice host protocol takes: 1 to 16 printable ASCII
+/// without `:` (the station name rule, spec 5.1).
+pub fn valid_voice_name(s: &str) -> bool {
+    lfd3k_core::voice::Name16::new(s).is_some()
+}
+
 /// True when `s` fits a cert field (at most [`MAX_FIELD`] bytes).
 pub(crate) fn field_ok(s: &str) -> bool {
     s.len() <= MAX_FIELD
@@ -151,9 +157,11 @@ pub struct Identity {
 impl Identity {
     /// A first device: makes a device key and a person key, and signs the
     /// device key with the person key (see `DeviceCert::signed_bytes`).
-    /// `None` when the name or the label is longer than [`MAX_FIELD`] bytes.
+    /// `None` when the voice host protocol would refuse the name or the
+    /// label: a name is 1 to 16 printable ASCII without `:`, a label 1 to 8
+    /// printable ASCII without `:` or `/` (spec 5.1).
     pub fn generate(name: &str, label: &str) -> Option<Self> {
-        if !field_ok(name) || !field_ok(label) {
+        if !valid_voice_name(name) || !lfd3k_core::voice::valid_label(label) {
             return None;
         }
         let device = random_key();
@@ -207,6 +215,12 @@ impl Identity {
     /// Sign with the device key.
     pub(crate) fn sign_device(&self, msg: &[u8]) -> [u8; 64] {
         self.device.sign(msg).to_bytes()
+    }
+
+    /// Sign with the person key (a device removal, [`crate::control`]).
+    /// `None` when this device holds no person key.
+    pub(crate) fn sign_person(&self, msg: &[u8]) -> Option<[u8; 64]> {
+        self.person.as_ref().map(|p| p.sign(msg).to_bytes())
     }
 
     /// Write the identity file (private keys). Written to a side file first,

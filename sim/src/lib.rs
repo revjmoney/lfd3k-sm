@@ -75,12 +75,14 @@
 //!    per script), then queued server bytes go to `wire_input` (what it
 //!    refuses waits for the next step); a due close calls `wire_closed`.
 
+pub mod multi;
 pub mod rng;
 
 use std::collections::VecDeque;
 
 use lfd3k_core::frame::{decode, FrameType};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
+pub use multi::Multi;
 pub use rng::Rng;
 
 /// SNR over time, in dB x4.

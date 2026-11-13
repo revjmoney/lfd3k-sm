@@ -47,6 +47,18 @@ impl Jitter {
         }
     }
 
+    /// Frames waiting to be played. With `pop` giving `None`, a count above
+    /// 0 means a frame was lost or is late (conceal); 0 means the buffer ran
+    /// dry or has not started (the talker stopped, or not primed yet).
+    pub fn buffered(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// True while playing out (primed, no underrun since).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
     /// Next frame to play, or `None` when the decoder should conceal (not yet
     /// primed, frame lost or late, or nothing buffered).
     pub fn pop(&mut self) -> Option<Vec<i16>> {

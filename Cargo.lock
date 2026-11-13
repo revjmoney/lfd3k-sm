@@ -334,6 +334,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "lfd3k-core",
+ "lfd3k-voice",
  "proptest",
 ]
 
