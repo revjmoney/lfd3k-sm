@@ -783,3 +783,31 @@ fn trust_store_bad_file_is_kept_and_reported() {
     assert!(said, "the engine reports the unreadable trust file");
     assert!(e.contacts().is_empty());
 }
+
+#[test]
+fn regression_late_control_message_opens_past_the_voice_window() {
+    // A Mute sealed before 100 voice frames comes over ARQ after them: the
+    // 64 frame voice window would drop it; the control stream's own
+    // in-order check takes it once, and only once.
+    let rev = Identity::generate("REV", "PC").unwrap();
+    let bob = Identity::generate("BOB", "PHONE").unwrap();
+    let (mut tx, mut rx) = handshake(&rev, &bob);
+    let mute = tx.seal(&[1]);
+    let voice: Vec<Vec<u8>> = (0..100).map(|i| tx.seal(&[i as u8; 20])).collect();
+    let mute2 = tx.seal(&[0]);
+    for v in &voice {
+        assert!(rx.open(v).is_some());
+    }
+    // As voice it is too old.
+    assert_eq!(rx.open(&mute), None);
+    // As control it opens, once.
+    assert_eq!(rx.open_control(&mute).as_deref(), Some(&[1u8][..]));
+    assert_eq!(rx.open_control(&mute), None, "a replayed control message");
+    // A voice frame inside the window is never taken as control.
+    assert_eq!(rx.open_control(voice.last().unwrap()), None);
+    // The next control message opens; the older one cannot come back.
+    assert_eq!(rx.open_control(&mute2).as_deref(), Some(&[0u8][..]));
+    assert_eq!(rx.open_control(&mute), None);
+    // And the control message is not a voice frame either.
+    assert_eq!(rx.open(&mute2), None);
+}

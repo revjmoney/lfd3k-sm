@@ -1503,7 +1503,7 @@ impl Engine {
                 Control::Hello(b) => self.on_sealed_hello(&b),
                 Control::Mute(b) => {
                     if let Some(c) = self.call.as_mut().filter(|c| c.peer_live) {
-                        if let Some(v) = c.session.as_mut().and_then(|s| s.open(&b)) {
+                        if let Some(v) = c.session.as_mut().and_then(|s| s.open_control(&b)) {
                             c.peer_muted = v.first() == Some(&1);
                         }
                     }
@@ -1604,7 +1604,7 @@ impl Engine {
         let Some(s) = c.session.as_mut() else {
             return;
         };
-        if s.open(b).as_deref() != Some(control::HELLO_TAG) {
+        if s.open_control(b).as_deref() != Some(control::HELLO_TAG) {
             return;
         }
         c.peer_live = true;
@@ -1693,7 +1693,7 @@ impl Engine {
         let Some(s) = c.session.as_mut() else {
             return;
         };
-        let Some(plain) = s.open(b).map(Zeroizing::new) else {
+        let Some(plain) = s.open_control(b).map(Zeroizing::new) else {
             return;
         };
         let (Some(dev), Some(sig)) = (

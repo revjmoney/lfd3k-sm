@@ -54,7 +54,10 @@
 //! ciphertext and its full 16 byte tag. Nonce: direction byte (0 caller to
 //! answerer, 1 answerer to caller), 7 zero bytes, the 4 counter bytes. `open`
 //! drops a frame that fails to open, a counter at or below `highest - 64`, and
-//! a repeat inside the 64 frame window. The ephemeral secret, the shared
+//! a repeat inside the 64 frame window. Sealed control messages come over
+//! the ordered ARQ stream and may be late: `open_control` takes one whose
+//! counter is above the last control message's (and not a counter already
+//! opened in the window), however far behind the voice it is. The ephemeral secret, the shared
 //! secret and the session keys are wiped on drop.
 //!
 //! # The two words
@@ -347,6 +350,7 @@ impl Handshake {
             recv_dir,
             highest: None,
             window: 0,
+            ctrl_last: None,
         })
     }
 }
@@ -408,6 +412,8 @@ pub struct Session {
     recv_dir: u8,
     highest: Option<u32>,
     window: u64,
+    /// The last sealed control message opened (its own ordered stream).
+    ctrl_last: Option<u32>,
 }
 
 fn nonce(dir: u8, ctr: u32) -> Nonce {
@@ -458,6 +464,48 @@ impl Session {
             .recv
             .decrypt(&nonce(self.recv_dir, ctr), sealed.get(4..)?)
             .ok()?;
+        self.mark(ctr);
+        Some(plain)
+    }
+
+    /// Open one sealed control message (Sealed Hello, Mute, Remove device).
+    /// These come over the call's reliable, ordered stream, so they may
+    /// arrive long after the voice frames sealed after them: the 64 frame
+    /// voice window does not apply. A control message opens when its
+    /// counter is above the last control message opened (the stream is in
+    /// order, so a repeat or an older one is a replay) and it is not a
+    /// counter already opened inside the voice window. `None` otherwise, or
+    /// when it fails to open. V223.LRA.92 clause 12.3.
+    pub fn open_control(&mut self, sealed: &[u8]) -> Option<Vec<u8>> {
+        if sealed.len() < SEAL_OVERHEAD {
+            return None;
+        }
+        let ctr = u32::from_le_bytes(sealed.get(..4)?.try_into().ok()?);
+        if self.ctrl_last.is_some_and(|c| ctr <= c) {
+            return None;
+        }
+        if let Some(h) = self.highest {
+            if ctr <= h {
+                let back = h - ctr;
+                if back < WINDOW && self.window & (1u64 << back) != 0 {
+                    return None;
+                }
+            }
+        }
+        let plain = self
+            .recv
+            .decrypt(&nonce(self.recv_dir, ctr), sealed.get(4..)?)
+            .ok()?;
+        self.ctrl_last = Some(ctr);
+        // Inside the window it is marked too, so it never opens as voice.
+        if self.highest.is_none_or(|h| ctr > h || h - ctr < WINDOW) {
+            self.mark(ctr);
+        }
+        Some(plain)
+    }
+
+    /// Note an opened counter in the highest counter and the window.
+    fn mark(&mut self, ctr: u32) {
         match self.highest {
             None => {
                 self.highest = Some(ctr);
@@ -473,8 +521,8 @@ impl Session {
                 self.window |= 1;
                 self.highest = Some(ctr);
             }
-            Some(h) => self.window |= 1u64 << (h - ctr),
+            Some(h) if h - ctr < WINDOW => self.window |= 1u64 << (h - ctr),
+            Some(_) => {}
         }
-        Some(plain)
     }
 }
