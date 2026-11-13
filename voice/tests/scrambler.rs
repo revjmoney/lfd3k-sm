@@ -46,8 +46,8 @@ fn handshake(caller: &Identity, answerer: &Identity) -> (Session, Session) {
     let (mut a, hello) = Handshake::start(answerer, Role::Answerer);
     assert_eq!(a.on_peer(&commit), Ok(None));
     let reveal = c.on_peer(&hello).unwrap().expect("reveal");
-    let sc = c.finish(&hello).ok().expect("caller finish");
-    let sa = a.finish(&reveal).ok().expect("answerer finish");
+    let sc = c.finish(&hello).expect("caller finish");
+    let sa = a.finish(&reveal).expect("answerer finish");
     (sc, sa)
 }
 
@@ -517,7 +517,6 @@ fn v223_lra_92_annex_c_reference_takes_the_fixed_handshake() {
     reveal.extend_from_slice(&ch);
     let s = a
         .finish(&reveal)
-        .ok()
         .expect("the reference accepts the fixed caller hello");
     assert_eq!(s.peer_device, rev.device_pub());
     let cert = s.peer_cert.as_ref().unwrap();
@@ -531,7 +530,6 @@ fn v223_lra_92_annex_c_reference_takes_the_fixed_handshake() {
     assert!(c.on_peer(&hello).unwrap().is_some());
     let s = c
         .finish(&[])
-        .ok()
         .expect("the reference accepts the fixed answerer hello");
     assert_eq!(s.peer_device, bob.device_pub());
     assert_eq!(s.peer_cert.as_ref().unwrap().name, "BOB");

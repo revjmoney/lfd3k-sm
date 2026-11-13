@@ -34,8 +34,8 @@ fn handshake(caller: &Identity, answerer: &Identity) -> (Session, Session) {
     let (mut a, hello) = Handshake::start(answerer, Role::Answerer);
     assert_eq!(a.on_peer(&commit), Ok(None));
     let reveal = c.on_peer(&hello).unwrap().expect("reveal");
-    let sc = c.finish(&hello).ok().expect("caller finish");
-    let sa = a.finish(&reveal).ok().expect("answerer finish");
+    let sc = c.finish(&hello).expect("caller finish");
+    let sa = a.finish(&reveal).expect("answerer finish");
     (sc, sa)
 }
 

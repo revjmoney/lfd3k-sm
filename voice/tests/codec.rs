@@ -44,8 +44,10 @@ fn speech() -> Vec<i16> {
     }
     assert!(fmt_ok);
     data.expect("data chunk")
-        .chunks_exact(2)
-        .map(|s| i16::from_le_bytes([s[0], s[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|s| i16::from_le_bytes(*s))
         .collect()
 }
 
