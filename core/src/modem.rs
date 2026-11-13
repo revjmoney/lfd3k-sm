@@ -46,6 +46,15 @@
 //! mode. Once connected, its voice data and listener frames (the voice
 //! scheduler, `voice/sched.rs`) go to the link (`Link::on_voice_air`).
 //!
+//! Voice host protocol (see `voice/host.rs`): `AT+VOICE` answers OK and
+//! turns the host stream into VHP session 0 (COBS frames) until the app's
+//! Leave or 5 s without a frame; nothing of the terminal reaches the host
+//! meanwhile (a data caller is turned away: BUSY, or NO CARRIER if S0
+//! already answered). Sessions 1 to 3 are the platform's (`voice_open`,
+//! `voice_input`, `voice_output`, `voice_close`). An AtLine runs one AT
+//! line through `parse_line` and the dispatch with its output captured
+//! (`result` and `info` look at the capture first) into AtReply frames.
+//!
 //! Setup menu (see `menu/`): `AT+MENU` (or, with S32 = 1, the first host
 //! byte after boot) opens a full-screen ANSI menu. While it is open every
 //! host byte goes to the menu, never to the AT parser, and nothing else
@@ -72,6 +81,7 @@ use crate::telnet::{link_frame, LinkStats, LINK_FRAME_MAX};
 use crate::tier::{best_tier, Tier};
 use crate::voice::call::{self as vcall, VoiceCallInfo};
 use crate::voice::frames::{self as vframes, VoiceItems};
+use crate::voice::host::{self, Vhp};
 use crate::voice::regs::VoiceState;
 use crate::voice::{
     Name16, VSub, VoiceDir, VoiceEntry, VoiceReg, VOICE_DIR_MAX, VOICE_DISC_FRAME, VOICE_DISC_MAX,
@@ -313,7 +323,7 @@ impl Txt {
 
 pub struct Modem {
     cfg: Config,
-    link: Link,
+    pub(crate) link: Link,
     mode: Mode,
     out: OutRing,
     line: [u8; LINE_CAP],
@@ -382,9 +392,9 @@ pub struct Modem {
     simnet_fail: bool,
     /// Stations heard or pinned (AT+DIR). Saved by the platform on its own
     /// schedule (`take_dir_save`), not part of the settings profile.
-    dir: Directory,
+    pub(crate) dir: Directory,
     /// Beacon timer, scan answer slot, AT+SCAN state.
-    disc: Discovery,
+    pub(crate) disc: Discovery,
     /// The directory changed since the last save.
     dir_dirty: bool,
     /// A directory save is wanted (taken by `take_dir_save`).
@@ -393,7 +403,7 @@ pub struct Modem {
     dir_saved_at: u32,
     /// `AT+DIR?` listing in progress: next slot to print and the time the
     /// command was typed (ages are as of then).
-    dir_list: Option<(u8, u32)>,
+    pub(crate) dir_list: Option<(u8, u32)>,
     /// The name of the current radio dial, credited when it answers.
     dial_name: [u8; NAME_MAX],
     dial_len: u8,
@@ -421,11 +431,14 @@ pub struct Modem {
     call_caller_len: u8,
     /// The last frame of the current call (its call id and metadata), for
     /// the LFD3K-LINK SNR and RSSI; never another station's frame.
-    call_rx: Option<(u8, RxInfo)>,
+    pub(crate) call_rx: Option<(u8, RxInfo)>,
     /// Telnet servers the platform's mDNS browse found (`set_found_hosts`).
     found: FoundList,
     /// Voice name registrations and the voice beacon request. Never saved.
-    voice: VoiceState,
+    pub(crate) voice: VoiceState,
+    /// Voice host protocol sessions, call ownership and the AtLine
+    /// capture (`voice/host.rs`).
+    pub(crate) vhp: Vhp,
 }
 
 fn onoff(on: bool) -> &'static [u8] {
@@ -515,6 +528,7 @@ impl Modem {
             call_rx: None,
             found: FoundList::new(),
             voice: VoiceState::new(),
+            vhp: Vhp::new(),
         }
     }
 
@@ -577,6 +591,7 @@ impl Modem {
         self.call_rx = None;
         self.found.clear();
         self.voice = VoiceState::new();
+        self.vhp.reset();
     }
 
     /// A voice app on host link `session` (0 to 3) registers its voice
@@ -627,7 +642,12 @@ impl Modem {
         // devices picking up the same call draw different tokens.
         let t = self.disc.rand(u32::MAX) ^ now_ms;
         let token = if t == 0 { 1 } else { t };
-        self.link.answer_voice(token, &self.cfg.sregs, now_ms)
+        let ok = self.link.answer_voice(token, &self.cfg.sregs, now_ms);
+        if let Some(r) = self.link.voice().map(|v| v.reg).filter(|_| ok) {
+            // The answering registration's session owns the call.
+            self.vhp.own(r);
+        }
+        ok
     }
 
     /// Decline the voice call ringing here (the caller sees DECLINED, the
@@ -665,6 +685,8 @@ impl Modem {
         );
         if ok {
             self.link.set_voice_reg(session);
+            // The dialing session owns the call (voice host protocol).
+            self.vhp.own(session);
         }
         ok
     }
@@ -1215,6 +1237,15 @@ impl Modem {
         let mut used = 0;
         while used < bytes.len() {
             let rest = bytes.get(used..).unwrap_or(&[]);
+            if self.vhp.host {
+                // AT+VOICE: the host stream is voice host protocol session
+                // 0; after its Leave the rest is AT text again.
+                used += self.vhp_input(0, rest, radio, now_ms);
+                if self.vhp.host {
+                    break;
+                }
+                continue;
+            }
             if self.menu.open {
                 if let Some(&b) = rest.first() {
                     self.menu_byte(b, radio, now_ms);
@@ -1261,6 +1292,8 @@ impl Modem {
         self.escape_timer(now_ms);
         // Registrations expire also during a call.
         self.voice.expire(now_ms);
+        // Voice host protocol sessions that went quiet close.
+        self.vhp_tick(now_ms);
         self.disc_tick(radio, now_ms);
         self.dir_save_timer(now_ms);
         if self.menu.open {
@@ -1448,7 +1481,7 @@ impl Modem {
         if let Some(items) = items {
             self.voice_heard(r.name, items, snr, hidden, now);
         }
-        let print = self.verbose && self.mode != Mode::Data;
+        let print = self.verbose && (self.mode != Mode::Data || self.vhp.cap.scan);
         let Some(scan) = self.disc.scan.as_mut() else {
             return;
         };
@@ -1473,7 +1506,9 @@ impl Modem {
                     t.put(label.as_bytes());
                 }
             }
+            self.vhp.cap.on = self.vhp.cap.scan;
             self.info(t.bytes());
+            self.vhp.cap.on = false;
         }
     }
 
@@ -1655,8 +1690,8 @@ impl Modem {
             // A call holds all discovery; the beacon timer restarts after it.
             self.disc.in_call = true;
             self.disc.answer = None;
-            if self.disc.scan.take().is_some() && self.mode != Mode::Data {
-                self.result(ResultCode::Error);
+            if self.disc.scan.take().is_some() && (self.mode != Mode::Data || self.vhp.cap.scan) {
+                self.scan_result(ResultCode::Error);
             }
             return;
         }
@@ -1680,7 +1715,7 @@ impl Modem {
                 // A scan whose ScanReq has not gone out yet never will.
                 if self.disc.scan.is_some_and(|s| s.sent.is_none()) {
                     self.disc.scan = None;
-                    self.result(ResultCode::Error);
+                    self.scan_result(ResultCode::Error);
                 }
             }
         }
@@ -1689,16 +1724,18 @@ impl Modem {
             match s.sent {
                 Some(t) if now.wrapping_sub(t) >= SCAN_WINDOW_MS => {
                     self.disc.scan = None;
+                    self.vhp.cap.on = self.vhp.cap.scan;
                     if !self.verbose {
                         let mut t = Txt::new();
                         t.num(u32::from(s.hits), 1);
                         self.info(t.bytes());
                     }
                     self.result(ResultCode::Ok);
+                    self.vhp.cap.on = false;
                 }
                 None if now.wrapping_sub(s.asked) >= SCAN_SEND_LIMIT_MS => {
                     self.disc.scan = None;
-                    self.result(ResultCode::Error);
+                    self.scan_result(ResultCode::Error);
                 }
                 _ => {}
             }
@@ -1818,13 +1855,32 @@ impl Modem {
         }
     }
 
-    /// Print `AT+DIR?` lines while the host output has room, then OK.
-    fn pump_list(&mut self) {
-        // Data mode is 8-bit clean: a listing ends when a call takes the host.
-        if self.mode == Mode::Data {
+    /// Print `AT+DIR?` lines while the host output (or an AtLine's
+    /// capture) has room, then OK.
+    pub(crate) fn pump_list(&mut self) {
+        let cap = self.vhp.cap.dir;
+        // Data mode is 8-bit clean: a listing ends when a call takes the
+        // host (an AtLine's never reaches the host).
+        if self.mode == Mode::Data && !cap {
             self.dir_list = None;
             return;
         }
+        self.vhp.cap.on = cap;
+        self.pump_rows();
+        self.vhp.cap.on = false;
+    }
+
+    /// Room for listing text: the host output, or the AtLine capture.
+    fn text_room(&self) -> usize {
+        if self.vhp.cap.on {
+            self.vhp.cap.free()
+        } else {
+            self.out.free()
+        }
+    }
+
+    fn pump_rows(&mut self) {
+        let reserve = if self.vhp.cap.on { 16 } else { OUT_RESERVE };
         // Station slots 0 to 31, then voice slots 32 to 47.
         const END: usize = DIR_MAX + VOICE_DIR_MAX;
         fn voice_slot(d: &Directory, i: usize) -> Option<&VoiceEntry> {
@@ -1855,7 +1911,7 @@ impl Modem {
                 t.put(dash(&v.station).as_bytes());
                 (v.best_tier, v.heard_since_boot(), v.heard_ms, v.pinned)
             } else {
-                if self.out.free() >= 16 {
+                if self.text_room() >= 16 {
                     self.dir_list = None;
                     self.result(ResultCode::Ok);
                 }
@@ -1879,7 +1935,7 @@ impl Modem {
             if pinned {
                 t.put(b" PIN");
             }
-            if self.out.free() < t.n + 4 + OUT_RESERVE {
+            if self.text_room() < t.n + 4 + reserve {
                 return;
             }
             self.info(t.bytes());
@@ -1911,7 +1967,13 @@ impl Modem {
     }
 
     pub fn host_output(&mut self, out: &mut [u8]) -> usize {
-        let n = self.out.pop(out);
+        let mut n = self.out.pop(out);
+        // Session 0's frames follow the terminal text (the OK of AT+VOICE).
+        if self.vhp.host && self.out.len == 0 {
+            if let Some(rest) = out.get_mut(n..) {
+                n += self.voice_output(0, rest);
+            }
+        }
         // A long AT+DIR? listing continues as the host takes the text.
         if self.dir_list.is_some() {
             self.pump_list();
@@ -2383,7 +2445,11 @@ impl Modem {
                 self.mode = Mode::Command;
                 self.restore_profile();
                 self.wifi_changed = true;
-                // A scan or a listing in progress ends silently.
+                // A scan or a listing in progress ends silently (an
+                // AtLine's, with ERROR).
+                if (self.vhp.cap.dir || self.vhp.cap.scan) && !self.vhp.cap.on {
+                    self.cap_end_error();
+                }
                 self.disc.scan = None;
                 self.dir_list = None;
                 self.result(ResultCode::Ok);
@@ -2408,7 +2474,13 @@ impl Modem {
                 let mut t = Txt::new();
                 t.put(b"WAP ").put(onoff(self.set.ap_on));
                 t.put(b" ").put(self.set.ap_ssid().as_bytes());
-                t.put(b" ").put(self.set.ap_pass().as_bytes());
+                // A voice app's AtLine never sees the password (as the
+                // menu shows it).
+                if self.vhp.cap.on {
+                    t.put(b" ********");
+                } else {
+                    t.put(b" ").put(self.set.ap_pass().as_bytes());
+                }
                 self.info(t.bytes());
                 self.result(ResultCode::Ok);
             }
@@ -2547,7 +2619,19 @@ impl Modem {
                     self.result(ResultCode::Error);
                 }
             }
-            AtCmd::DirList => self.dir_list = Some((0, now)),
+            AtCmd::DirList => {
+                // The terminal's listing replaces an AtLine's: that one
+                // ends with ERROR.
+                if self.vhp.cap.dir && !self.vhp.cap.on {
+                    self.cap_end_error();
+                }
+                // An AtLine's waits for the terminal's to finish.
+                if self.vhp.cap.on && self.dir_list.is_some() {
+                    self.result(ResultCode::Error);
+                    return;
+                }
+                self.dir_list = Some((0, now));
+            }
             AtCmd::DirPin(name) => {
                 let ok =
                     !name.eq_ignore_ascii_case(name_of(&self.cfg)) && self.dir.add_pinned(name);
@@ -2633,6 +2717,23 @@ impl Modem {
                     self.result(ResultCode::Error);
                 }
             }
+            AtCmd::Voice => {
+                // Only from the terminal in command mode, with no data or
+                // Wi-Fi call (a voice call may be up or ringing).
+                let ok = !self.vhp.cap.on
+                    && !self.vhp.host
+                    && !self.menu.open
+                    && self.mode == Mode::Command
+                    && self.wire.call == Call::None
+                    && (self.link.is_idle() || self.link.voice().is_some());
+                if ok {
+                    // The OK goes out first, then the frames.
+                    self.result(ResultCode::Ok);
+                    self.vhp_host_open(now);
+                } else {
+                    self.result(ResultCode::Error);
+                }
+            }
             AtCmd::Menu => {
                 // Not while a call is being set up (dialing, training, a
                 // Wi-Fi dial): idle, ringing, or a call up in online
@@ -2701,6 +2802,99 @@ impl Modem {
         ok
     }
 
+    /// The end of an AT+SCAN: to the AtLine that started it, or the
+    /// terminal.
+    fn scan_result(&mut self, code: ResultCode) {
+        self.vhp.cap.on = self.vhp.cap.scan;
+        self.result(code);
+        self.vhp.cap.on = false;
+    }
+
+    /// End the running AtLine's listing or scan with ERROR (the terminal
+    /// took it over or reset).
+    fn cap_end_error(&mut self) {
+        if self.vhp.cap.dir {
+            self.dir_list = None;
+        }
+        if self.vhp.cap.scan {
+            self.disc.scan = None;
+        }
+        let on = self.vhp.cap.on;
+        self.vhp.cap.on = true;
+        self.result(ResultCode::Error);
+        self.vhp.cap.on = on;
+    }
+
+    /// The AtLine's session closed: its listing or scan stops, silently,
+    /// and its reply is dropped.
+    pub(crate) fn cap_cancel(&mut self) {
+        if self.vhp.cap.dir {
+            self.dir_list = None;
+        }
+        if self.vhp.cap.scan {
+            self.disc.scan = None;
+        }
+        self.vhp.cap.reset();
+    }
+
+    /// A voice app's AtLine (voice host protocol 0x0F): one AT line through
+    /// `parse_line` and the AT dispatch, as the terminal and the menu run
+    /// it, with everything it prints captured for AtReply frames (never the
+    /// terminal). Err(code) for a command `host::at_refused` lists. The
+    /// line is wiped afterwards (it may hold a password).
+    pub(crate) fn vhp_at_line<R: Radio>(
+        &mut self,
+        session: u8,
+        line: &[u8],
+        radio: &mut R,
+        now: u32,
+    ) -> Result<(), u8> {
+        let mut n = line.len();
+        while n > 0 && matches!(line.get(n - 1), Some(b'\r' | b'\n')) {
+            n -= 1;
+        }
+        let mut buf = [0u8; LINE_CAP];
+        let fits = n <= LINE_CAP;
+        if let (true, Some(d), Some(src)) = (fits, buf.get_mut(..n), line.get(..n)) {
+            d.copy_from_slice(src);
+        }
+        let parsed = if fits {
+            core::str::from_utf8(buf.get(..n).unwrap_or(&[]))
+                .ok()
+                .map(parse_line)
+        } else {
+            None
+        };
+        if let Some(Ok(cmd)) = parsed {
+            if host::at_refused(&cmd) {
+                buf.fill(0);
+                return Err(host::err::AT_REFUSED);
+            }
+        }
+        self.vhp.cap.start(session);
+        self.vhp.cap.on = true;
+        match parsed {
+            // As `run_line`: nothing new starts behind an accepted AT+MODE.
+            _ if self.mode_req.is_some() || self.mode_wait => self.result(ResultCode::Error),
+            Some(Ok(cmd)) => {
+                self.exec(cmd, radio, now);
+                if !self.vhp.cap.fin {
+                    // Commands that finish later keep the reply open.
+                    match cmd {
+                        AtCmd::DirList if self.dir_list.is_some() => self.vhp.cap.dir = true,
+                        AtCmd::Scan if self.disc.scan.is_some() => self.vhp.cap.scan = true,
+                        _ => self.vhp.cap.finish(),
+                    }
+                }
+            }
+            _ => self.result(ResultCode::Error),
+        }
+        self.vhp.cap.on = false;
+        self.sync_set();
+        buf.fill(0);
+        Ok(())
+    }
+
     fn ok_or_error(&mut self, ok: bool) {
         self.result(if ok {
             ResultCode::Ok
@@ -2709,7 +2903,17 @@ impl Modem {
         });
     }
 
-    fn result(&mut self, code: ResultCode) {
+    pub(crate) fn result(&mut self, code: ResultCode) {
+        if self.vhp.cap.on {
+            // An AtLine's output: its first result code is its last.
+            if !self.vhp.cap.fin {
+                let mut b = [0u8; 64];
+                let n = format_result(&code, self.verbose, &mut b);
+                self.vhp.cap.text(b.get(..n).unwrap_or(&[]));
+                self.vhp.cap.finish();
+            }
+            return;
+        }
         if self.menu.open {
             // The menu owns the screen: keep what the dispatch said (menu
             // edits read it), hold a NO CARRIER for the leave, and redraw
@@ -2717,6 +2921,10 @@ impl Modem {
             self.menu.last = Some(code);
             self.menu.held_nc |= code == ResultCode::NoCarrier;
             self.menu.rd.refresh();
+            return;
+        }
+        // The host stream carries voice host protocol frames.
+        if self.vhp.host {
             return;
         }
         let mut b = [0u8; 64];
@@ -2735,18 +2943,29 @@ impl Modem {
 
     /// `\r\n<text>\r\n`. Nothing while the menu is open.
     fn info(&mut self, text: &[u8]) {
-        if self.menu.open {
+        let cap = self.vhp.cap.on;
+        if !cap && (self.menu.open || self.vhp.host) {
             return;
         }
         let mut t = Txt::new();
         t.put(b"\r\n").put(text).put(b"\r\n");
-        self.out.push(t.bytes());
+        if cap {
+            self.vhp.cap.text(t.bytes());
+        } else {
+            self.out.push(t.bytes());
+        }
     }
 
     /// Drain link events, move received data to the host, send if possible.
-    fn after<R: Radio>(&mut self, radio: &mut R, now: u32) {
+    pub(crate) fn after<R: Radio>(&mut self, radio: &mut R, now: u32) {
         while let Some(e) = self.link.poll_event() {
+            self.vhp_event(e);
             match e {
+                // The host stream is a voice session: no data call may take
+                // it (the caller sees BUSY, or NO CARRIER if S0 answered).
+                Event::Ring if self.vhp.host => {
+                    self.link.hangup(now);
+                }
                 Event::Ring => self.result(ResultCode::Ring),
                 Event::Ringing => {
                     if self.verbose {
@@ -2858,6 +3077,7 @@ impl Modem {
             self.drain();
         }
         self.wire_pump(now);
+        self.vhp_poll(now);
         self.link.pump(radio, now);
         if self.dir_list.is_some() {
             self.pump_list();
@@ -3116,8 +3336,11 @@ impl Modem {
     /// Open the menu (AT+MENU, or boot to menu). `after_cr`: the line that
     /// opened it ended with CR (a LF right after it is not a key).
     fn menu_open(&mut self, now: u32, after_cr: bool) {
-        // A listing in progress ends: the menu owns the screen.
-        self.dir_list = None;
+        // A listing in progress ends: the menu owns the screen (an AtLine's
+        // goes on, it never reaches the screen).
+        if !self.vhp.cap.dir {
+            self.dir_list = None;
+        }
         self.menu.start(now, self.link.data_bytes(), after_cr);
         self.menu.unsaved = !self.set.same_profile(&self.saved);
     }
@@ -3130,7 +3353,9 @@ impl Modem {
         let held = self.menu.held_nc;
         self.menu.stop();
         self.out.push(render::LEAVE);
-        self.disc.scan = None;
+        if !self.vhp.cap.scan {
+            self.disc.scan = None;
+        }
         if held {
             self.result(ResultCode::NoCarrier);
         }

@@ -67,22 +67,31 @@
 //! In push to talk a wall clock cap rides on top (`WallCaps`, from no frame
 //! of any kind heard; L = listen period): PINGs from 3 L (one per L, the
 //! peer answers at once), a step down from 5 L with two PINGs unanswered,
-//! a resync from 7 L, capped at 40, 50 and 60 % of S22 so the resync comes
-//! well before S22 ends the call. Worst case with S22 = 20 s (the due-slot
-//! counter may act first):
+//! a resync from 7 L. These never come sooner, whatever S22 says: a short
+//! S22 must not turn the ordinary loss of a listener frame or two into a
+//! PING storm or a step down. The due-slot counter may act first:
 //!
 //! | Tier | PING from | step down from | resync from |
 //! |---|---|---|---|
 //! | SF9, SF10 | 3.6 s | 6.0 s | 8.4 s |
 //! | SF11 | 3.0 s | 5.0 s | 7.0 s |
-//! | SF12 | 8.0 s | (slowest) | 12.0 s |
+//! | SF12 | 12.0 s | (slowest) | 28.0 s |
+//!
+//! S22 ends a call only from a resync. On SF9 to SF11 it counts from the
+//! resync, so the resync always comes first. On SF12 (already the resync
+//! tier) it counts from the last frame heard: with S22 over 7 L (28 s) the
+//! resync comes first; with less (the default 20 s is less) no resync can
+//! come in time, and the call ends with NO CARRIER at 7 L of silence, 28 s,
+//! later than S22 but never on ordinary loss.
 //!
 //! Duplex tiers have no cap: every slot is due both ways, so the due-slot
 //! count is wall time (resync at 8 RTOs: SF5 1.5 s, SF6 2.0 s, SF7 2.8 s,
-//! SF8 4.3 s). Measured (fade under the floor 10 s into a talk spell):
-//! resync after 7.2 s at SF9, 8.0 s at SF10, 6.0 s at SF11, 10.0 s at SF12
-//! (then NO CARRIER at 18 s, S22 counted from the last frame heard); 300 s
-//! at steady SNR with 10 % loss: no step down at SF9 or SF12.
+//! SF8 4.3 s). Measured in task 6 with the earlier S22-capped ladder (fade
+//! under the floor 10 s into a talk spell): resync after 7.2 s at SF9,
+//! 8.0 s at SF10, 6.0 s at SF11, 10.0 s at SF12; 300 s at steady SNR with
+//! 10 % loss: no step down at SF9 or SF12. The SF9 to SF11 rows above are
+//! unchanged by the floor; SF12 now waits the full 7 L (to be measured
+//! again in task 9).
 //! A Listener frame carries an ARQ chunk only up to the tier's chunk size,
 //! except in a voice sub-slot or with the floor free (a longer chunk queued
 //! on a faster tier gets through there and never overruns a listener
@@ -309,8 +318,7 @@ fn reached(a: u32, b: u32) -> bool {
 /// listen period; the peer answers at once), from `step` with two PINGs
 /// unanswered a step down a tier, from `resync` a resync. `L` is the listen
 /// period (`listen_every` x `frame_ms`): ping 3 L, step 5 L, resync 7 L,
-/// capped at 40, 50 and 60 % of S22 so a resync always comes well before
-/// S22 ends the call.
+/// never less whatever S22 is (see the module notes for a short S22).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct WallCaps {
     pub ping: u32,
@@ -526,10 +534,12 @@ impl VoiceSched {
     }
 
     /// Push to talk with the slots running: the wall clock silence ladder
-    /// (`WallCaps`) for `s22_ms`, the S22 limit in ms. None in duplex,
-    /// where every slot is due both ways and the due-slot count already is
-    /// wall time.
-    pub(crate) fn wall_caps(&self, s22_ms: u32) -> Option<WallCaps> {
+    /// (`WallCaps`). Its steps are whole listen periods and do not move with
+    /// S22 (a short S22 must not make ordinary loss look like a fade); with
+    /// S22 longer than 7 L the resync comes before S22 can end the call.
+    /// None in duplex, where every slot is due both ways and the due-slot
+    /// count already is wall time.
+    pub(crate) fn wall_caps(&self) -> Option<WallCaps> {
         if !self.slots || !self.synced || self.duplex() {
             return None;
         }
@@ -537,11 +547,10 @@ impl VoiceSched {
             .lay
             .frame_ms
             .saturating_mul(u32::from(self.lay.listen_every.max(1)));
-        let cap = |pct: u32| s22_ms / 100 * pct;
         Some(WallCaps {
-            ping: l.saturating_mul(3).min(cap(40)),
-            step: l.saturating_mul(5).min(cap(50)),
-            resync: l.saturating_mul(7).min(cap(60)),
+            ping: l.saturating_mul(3),
+            step: l.saturating_mul(5),
+            resync: l.saturating_mul(7),
             every: l,
         })
     }

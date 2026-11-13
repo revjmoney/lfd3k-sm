@@ -61,9 +61,9 @@ impl Link {
             (since(now, self.last_rx), self.ping_out)
         };
         // Push to talk slots: a wall clock cap on top (no frame of any kind
-        // heard): PINGs, then a step down, then a resync (`WallCaps`).
-        let s22 = reg(sregs, 22, 20).saturating_mul(1000);
-        let wall = self.vs.wall_caps(s22);
+        // heard): PINGs, then a step down, then a resync (`WallCaps`, whole
+        // listen periods whatever S22 is).
+        let wall = self.vs.wall_caps();
         let quiet = since(now, self.last_rx);
         let (wall_step, wall_resync) = match wall {
             Some(w) => {

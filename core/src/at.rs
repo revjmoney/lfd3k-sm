@@ -97,6 +97,8 @@ pub enum AtCmd<'a> {
     DirVoiceUnpin(&'a str),
     /// `AT+MENU`: open the full-screen setup menu.
     Menu,
+    /// `AT+VOICE`: the host stream becomes voice host protocol session 0.
+    Voice,
     /// `AT+NAME?`
     NameQuery,
     /// `AT+NAME=<name>`: the station name (trimmed, a valid station name);
@@ -240,7 +242,7 @@ enum Form<'a> {
     Set(&'a str),
 }
 
-/// `+FB`, `+SCAN`, `+MENU`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FOUND`, `+FWD`, `+PUB`, `+SIMNET`,
+/// `+FB`, `+SCAN`, `+MENU`, `+VOICE`, `+NAME`, `+WAP`, `+WSTA`, `+WIFI`, `+FOUND`, `+FWD`, `+PUB`, `+SIMNET`,
 /// `+BEACON`, `+DIR`, `+MODE` (`arg` is after the `+`).
 ///
 /// Arguments are split on commas only (an SSID or name may not contain
@@ -255,13 +257,18 @@ fn parse_plus(arg: &str) -> Result<AtCmd<'_>, AtError> {
             Ok(AtCmd::Scan)
         } else if arg.eq_ignore_ascii_case("MENU") {
             Ok(AtCmd::Menu)
+        } else if arg.eq_ignore_ascii_case("VOICE") {
+            Ok(AtCmd::Voice)
         } else {
             Err(AtError::Unknown)
         };
     };
     let name = arg.get(..i).ok_or(AtError::Unknown)?.trim_end();
     let rest = arg.get(i..).ok_or(AtError::Unknown)?;
-    if name.eq_ignore_ascii_case("SCAN") || name.eq_ignore_ascii_case("MENU") {
+    if name.eq_ignore_ascii_case("SCAN")
+        || name.eq_ignore_ascii_case("MENU")
+        || name.eq_ignore_ascii_case("VOICE")
+    {
         return Err(AtError::BadArg);
     }
     let known = [

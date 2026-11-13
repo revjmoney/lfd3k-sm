@@ -298,6 +298,15 @@ impl Link {
         self.voice.info.reg = reg;
     }
 
+    /// The registration `reg` (device label `label`) picks up the voice
+    /// call ringing here: its label goes in the Answer.
+    pub(crate) fn set_voice_answerer(&mut self, reg: u8, label: Name16) {
+        if self.state == State::Ringing && self.voice.on {
+            self.voice.info.reg = reg;
+            self.voice.me_label = label;
+        }
+    }
+
     /// Answer a ringing voice call with our answer `token` (drawn by the
     /// Modem, never zero). Sends the Answer and the voice Train. False if no
     /// voice call rings.
