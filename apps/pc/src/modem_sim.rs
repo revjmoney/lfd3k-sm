@@ -13,9 +13,10 @@
 //! transmit while sending, as the firmware's trace does), so the modem's
 //! Scope frames reach the engine like a real modem's would. AirEvents from
 //! the engine start the connection sounds ([`crate::monitor::Chirps`]) only
-//! while a call is set up (dialing, ringing, training, a retrain or a
-//! resync) and for 2 s after a call or attempt ends (NO CARRIER); never
-//! while a call is up or idle. They are mixed into the speaker here, not in
+//! while a call is set up (dialing, ringing, training or a resync) and
+//! for 2 s after a call or attempt ends or a Hangup goes by (NO CARRIER);
+//! while a call is up only a retrain's own frames chirp, ducked; never
+//! voice frames, never while idle. A chirp never clips the call audio. They are mixed into the speaker here, not in
 //! the sound card's callback. The ON/OFF choice is kept in
 //! `app-prefs.txt` in the data folder (default ON).
 //!
@@ -57,10 +58,18 @@ const AUTO_LISTEN_MS: u32 = 8_000;
 /// One channel sample for the modem's scope this often.
 const SCOPE_MS: u32 = 50;
 /// Connection sounds go on this long after a call or attempt ends (the
-/// Hangup frames: NO CARRIER) and after a retrain frame while connected.
+/// Hangup frames: NO CARRIER); a retrain's Keepalive probes sound this long
+/// after its last TierSet or TierAck.
 const SOUND_AFTER_MS: u32 = 2_000;
 /// Frame types of a retrain (TierSet, TierAck).
 const RETRAIN_TYPES: [u8; 2] = [8, 9];
+/// Keepalive (a retrain's probes, while connected only after a retrain
+/// frame) and the frames that end a call (CallReject, Hangup).
+const KEEPALIVE: u8 = 11;
+const END_TYPES: [u8; 2] = [3, 10];
+/// While a call is connected a retrain's chirps play at this share of the
+/// usual level, under the call audio.
+const DUCK: f32 = 0.25;
 /// CallState `state` while the link resyncs.
 const STATE_RESYNC: u8 = 5;
 
@@ -314,6 +323,11 @@ struct Worker {
     /// retrain frame).
     last_state: u8,
     sound_until: Option<u32>,
+    /// While connected: a retrain frame went by; its probes sound until then.
+    retrain_until: Option<u32>,
+    /// The `--record` WAV keeps recording until then after a call ends
+    /// (its NO CARRIER chirps), then is written.
+    rec_tail: Option<u32>,
     /// Seconds of connection sound made (test helpers print it).
     chirp_total: u64,
 }
@@ -400,6 +414,8 @@ pub fn spawn(
                 chirps: Chirps::default(),
                 last_state: 0,
                 sound_until: None,
+                retrain_until: None,
+                rec_tail: None,
                 chirp_total: 0,
                 o,
             };
@@ -481,16 +497,45 @@ impl Worker {
         self.modem.scope_sample(rssi, tx, now);
     }
 
-    /// Connection sounds may play now: on, and a call being set up (the
-    /// modem dialing, ringing or training, the link resyncing) or just
-    /// ended or retrained.
+    /// A call is being set up: the modem dialing, ringing or training, or
+    /// the link resyncing.
+    fn setting_up(&self) -> bool {
+        matches!(self.modem.call_state(), 1..=3)
+            || self.engine.in_call() && self.engine.stats().state == STATE_RESYNC
+    }
+
+    /// Chirps may go on playing: on, and a call set up, or the end window
+    /// (NO CARRIER) or a retrain window open.
     fn sounding(&self, now: u32) -> bool {
         self.o.sounds
-            && (matches!(self.modem.call_state(), 1..=3)
-                || self.engine.in_call() && self.engine.stats().state == STATE_RESYNC
-                || self
-                    .sound_until
-                    .is_some_and(|t| t.wrapping_sub(now) < u32::MAX / 2))
+            && (self.setting_up()
+                || before(self.sound_until, now)
+                || before(self.retrain_until, now))
+    }
+
+    /// Whether frame  chirps now, and ducked (under a live call). While
+    /// a call is connected only a retrain's own frames (TierSet, TierAck,
+    /// and Keepalive probes right after one) and the end frames do, never
+    /// voice, Data or Listener frames.
+    fn chirp_for(&mut self, a: &lfd3k_voice::AirFrame, st: u8, now: u32) -> Option<bool> {
+        if !self.o.sounds {
+            return None;
+        }
+        if END_TYPES.contains(&a.ftype) {
+            // A Hangup sent or heard sounds whatever the state says yet.
+            self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
+            return Some(false);
+        }
+        let connected = st >= 4 && !self.setting_up();
+        if connected {
+            if RETRAIN_TYPES.contains(&a.ftype) {
+                self.retrain_until = Some(now.wrapping_add(SOUND_AFTER_MS));
+                return Some(true);
+            }
+            let probe = a.ftype == KEEPALIVE && before(self.retrain_until, now);
+            return probe.then_some(true);
+        }
+        (self.setting_up() || before(self.sound_until, now)).then_some(false)
     }
 
     /// Engine bytes to the modem's session, the modem's back to the engine.
@@ -652,24 +697,24 @@ impl Worker {
             self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
         }
         self.last_state = st;
-        if self
-            .sound_until
-            .is_some_and(|t| now.wrapping_sub(t) < u32::MAX / 2)
-        {
+        if !before(self.sound_until, now) {
             self.sound_until = None;
+        }
+        if !before(self.retrain_until, now) {
+            self.retrain_until = None;
         }
         if !self.sounding(now) {
             self.chirps.stop();
         }
+        if self.rec_tail.is_some_and(|t| !before(Some(t), now)) && !self.engine.in_call() {
+            self.rec_tail = None;
+            self.write_rec();
+        }
         while let Some(ev) = self.engine.poll_event() {
             match ev {
                 UiEvent::Air(a) => {
-                    // A retrain while connected sounds too.
-                    if st >= 4 && RETRAIN_TYPES.contains(&a.ftype) {
-                        self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
-                    }
-                    if self.sounding(now) {
-                        self.chirps.start(&a);
+                    if let Some(duck) = self.chirp_for(&a, st, now) {
+                        self.chirps.start(&a, if duck { DUCK } else { 1.0 });
                     }
                     self.send(Ev::Ui(UiEvent::Air(a)));
                 }
@@ -735,7 +780,8 @@ impl Worker {
                 | UiEvent::AnsweredElsewhere) => {
                     self.auto_ptt = AutoPtt::Idle;
                     self.ring_until = None;
-                    self.write_rec();
+                    // Written once the NO CARRIER chirps are in.
+                    self.rec_tail = Some(now.wrapping_add(SOUND_AFTER_MS + 300));
                     self.send(Ev::Ui(e));
                 }
                 other => self.send(Ev::Ui(other)),
@@ -828,7 +874,7 @@ impl Worker {
                 self.chirps.mix(&mut out);
                 self.chirp_total += CHUNK as u64;
             }
-            if self.o.record.is_some() && in_call {
+            if self.o.record.is_some() && (in_call || self.rec_tail.is_some()) {
                 self.rec.extend_from_slice(&out);
             }
             if let Some(q) = &self.o.spk {
@@ -978,4 +1024,9 @@ fn open_private(p: &Path) -> std::io::Result<std::fs::File> {
         .create(true)
         .truncate(true)
         .open(p)
+}
+
+/// `until` is set and not reached yet at `now`.
+fn before(until: Option<u32>, now: u32) -> bool {
+    until.is_some_and(|t| t.wrapping_sub(now) < u32::MAX / 2 && t != now)
 }

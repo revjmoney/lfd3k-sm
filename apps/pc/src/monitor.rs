@@ -35,6 +35,8 @@ use crate::ui::{
 const SHOW_MS: u32 = 10_000;
 /// Samples and frames older than this are dropped.
 const KEEP_MS: u32 = 12_000;
+/// Samples further apart than this are not joined by the trace.
+const GAP_MS: u32 = 160;
 /// No Scope frame for this long: NO MODEM.
 const STALE_MS: u128 = 1_500;
 /// The dBm axis.
@@ -182,13 +184,24 @@ impl ScopeView {
                     mono(10.0),
                     label,
                 );
-                label_end = lr.right() + 6.0;
+                label_end = label_end.max(lr.right() + 6.0);
             }
         }
         // The trace: a line between neighbouring samples; transmit samples
         // in the accent color.
+        // The line breaks where samples are missing (a gap of more than
+        // three sample steps, or time going back).
         let mut prev: Option<(Pos2, bool)> = None;
+        let mut prev_t: Option<u32> = None;
         for &(t, d, tx) in &self.samples {
+            let gap = prev_t.is_some_and(|p| {
+                let dt = t.wrapping_sub(p);
+                dt == 0 || dt > GAP_MS
+            });
+            prev_t = Some(t);
+            if gap {
+                prev = None;
+            }
             let Some(x) = x_of(t) else {
                 prev = None;
                 continue;
@@ -255,6 +268,8 @@ struct Voice {
     rx: bool,
     phase: f32,
     seed: u32,
+    /// Share of the usual level (below 1 under a live call).
+    gain: f32,
 }
 
 /// The connection sound synth (see the module docs).
@@ -274,8 +289,9 @@ fn sweep_ms(sf: u8) -> f32 {
 }
 
 impl Chirps {
-    /// Start the chirp of one frame (dropped when four already play).
-    pub fn start(&mut self, a: &AirFrame) {
+    /// Start the chirp of one frame at gain times the usual level
+    /// (dropped when four already play).
+    pub fn start(&mut self, a: &AirFrame, gain: f32) {
         let ms = u32::from(a.air_ms).clamp(MIN_MS, CAP_MS);
         let len = ms * 16;
         let sweep = ((sweep_ms(a.sf) * RATE / 1000.0) as u32).max(16);
@@ -300,6 +316,7 @@ impl Chirps {
                 rx: a.rx,
                 phase: 0.0,
                 seed,
+                gain: gain.clamp(0.0, 1.0),
             });
         }
     }
@@ -350,9 +367,14 @@ impl Chirps {
                 let env = (v.pos as f32 / ATTACK as f32)
                     .min((v.len - v.pos) as f32 / RELEASE as f32)
                     .min(1.0);
-                let level = if v.rx { LEVEL * 0.8 } else { LEVEL };
+                let level = if v.rx { LEVEL * 0.8 } else { LEVEL } * v.gain;
                 let add = (x * env * level * 32767.0) as i32;
-                *s = (i32::from(*s) + add).clamp(-32768, 32767) as i16;
+                // Never past full scale: what is already there (call audio,
+                // the ring tone) is never clipped by a chirp.
+                let cur = i32::from(*s);
+                let room_up = 32767 - cur.max(0);
+                let room_down = -32768 - cur.min(0);
+                *s = (cur + add.clamp(room_down, room_up)) as i16;
                 v.pos += 1;
             }
             if v.pos >= v.len {
