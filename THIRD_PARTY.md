@@ -127,3 +127,7 @@ These run on Rev's PC only and are never built into the firmware or the core. In
 | pyserial | 3.5 | BSD-3-Clause | `tools/lfd3k_term.py` (bench terminal), installed with pip |
 | Pillow with libraqm | 12.3 | MIT-CMU (Pillow; its bundled libraqm, FreeType, HarfBuzz and FriBiDi carry their own licenses; PC only, nothing of it is linked into the firmware) | `tools/gen_idle_words.py` (shapes and renders the script words) and `tools/idle_preview.py` (GIF and contact sheet) |
 | MinGW gcc | as installed (MSYS2 mingw64) | GPL with the GCC runtime library exception | builds `tools/panel_check` only; nothing it produces is shipped |
+
+## Test audio
+
+- `sim/testdata/speech-16k.wav`: 20 s (from 3 s in) of "Evening Star" by Edgar Allan Poe, read for LibriVox (archive.org item `evening_star_0901_librivox`, file `eveningstar_poe_ac_64kb.mp3`, 574,611 bytes, sha256 ef9b5c1a62e8e9033757724d5fca7f175b5fa18eb42c95ebb6fe1c9165742675). LibriVox recordings are in the public domain. Converted to 16 kHz mono 16 bit with ffmpeg. Used only as test speech for `lfd3k-voicesim` and the voice tests.
