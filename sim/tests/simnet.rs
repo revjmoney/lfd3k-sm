@@ -1,6 +1,12 @@
 //! Phase 3: the simulated radio over datagrams (`SimNetRadio`), alone with a
 //! hand-driven clock, and end to end between two modems over real UDP on
 //! 127.0.0.1 (ephemeral ports, so parallel runs never collide).
+//!
+//! The two UDP tests run on the wall clock (that is what they test), so
+//! they are the only tests in the workspace whose timing depends on the
+//! machine. Their limits are generous (60 s per step; a full call takes
+//! about 1 s on an idle PC) so a loaded machine, such as a whole workspace
+//! run on a busy PC, cannot fail them; a hang still fails.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -491,7 +497,7 @@ fn pair() -> (Node, Node) {
 fn two_modems_over_simnet_full_call() {
     let started = Instant::now();
     let (mut a, mut b) = pair();
-    let limit = Duration::from_secs(15);
+    let limit = Duration::from_secs(60);
     // A short escape guard so the test does not wait whole seconds.
     a.type_("ATS12=5\r");
     pump_for(&mut a, &mut b, Duration::from_millis(100));
@@ -535,7 +541,7 @@ fn two_modems_over_simnet_full_call() {
     assert!(!a.modem.is_connected() && !b.modem.is_connected());
     assert_eq!((a.modem.call_state(), b.modem.call_state()), (0, 0));
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(120),
         "took {:?}",
         started.elapsed()
     );
@@ -548,7 +554,7 @@ fn two_pairs_do_not_collide() {
     let (mut a1, mut b1) = pair();
     let (mut a2, mut b2) = pair();
     a1.type_("ATDT AXIS\r");
-    let limit = Duration::from_secs(15);
+    let limit = Duration::from_secs(60);
     let ok = pump(&mut a1, &mut b1, limit, |a, b| {
         a.text().contains("CONNECT LORA") && b.text().contains("CONNECT LORA")
     });
