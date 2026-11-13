@@ -81,7 +81,7 @@ pub const DIR_EVERY_MS: u32 = 15_000;
 pub const LINK_CODE_MS: u32 = 300_000;
 /// The joiner gives up this long after its link request went out, plus
 /// [`LINK_FRAMES`] voice frames of the current plan (control bytes move in
-/// small listener pieces once the slots run: 20 bytes every 4 s at SF12).
+/// small listener pieces once the slots run: 24 bytes every 4 s at SF12).
 pub const LINK_BASE_MS: u32 = 60_000;
 /// See [`LINK_BASE_MS`].
 pub const LINK_FRAMES: u32 = 30;

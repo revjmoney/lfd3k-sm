@@ -1,6 +1,6 @@
 # LFD3K-SM notice and additional terms
 
-**LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM**
+**LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM**
 Copyright (C) 2026 Rev. J. Money / jmscnc.com
 
 This program is free software: you can redistribute it and/or modify it under the terms of the

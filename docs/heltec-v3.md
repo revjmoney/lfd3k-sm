@@ -1,6 +1,6 @@
 # LFD3K-SM on the Heltec V3
 
-The LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM runs on the **Heltec WiFi LoRa 32 V3** as well
+The LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM runs on the **Heltec WiFi LoRa 32 V3** as well
 as the V4. Same modem, same AT commands, same radio protocol: a V3 and a V4 call each other like any
 two LFD3K-SM modems. On the V3 the modem is the only firmware on the board (no mode picker), and the
 AXIS boot logo plays for 5 seconds at power on before the modem's own splash.

@@ -256,7 +256,7 @@ fn menu_opens_and_renders_title() {
     let t = s.term();
     assert!(
         t.row(0)
-            .contains("LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM"),
+            .contains("LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM"),
         "{:?}",
         t.row(0)
     );

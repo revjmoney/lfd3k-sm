@@ -1,4 +1,4 @@
-# LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM (LFD3K-SM): Design
+# LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM (LFD3K-SM): Design
 
 Status: draft for Rev's review, 2026-11-09. Owner: Rev. J. Money. Open source since 2026-11-12: GPLv3 or later with an attribution term (`NOTICE.md`); the closed-source lines below are history. The Heltec V3 is supported too since 2026-11-12 (the modem alone, see `docs/heltec-v3.md`); the V4-only lines below are history as well.
 Brain notes: `D:\brain\Projects\AXIS BBS Firmware.md` (LFD3K-SM and ring sections), `D:\brain\Projects\Simian Radar.md`, `D:\brain\Reference\Heltec V4 MeshCore Node.md`.
@@ -167,7 +167,7 @@ Destinations through the far side: fixed forwards (e.g. hotspot port 23 = AXIS t
 ## 8. User interfaces
 
 ### 8.1 AT commands
-`ATDT name`, `ATA`, `ATH`, `+++` and `ATO`, `ATI` (shows the full LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM banner), `AT&V`, `ATV0/1`, `ATE`, `ATS` registers (tier caps, auto-answer, beacon mode, timeouts), `AT+SCAN`, `AT+MENU`, `AT+GPS`, `AT&W` and `ATZ`. Result codes: `OK`, `ERROR`, `RING`, `CONNECT ...`, `BUSY`, `NO ANSWER`, `NO CARRIER`, `RETRAIN ...` (verbose).
+`ATDT name`, `ATA`, `ATH`, `+++` and `ATO`, `ATI` (shows the full LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM banner), `AT&V`, `ATV0/1`, `ATE`, `ATS` registers (tier caps, auto-answer, beacon mode, timeouts), `AT+SCAN`, `AT+MENU`, `AT+GPS`, `AT&W` and `ATZ`. Result codes: `OK`, `ERROR`, `RING`, `CONNECT ...`, `BUSY`, `NO ANSWER`, `NO CARRIER`, `RETRAIN ...` (verbose).
 
 ### 8.2 Terminal menu
 Full-screen ANSI lightbar menu (`AT+MENU`, or `+++` then `AT+MENU` mid-call, `ATO` back to the call). Starts in plain AT mode by default; boot-to-menu is a setting.

@@ -28,7 +28,7 @@ $Out = [System.IO.Path]::GetFullPath($Out)
 $rate = 16000
 
 $text = @'
-This is the LORA FLOWTRON DATAMASTER 3000 serial modem, testing a voice call.
+This is the LRA FLOWTRON DATAMASTER 3000 serial modem, testing a voice call.
 One, two, three, four, five, six, seven, eight, nine, ten.
 The quick brown fox jumps over the lazy dog, and the five boxing wizards jump quickly.
 On the fast tiers this is a normal phone call. On the slow tiers you hold the talk button,

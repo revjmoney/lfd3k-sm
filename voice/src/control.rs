@@ -37,8 +37,8 @@
 //! only when it checks against the person key of the peer's cert and the
 //! peer is a checked contact.
 //!
-//! Control bytes are slow once the voice slots run (a listener piece of 20
-//! to 32 bytes at a time, 20 bytes every 4 s at SF12), so the engine sends
+//! Control bytes are slow once the voice slots run (a listener piece of 24
+//! to 32 bytes at a time, 24 bytes every 4 s at SF12), so the engine sends
 //! them only when needed: the handshake, Hello and any removals go out
 //! before VoiceReady; Mute only on a change; linking only on request.
 

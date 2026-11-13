@@ -513,7 +513,7 @@ impl Worker {
                 || before(self.retrain_until, now))
     }
 
-    /// Whether frame  chirps now, and ducked (under a live call). While
+    /// Whether a frame chirps now, and ducked (under a live call). While
     /// a call is connected only a retrain's own frames (TierSet, TierAck,
     /// and Keepalive probes right after one) and the end frames do, never
     /// voice, Data or Listener frames.
@@ -522,7 +522,14 @@ impl Worker {
             return None;
         }
         if END_TYPES.contains(&a.ftype) {
-            // A Hangup sent or heard sounds whatever the state says yet.
+            // A Hangup or CallReject sounds only while this app has a call
+            // or an attempt (dialing, ringing, training, connected, resync)
+            // or the end window it opened itself. Other stations' hangups
+            // heard while idle stay silent.
+            let ours = st >= 4 || self.setting_up() || before(self.sound_until, now);
+            if !ours {
+                return None;
+            }
             self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
             return Some(false);
         }

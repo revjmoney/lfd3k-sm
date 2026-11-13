@@ -9,7 +9,7 @@ language guide. The engineering details are in `multimode/README.md`, and the in
 
 | Menu name | What it is | Lives in |
 |---|---|---|
-| LFD3K-SM | The LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM, the Hayes style LoRa and Wi-Fi modem. The default. | slot ota_1 |
+| LFD3K-SM | The LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM, the Hayes style LoRa and Wi-Fi modem. The default. | slot ota_1 |
 | SIMIAN RADAR | A listen only pocket scanner: license plate cameras, trackers, smart glasses. | slot ota_2 |
 | RNODE | The RNode firmware (official 1.86 Heltec V4PA build) so the board works as a Reticulum LoRa interface. | slot ota_3 |
 | MESH | Meshtastic 2.7.26 for the Heltec V4, patched so it lives politely next to the others. | slot ota_0 |

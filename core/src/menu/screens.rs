@@ -5,7 +5,7 @@
 //!
 //! | row | what |
 //! |----:|------|
-//! | 1 | title bar `LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM`, white on blue |
+//! | 1 | title bar `LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM`, white on blue |
 //! | 2 | version and release name, yellow on blue |
 //! | 3 | top of the double box with the screen name |
 //! | 4 to 21 | screen content (18 rows, 78 columns inside the box) |

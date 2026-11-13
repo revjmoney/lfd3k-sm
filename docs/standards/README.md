@@ -1,6 +1,6 @@
 # V223.LRA: the LFD3K-SM protocol standards
 
-These are the formal specifications of the protocols spoken by the LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM (LFD3K-SM™): the LoRa® air protocol between modems and the voice host protocol between a voice app and its modem. They are written so that anyone can build an interoperable, independent implementation from the documents alone.
+These are the formal specifications of the protocols spoken by the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM (LFD3K-SM™): the LoRa® air protocol between modems and the voice host protocol between a voice app and its modem. They are written so that anyone can build an interoperable, independent implementation from the documents alone.
 
 **These are AXIS / LFD3K-SM specifications published by Rev. J. Money. They are not ITU-T Recommendations** and are not issued or endorsed by the ITU, ANSI, NIST or any standards body; the ITU-T style is only a format.
 

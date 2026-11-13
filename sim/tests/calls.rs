@@ -1022,7 +1022,7 @@ fn partial_line_before_connect_is_dropped() {
     h.run_ms(50);
     let text = h.screen_b()[mark..].to_string();
     assert!(
-        text.starts_with("ATI\r\r\nLORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM\r\n")
+        text.starts_with("ATI\r\r\nLRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM\r\n")
             && text.ends_with(OK),
         "{text:?}"
     );
@@ -1041,7 +1041,7 @@ fn partial_line_before_connect_is_dropped() {
     h.run_ms(50);
     let text = h.screen_a()[mark..].to_string();
     assert!(
-        text.starts_with("ATI\r\r\nLORA FLOWTRON") && text.ends_with(OK),
+        text.starts_with("ATI\r\r\nLRA FLOWTRON") && text.ends_with(OK),
         "{text:?}"
     );
 }

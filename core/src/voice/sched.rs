@@ -32,7 +32,8 @@
 //!   listener slots, every `listen_every` slots (`LISTEN_EVERY_MS`, scaled
 //!   up to every slot when `frame_ms` is longer, and stretched where one
 //!   slot cannot hold voice and a Listener frame: SF12 listens every
-//!   second slot, with chunks of 20 bytes). With the floor free both send Listener frames every slot.
+//!   second slot, with chunks of 24 bytes). With the floor free
+//!   both send Listener frames every slot.
 //!   Where voice and a listener sub-slot fit in one slot with 20 ms to
 //!   spare ("room": SF9, SF11), the non-holder may also send a queued
 //!   link frame (TierSet) in any slot.
@@ -55,7 +56,7 @@
 //!
 //! **Control bytes.** Every slot frame carries the ARQ ack (header ack and
 //! a SACK byte). ARQ data rides in Listener frames, one chunk of at most
-//! `LISTEN_CHUNK` bytes each (20 at SF12). A side whose control bytes have waited
+//! `LISTEN_CHUNK` bytes each (24 at SF12). A side whose control bytes have waited
 //! `CTRL_WAIT_MS` since its last Listener frame sends a Listener frame in
 //! place of one voice frame, so control flows during continuous talk.
 //!

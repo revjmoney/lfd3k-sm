@@ -4,7 +4,7 @@
   <a href="https://revjmoney.github.io/lfd3k-sm/"><img src="multimode/preview/logo.gif" alt="The AXIS boot logo animation" width="512"></a>
 </p>
 
-<h1 align="center">LORA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM</h1>
+<h1 align="center">LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM</h1>
 
 <p align="center">
   <img src="docs/img/simian-logo.png" alt="Simian Tactical Unit monkey logo" width="160"><br>
@@ -151,3 +151,5 @@ term under GPLv3 section 7(b): keep the attribution **Rev. J. Money / jmscnc.com
 [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md). Third-party notices: [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
 Copyright (C) 2026 Rev. J. Money / [jmscnc.com](https://jmscnc.com)
+
+LoRa® is a registered trademark of Semtech Corporation.

@@ -1,4 +1,4 @@
-//! `lfd3k-voice-pc`: voice calls by name on the PC, for the LORA FLOWTRON
+//! `lfd3k-voice-pc`: voice calls by name on the PC, for the LRA FLOWTRON
 //! DATAMASTER 3000 SERIAL MODEM - LFD3K-SM.
 //!
 //! The app runs its own modem (a real `Modem` on SimNet over UDP, like
