@@ -794,6 +794,10 @@ impl Link {
     /// Timers and transmit. Call every 10 ms or faster.
     pub fn tick<R: Radio>(&mut self, radio: &mut R, sregs: &SRegs, now: u32) {
         let s7 = reg(sregs, 7, 30).saturating_mul(1000);
+        if self.voice.on && radio.busy() {
+            // A voice answer waits for a quiet channel (`voice_await_tick`).
+            self.voice.busy_at = now;
+        }
         match self.state {
             State::Idle => {}
             State::Dialing => {
@@ -805,7 +809,7 @@ impl Link {
             }
             // Before the S7 arm: a voice answerer that was never bound must
             // stay silent (no Hangup over someone else's call).
-            State::AwaitTierSet if self.voice.on => self.voice_await_tick(s7, now),
+            State::AwaitTierSet if self.voice.on => self.voice_await_tick(s7, radio.busy(), now),
             State::AwaitTrain | State::AwaitTierSet | State::AwaitTierAck
                 if since(now, self.start) >= s7 =>
             {

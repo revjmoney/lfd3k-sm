@@ -93,6 +93,9 @@ pub(crate) struct VoiceLink {
     pub sends: u8,
     pub sent_at: u32,
     pub next_at: u32,
+    /// Answerer: the last time (ms) the radio was busy, hearing a frame or
+    /// sending one (see `quiet_ms`).
+    pub busy_at: u32,
     /// The call we declined and when its last request was heard: its
     /// repeats must not ring again (the caller may have missed the Decline).
     pub declined: Option<(u8, u32)>,
@@ -112,6 +115,7 @@ impl VoiceLink {
             sends: 0,
             sent_at: 0,
             next_at: 0,
+            busy_at: 0,
             declined: None,
         }
     }
@@ -139,6 +143,24 @@ impl VoiceLink {
     /// soon, after up to 0.7 s of jitter from our token.
     pub fn resend_soon(&self, now: u32) -> u32 {
         now.wrapping_add((self.info.token >> 10) % 700)
+    }
+
+    /// Answerer: how long the channel must have been quiet before our
+    /// Answer goes out, 150 to 1349 ms (the jitter from our random token
+    /// and the send count).
+    /// Another device that picked up the same call sends its Train the
+    /// moment its Answer ends, and a frame is only detected once its
+    /// preamble is through (about 100 ms at SF12), so sending as soon as
+    /// the channel looks free would land on that Train; and the caller
+    /// answers that Train with its TierSet at once, which this lets us
+    /// hear first.
+    pub fn quiet_ms(&self) -> u32 {
+        // Drawn again for each send from our token and the send count, so
+        // two devices whose first draws came close do not stay in step.
+        let k = u32::from(self.sends)
+            .wrapping_add(1)
+            .wrapping_mul(0x9E37_79B9);
+        150 + crate::link::xorshift32((self.info.token ^ k) | 1) % 1200
     }
 
     /// The setup TierSet payload: the tier index, plus the token in a voice

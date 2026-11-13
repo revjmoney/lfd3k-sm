@@ -308,8 +308,9 @@ impl Link {
     }
 
     /// Answer a ringing voice call with our answer `token` (drawn by the
-    /// Modem, never zero). Sends the Answer and the voice Train. False if no
-    /// voice call rings.
+    /// Modem, never zero). The Answer and the voice Train go out from the
+    /// next tick, once the channel has been quiet long enough
+    /// (`voice_await_tick`). False if no voice call rings.
     pub fn answer_voice(&mut self, token: u32, sregs: &SRegs, now: u32) -> bool {
         if self.state != State::Ringing || !self.voice.on {
             return false;
@@ -329,7 +330,7 @@ impl Link {
         self.own_cap = cap_tier(sregs);
         self.cap = self.own_cap;
         self.state = State::AwaitTierSet;
-        self.send_voice_answer(now);
+        self.voice.next_at = now;
         true
     }
 
@@ -563,7 +564,16 @@ impl Link {
     /// `ANSWER_SENDS` times (again after 3 to 4 s, or soon after the caller
     /// asks again); with no TierSet carrying our token
     /// `2 * PERIOD_MS` after the last one, another device has the call.
-    pub(super) fn voice_await_tick(&mut self, s7: u32, now: u32) {
+    ///
+    /// `busy`: the radio hears a frame (or sends one). Another device that
+    /// picked up the same call sends its Train right after its Answer, so
+    /// an Answer that waited for the channel would go out the moment that
+    /// Answer ends, on top of the Train. So our Answer (with its Train) goes
+    /// out only once the channel has been quiet for `VoiceLink::quiet_ms`;
+    /// one still waiting in the queue when the channel turns busy is taken
+    /// back and does not count as a send. Our own Answer on the air never
+    /// counts: then only its Train waits, and that is never taken back.
+    pub(super) fn voice_await_tick(&mut self, s7: u32, busy: bool, now: u32) {
         if self.got_tierset {
             // Back from a failed probe: as for a data call.
             if since(now, self.start) >= s7 {
@@ -571,8 +581,17 @@ impl Link {
             }
             return;
         }
+        if busy {
+            self.voice.busy_at = now;
+            if self.voice_answer_queued() {
+                self.q_retain(|f| f.urgent);
+                self.voice.sends = self.voice.sends.saturating_sub(1);
+                return;
+            }
+        }
         if self.voice.sends < ANSWER_SENDS {
-            if vcall::reached(now, self.voice.next_at) {
+            let quiet = since(now, self.voice.busy_at) >= self.voice.quiet_ms();
+            if quiet && vcall::reached(now, self.voice.next_at) {
                 self.send_voice_answer(now);
             }
         } else if since(now, self.voice.sent_at) >= 2 * PERIOD_MS || since(now, self.start) >= s7 {
@@ -580,6 +599,15 @@ impl Link {
             self.emit(Event::AnsweredElsewhere);
             self.go_idle();
         }
+    }
+
+    /// Our voice Answer is still in the queue (not on the air yet).
+    fn voice_answer_queued(&self) -> bool {
+        self.q.get(self.q_head).is_some_and(|f| {
+            self.q_len > 0
+                && f.buf.get(1).map(|b| b >> 4) == Some(FrameType::Voice as u8)
+                && f.buf.get(HEADER_LEN) == Some(&(VSub::Answer as u8))
+        })
     }
 
     /// Caller bound by an Answer whose Train never came (the answering
