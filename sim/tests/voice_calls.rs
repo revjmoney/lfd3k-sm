@@ -1304,7 +1304,29 @@ fn regression_sf12_listener_chunks_fit_after_fade_from_sf9() {
     let t_fade = w.now();
     let coll0 = w.net.collisions();
     w.net.set_snr_x4(SF12_ONLY);
-    w.run(180_000);
+    // REV talks the whole time: a VoiceOut of the tier's max_sealed every
+    // second (the modem keeps two), so every slot carries its voice frame
+    // and a Listener frame running past its sub-slot would hit it.
+    let end = w.now() + 180_000;
+    while w.now() < end {
+        let max = w
+            .raw_frames(a, msg::CALL_STATE)
+            .last()
+            .map_or(0, |(_, p)| usize::from(p[7]));
+        if max > 0 && w.now().is_multiple_of(1000) {
+            let mut v = vec![msg::VOICE_OUT];
+            v.extend(std::iter::repeat_n(0x33, max));
+            w.raw_send(a, &v);
+        }
+        w.step();
+    }
+    let voice12 = w
+        .net
+        .air_log()
+        .iter()
+        .filter(|e| e.0 >= t_fade && e.1 == 0 && e.2 == Tier::Sf12 && e.3.get(5) == Some(&5))
+        .count();
+    assert!(voice12 > 20, "REV's voice frames on SF12: {voice12}");
     // The fix (44b58ef) lets a chunk queued on SF9 (32 bytes) go in an SF12
     // Listener frame only where `big_chunk_ok` says it fits (the floor is
     // free, the sender holds the floor, or the overrun fits the slot's
@@ -1484,23 +1506,56 @@ fn regression_low_s22_never_fires_wall_caps_early() {
         .all(|(at, e)| *at < t || !matches!(e, UiEvent::Ended)));
 }
 
+/// Drops every voice Answer and every voice TierSet (tier and token).
+fn drop_answers_and_tiersets(t: u32, b: &[u8]) -> bool {
+    drop_answers(t, b) || (b.get(1).map(|x| x >> 4) == Some(8) && b.len() == 10)
+}
+
 #[test]
 fn regression_late_pickup_hearing_hangup_is_elsewhere_not_no_carrier() {
     // Task 5 minor folded into Task 6 (880ffc0): a late pickup still
     // waiting for its TierSet that hears the call's Hangup says answered
     // elsewhere and goes idle, silently: never NO CARRIER, never Ended.
-    let (mut w, rev, phone, pc) = three();
-    let r = w.raw(2, 2);
+    // Every Answer and TierSet is lost here, so BOB/TAB still rings after
+    // BOB/PHONE picked up (REV bound PHONE by its Train), picks up, and
+    // then hears only REV's Hangup.
+    let chan = SimChannel {
+        profile: SnrProfile::Constant(40),
+        seed: 18,
+        drop: Some(drop_answers_and_tiersets),
+    };
+    let mut w = World::with_channel(
+        vec![cfg("ALPHA", None), cfg("BRAVO", None), cfg("CHARLIE", None)],
+        chan,
+    );
+    let rev = w.app(0, 1, "REV", "PC");
+    let phone = w.app(1, 1, "BOB", "PHONE");
+    w.apps[phone].auto_answer = false;
+    let r = w.raw(2, 1);
     w.raw_send(r, &strs(msg::REGISTER, &["BOB", "TAB"]));
+    w.run(1_000);
     w.apps[rev].eng.call("BOB", None);
     assert!(w.run_until(15_000, |w| w.has(phone, is_ring)
         && !w.raw_frames(r, msg::RING).is_empty()));
     w.apps[phone].eng.answer();
-    assert!(w.run_until(5_000, |w| count_sent(w, 1, 15, Some(3), 0) > 0));
-    w.run(200);
+    // PHONE's Train went out (REV binds by it); TAB still rings.
+    assert!(w.run_until(5_000, |w| count_sent(w, 1, 4, None, 0) > 0));
+    w.run(500);
+    assert!(
+        w.raw_frames(r, msg::ANSWERED_ELSEWHERE).is_empty(),
+        "TAB still rings"
+    );
     w.raw_send(r, &[msg::ANSWER]);
+    w.run(1_000);
+    assert!(
+        w.raw_frames(r, msg::ERROR).is_empty(),
+        "TAB's Answer was taken"
+    );
+    assert!(
+        w.net.modems[2].voice_call().is_some(),
+        "CHARLIE waits for its TierSet"
+    );
     // REV hangs up while the late pickup still waits.
-    w.run(1_500);
     w.apps[rev].eng.hangup();
     assert!(w.run_until(20_000, |w| !w
         .raw_frames(r, msg::ANSWERED_ELSEWHERE)
@@ -1510,5 +1565,6 @@ fn regression_late_pickup_hearing_hangup_is_elsewhere_not_no_carrier() {
     let text = w.net.host_text(2);
     assert!(!text.contains("NO CARRIER"), "{text:?}");
     assert!(w.net.modems[2].voice_call().is_none());
-    assert!(!w.has(pc, is_connected));
+    let st = w.raw_frames(r, msg::CALL_STATE);
+    assert!(st.iter().all(|(_, p)| p[0] != call_state::CONNECTED));
 }

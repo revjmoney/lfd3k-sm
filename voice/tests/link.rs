@@ -361,3 +361,91 @@ fn v223_lra_92_annex_c5_linking_vectors() {
         unhex("110141476b50c887a90d25187c1648180949c9ae2a577095be652aa84a03746589a8f1")
     );
 }
+
+/// Decoded VHP frames in `wire` (COBS frames, each ending in a zero).
+fn vhp_frames(wire: &[u8]) -> Vec<Vec<u8>> {
+    wire.split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let mut f = [0u8; 300];
+            lfd3k_core::voice::host::cobs_decode(p, &mut f).map(|n| f[..n].to_vec())
+        })
+        .collect()
+}
+
+fn vhp(frame: &[u8]) -> Vec<u8> {
+    let mut w = [0u8; 300];
+    let n = lfd3k_core::voice::host::cobs_encode(frame, &mut w).unwrap();
+    w[..n].to_vec()
+}
+
+#[test]
+fn regression_link_request_before_peer_live_is_ignored() {
+    // Task 8a review: the device showing a link code answers a link
+    // request only from a live peer (its sealed Hello opened). A request
+    // that arrives earlier in the call (here: right after CallState
+    // connected, before any handshake) gets no offer, and the code is not
+    // spent on it. The engine runs against a scripted modem.
+    use lfd3k_core::voice::host::msg;
+    let dir = std::env::temp_dir().join(format!("lfd3k-link-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut e = lfd3k_voice::Engine::new(
+        Identity::generate("REV", "PC").unwrap(),
+        dir.join("trust.json"),
+    );
+    let code = e.start_link_offer();
+    assert_eq!(code.len(), 6);
+    e.on_modem_bytes(&vhp(&[msg::HELLO_ACK, 1, 5, b'A', b'L', b'P', b'H', b'A']));
+    e.call("REVJ", None);
+    // CallState: connected, placed here, SF5, Opus 10k, duplex, 120 ms,
+    // max 170, no SNR or RSSI yet, peer ALPHA2 / REVJ / PHONE.
+    let mut cs = vec![
+        msg::CALL_STATE,
+        4,
+        2,
+        5,
+        8,
+        1,
+        120,
+        0,
+        170,
+        0x00,
+        0x80,
+        0x00,
+        0x80,
+    ];
+    for s in ["ALPHA2", "REVJ", "PHONE"] {
+        cs.push(s.len() as u8);
+        cs.extend_from_slice(s.as_bytes());
+    }
+    e.on_modem_bytes(&vhp(&cs));
+    e.tick(1_000);
+    let _ = e.take_modem_bytes();
+    // The far app's link request arrives as control bytes: length 2,
+    // type 0x10, version 1.
+    let mut ci = vec![msg::CONTROL_IN];
+    ci.extend_from_slice(&lfd3k_voice::Control::LinkMsg(vec![MSG_LINK_REQUEST, 1]).encode());
+    e.on_modem_bytes(&vhp(&ci));
+    e.tick(1_100);
+    let out = vhp_frames(&e.take_modem_bytes());
+    let mut rd = lfd3k_voice::ControlReader::new();
+    for f in out.iter().filter(|f| f[0] == msg::CONTROL_OUT) {
+        rd.push(&f[1..]);
+    }
+    let mut offers = 0;
+    while let Some(m) = rd.next_msg() {
+        if matches!(&m, lfd3k_voice::Control::LinkMsg(b) if b.first() == Some(&MSG_LINK_OFFER)) {
+            offers += 1;
+        }
+    }
+    assert_eq!(offers, 0, "no link offer before the peer is live: {out:x?}");
+    assert!(e.linking(), "the code is not spent");
+    let mut code_shown = false;
+    while let Some(ev) = e.poll_event() {
+        assert!(!matches!(ev, lfd3k_voice::UiEvent::Linked));
+        if let lfd3k_voice::UiEvent::LinkCode(c) = ev {
+            code_shown = c == code;
+        }
+    }
+    assert!(code_shown);
+}
