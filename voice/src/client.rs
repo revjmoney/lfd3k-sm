@@ -158,6 +158,9 @@ pub struct CallStats {
     pub frames_heard: u32,
     /// VoiceIn frames that did not open (or came while audio was held).
     pub frames_dropped: u32,
+    /// Frames sealed but not sent: larger than CallState's max_sealed
+    /// (never expected; the plan sizes them).
+    pub frames_oversized: u32,
     /// Frames the codec concealed.
     pub frames_concealed: u32,
     /// The tier as CallState shows it (spreading factor, 0 before training).
@@ -352,9 +355,12 @@ impl Call {
             && !muted
             && self.connected()
             && self.slots()
-            && self
-                .plan
-                .is_some_and(|p| p.mode == TalkMode::Duplex || self.floor == Floor::Mine)
+            && self.plan.is_some_and(|p| {
+                // Push to talk: the floor is ours and our own key is down
+                // (a floor left over from a key the modem never heard go up
+                // must not open the mic).
+                p.mode == TalkMode::Duplex || (self.floor == Floor::Mine && self.key_down)
+            })
     }
 }
 
@@ -595,6 +601,8 @@ impl Engine {
             return;
         }
         if sealed.len() > max {
+            // Larger than CallState's max_sealed: the modem would refuse it.
+            self.stats.frames_oversized = self.stats.frames_oversized.saturating_add(1);
             return;
         }
         self.send(msg::VOICE_OUT, &sealed);
@@ -733,18 +741,24 @@ impl Engine {
     }
 
     /// The push to talk key (button or space bar). Sent to the modem only
-    /// on a change, on a push to talk tier, once audio may flow. On key up
-    /// the last part of a frame still goes out while the floor is ours.
+    /// on a change. Key down only on a push to talk tier once audio may
+    /// flow; key up whenever the modem was told the key is down, in any
+    /// mode (so a key held across a retrain to duplex is never left down).
+    /// On key up the last part of a frame still goes out while the floor is
+    /// ours.
     pub fn talk_key(&mut self, down: bool) {
         let muted = self.muted;
         let Some(c) = self.call.as_mut() else {
             return;
         };
-        let ptt = c.plan.is_some_and(|p| p.mode != TalkMode::Duplex);
-        if !ptt || !c.audio_ok || !c.connected() || c.key_down == down {
+        if c.key_down == down {
             return;
         }
-        c.key_down = down;
+        let ptt = c.plan.is_some_and(|p| p.mode != TalkMode::Duplex);
+        if down && (!ptt || !c.audio_ok || !c.connected()) {
+            return;
+        }
+        // The tail is cut while the key still counts as down.
         let tail = if !down && c.can_send(muted) && !c.mic_buf.is_empty() {
             Some(std::mem::take(&mut c.mic_buf))
         } else {
@@ -752,6 +766,12 @@ impl Engine {
         };
         if let Some(t) = tail {
             self.send_voice(&t);
+        }
+        if let Some(c) = self.call.as_mut() {
+            c.key_down = down;
+            if !down {
+                c.mic_buf.clear();
+            }
         }
         self.send(msg::TALK_KEY, &[u8::from(down)]);
     }
@@ -839,12 +859,15 @@ impl Engine {
     /// [`LINK_CODE_MS`].
     pub fn start_link_offer(&mut self) -> String {
         self.link_offer = None;
-        let code = new_link_code();
+        self.link_code = None;
         if self.id.person_pub().is_none() {
+            // No code is made or shown: there is nothing to give.
             self.event(UiEvent::Error(
                 "this device has no person key to link with".into(),
             ));
+            return String::new();
         }
+        let code = new_link_code();
         self.link_code = Some((Zeroizing::new(code.clone()), self.now));
         self.event(UiEvent::LinkCode(code.clone()));
         code
@@ -955,9 +978,11 @@ impl Engine {
         self.now = now_ms;
         if self.call.is_none()
             && self.ringing.is_none()
-            && !self.dir_pending
             && now_ms.wrapping_sub(self.dir_due) < u32::MAX / 2
         {
+            // A DirList still open at the next due time lost its DirEnd
+            // (a session reset, say): ask again rather than wait forever.
+            self.dir_pending = false;
             self.refresh_directory();
         }
         if self
@@ -1182,6 +1207,7 @@ impl Engine {
             self.stats.slots_ms = Some(now);
         }
         let mut changed = None;
+        let mut key_up = false;
         if let Some(p) = plan {
             if c.plan != Some(p) {
                 let had = c.plan.is_some();
@@ -1189,8 +1215,21 @@ impl Engine {
                 if had && c.peer_live {
                     changed = Some(p);
                 }
+                // A retrain to duplex: let go of the key, so the modem's key
+                // is not still down when a later retrain brings back push
+                // to talk.
+                if p.mode == TalkMode::Duplex && c.key_down {
+                    c.key_down = false;
+                    key_up = true;
+                }
             }
         }
+        if key_up {
+            self.send(msg::TALK_KEY, &[0]);
+        }
+        let Some(c) = self.call.as_mut() else {
+            return;
+        };
         let start = c.connected() && !was_connected && !c.hs_started;
         if c.connected() && self.stats.connected_ms.is_none() {
             self.stats.connected_ms = Some(now);
@@ -1440,6 +1479,11 @@ impl Engine {
     fn on_link(&mut self, m: &[u8]) {
         match m.first().copied() {
             Some(crate::link::MSG_LINK_REQUEST) => {
+                // Only from a live peer (its sealed Hello opened), and the
+                // code is not spent on anything earlier.
+                if !self.call.as_ref().is_some_and(|c| c.peer_live) {
+                    return;
+                }
                 let Some((code, _)) = self.link_code.take() else {
                     return;
                 };
