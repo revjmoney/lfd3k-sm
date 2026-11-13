@@ -3,10 +3,12 @@
 //!
 //! `cargo run --release -p lfd3k-sim --bin lfd3k-voicesim -- --tier all --in sim/testdata/speech-16k.wav --out target/voicesim`
 //!
-//! - `--tier <SF5..SF12|all>`: the tier (both modems capped there with S21;
-//!   the SNR is high enough that training picks the cap). Default `all`.
+//! - `--tier <SF5..SF12|all>`: the tier (both modems capped there with S21,
+//!   training margin S20 = 0, so training picks the cap whenever the SNR is
+//!   at or above the tier's floor). Default `all`.
 //! - `--snr <dB>`: the channel SNR (default 10). Loss follows the simulator's
-//!   table from the margin over the tier's floor.
+//!   table from the margin over the tier's floor (0.5 % at 2 dB or more over
+//!   it, 10 % within 2 dB, 60 % up to 2 dB under).
 //! - `--in <wav>`: what the caller says (16 bit PCM; mixed to mono and
 //!   resampled to 16 kHz if needed). Default `sim/testdata/speech-16k.wav`.
 //! - `--out <dir>`: where `<tier>.wav` (what the answerer heard) goes.
@@ -282,6 +284,9 @@ fn config(name: &str, tier: Tier) -> Result<Config, String> {
     let mut c = Config::new(name).ok_or_else(|| format!("bad station name {name}"))?;
     let idx = Tier::LADDER.iter().position(|&t| t == tier).unwrap_or(0);
     c.sregs.set(21, idx as u16);
+    // No training margin: a low --snr keeps the tier asked for (and loses
+    // frames) instead of training down to a slower one.
+    c.sregs.set(20, 0);
     Ok(c)
 }
 
@@ -473,6 +478,9 @@ fn main() -> ExitCode {
     for &t in &a.tiers {
         match run_tier(t, &a, &wav) {
             Ok(r) => {
+                if r.sf != t.sf() {
+                    println!("(asked for SF{}; the call trained to SF{}; the WAV is SF{}.wav)", t.sf(), r.sf, t.sf());
+                }
                 let ms = |v: Option<u32>| v.map_or("none".to_string(), |v| format!("{v} ms"));
                 println!(
                     "SF{:<3} {:<12} {:<12} {:>4}  {:>5}  {:>4}  {:>9}  {:>9} ms  {:>5.2}  {:>16}  {:>22}",

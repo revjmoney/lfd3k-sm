@@ -1052,6 +1052,13 @@ impl Engine {
                     _ => "error",
                 };
                 self.event(UiEvent::Error(format!("modem: message 0x{ty:02X} {why}")));
+                // A refused Call or Answer starts no call at the modem: no
+                // CallState or end message will come, so end ours here.
+                let refused_start = (ty == msg::CALL || ty == msg::ANSWER)
+                    && self.call.as_ref().is_some_and(|c| !c.connected());
+                if refused_start {
+                    self.on_end(UiEvent::Ended);
+                }
             }
             msg::AT_REPLY => {
                 let last = r.u8().is_some_and(|f| f & 1 != 0);
@@ -1346,6 +1353,12 @@ impl Engine {
             .unwrap_or_else(|| talk_plan(tier_from_sf(self.stats.sf).unwrap_or(Tier::Sf12)));
         let name = c.peer_name.clone();
         self.event(UiEvent::Connected { plan, words, trust: verdict });
+        // Mute and a link request go first: once VoiceReady is out the
+        // stream moves in small listener pieces.
+        if self.muted {
+            self.send_mute();
+        }
+        self.link_kick();
         match verdict {
             Trust::Checked => {
                 if let Some(c) = self.call.as_mut() {
@@ -1356,10 +1369,6 @@ impl Engine {
             Trust::Conflict => self.conflict_warning(&name),
             Trust::NotChecked => {}
         }
-        if self.muted {
-            self.send_mute();
-        }
-        self.link_kick();
     }
 
     /// The trust decision is made: removals (if any), then VoiceReady.
