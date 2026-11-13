@@ -23,6 +23,7 @@ The program is `target\release\lfd3k-voice-pc.exe`. Use the release build for ca
 lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
     [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
     [--auto-answer] [--play <wav>] [--record <wav>]
+    [--script <file> --shots <dir>] [--trace <dir>]
 ```
 
 | Option | Meaning |
@@ -36,7 +37,8 @@ lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 | `--auto-answer` | Test helper: the app picks up by itself and talks anyway (the two words still show). The modem's S0 still never answers voice; this is the app's choice |
 | `--play <wav>` | Test helper: the WAV is the mic (looped while we may talk). The real mic is not opened |
 | `--record <wav>` | Test helper: what the app hears goes into this WAV (written at the end of each call). The speakers are not used |
-| `--script <file> --shots <dir>` | Test helper: drives the window from a file, one action per line (call, words_match, talk down, set ATS30=5, save, shot <name>...), through the same code as the buttons; the command list is at the top of the script code in `apps/pc/src/ui.rs` |
+| `--script <file> --shots <dir>` | Test helper: drives the window from a file, one action per line (call, words_match, talk down, set ATS30=5, save, shot <name>...), through the same code as the buttons; the command list is at the top of the script code in `apps/pc/src/ui.rs`. For a recorded call between two copies: `sync <file> [<ms>]` (both copies meet at one wall clock go mark through the file), `at_t <ms>` (wait until the go mark plus ms), `play <from_ms> <to_ms>` (play that part of the `--play` WAV from now, once, whatever the floor; `play 0 0` stops the looping before the call) |
+| `--trace <dir>` | Test helper for the testing video: `status.csv` (every 250 ms the front panel status fields and the last 64 scope samples), `host.log` (the AT lines the app sent, the modem's replies with passwords masked, and the core's own result line for each call state change: RING, CONNECT, RETRAIN, NO CARRIER, DECLINED) and `marks.csv` (where the `--record` WAV and each `play` start, Unix ms) |
 
 ## Two apps on this PC
 
@@ -105,3 +107,11 @@ Removed devices (REMOVE DEVICE on one of your own) are kept in `removed.json` in
 ## Two PCs
 
 Same as above with each app's `--bind` on its own LAN address and `--peer` the other PC's, for example `--bind 192.168.1.20:4210 --peer 192.168.1.30:4210`. Let UDP through the firewall on both.
+
+## Bench recordings and screenshots
+
+- `docs/voice-bench/timing.md`: the timing table of every tier (`lfd3k-voicesim`) and of the recorded test call.
+- `docs/voice-bench/wav/`: `lfd3k-voicesim` recordings of every tier (SF5 to SF12).
+- `docs/voice-bench/call/`: the recorded AXIS BBS test call between two copies of this app on SimNet, at SF5, SF7, SF9 and SF12 (stereo Opus, left what the caller heard, right what the answerer heard), how it was made, and the synthetic source conversation.
+- Footage for the testing video (app windows, each modem's host side as a terminal, each modem's front panel, a timeline) is not kept in the repo (about 33 MB): `tools/voice_video.py` makes it from the runs of `tools/voice_call_bench/run_call.py` (each app's `--shots` and `--trace`).
+- `docs/voice-bench/pc/`: the app's screens at 1280 x 720.

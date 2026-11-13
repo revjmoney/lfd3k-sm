@@ -261,9 +261,13 @@ These run on Rev's PC only and are never built into the firmware or the core. In
 | Tool | Version | License | Used in |
 |------|---------|---------|---------|
 | pyserial | 3.5 | BSD-3-Clause | `tools/lfd3k_term.py` (bench terminal), installed with pip |
-| Pillow with libraqm | 12.3 | MIT-CMU (Pillow; its bundled libraqm, FreeType, HarfBuzz and FriBiDi carry their own licenses; PC only, nothing of it is linked into the firmware) | `tools/gen_idle_words.py` (shapes and renders the script words) and `tools/idle_preview.py` (GIF and contact sheet) |
-| MinGW gcc | as installed (MSYS2 mingw64) | GPL with the GCC runtime library exception | builds `tools/panel_check` only; nothing it produces is shipped |
+| Pillow with libraqm | 12.3 | MIT-CMU (Pillow; its bundled libraqm, FreeType, HarfBuzz and FriBiDi carry their own licenses; PC only, nothing of it is linked into the firmware) | `tools/gen_idle_words.py` (shapes and renders the script words), `tools/idle_preview.py` (GIF and contact sheet), `tools/voice_video.py` (the testing video footage) and `tools/menu_preview.py` |
+| NumPy | 2.4.4 | BSD-3-Clause | `tools/voice_call_bench/analyze.py` (the recorded test call: stereo file, mouth to ear, per turn levels), installed with pip |
+| MinGW gcc | as installed (MSYS2 mingw64) | GPL with the GCC runtime library exception | builds `tools/panel_check` and `tools/panel_replay` only; nothing it produces is shipped |
+| FLAC (`flac` command line) | as installed (MSYS2 mingw64) | GPL-2.0-or-later (tools), BSD-3-Clause (libFLAC) | compresses the two source sides of the recorded test call in `docs/voice-bench/call/source` (plain FLAC; nothing of the tool is shipped) |
+| FFmpeg with libopus | as installed (C: ffmpeg folder) | LGPL-2.1-or-later or GPL (FFmpeg build), BSD-3-Clause (libopus) | encodes the recorded test call and the source mix in `docs/voice-bench/call` as Opus (plain Ogg Opus files; nothing of the tool is shipped) |
 
 ## Test audio
 
 - `sim/testdata/speech-16k.wav`: 20 s (from 3 s in) of "Evening Star" by Edgar Allan Poe, read for LibriVox (archive.org item `evening_star_0901_librivox`, file `eveningstar_poe_ac_64kb.mp3`, 574,611 bytes, sha256 ef9b5c1a62e8e9033757724d5fca7f175b5fa18eb42c95ebb6fe1c9165742675). LibriVox recordings are in the public domain. Converted to 16 kHz mono 16 bit with ffmpeg. Used only as test speech for `lfd3k-voicesim` and the voice tests.
+- `docs/voice-bench/call/source/` (`side_a.flac`, `side_b.flac`, `mix.opus`, `script.md`, `timeline.csv`): a two speaker conversation about the AXIS BBS (117.5 s, 16 kHz mono), synthetic speech generated on this PC with Bark (suno/bark, MIT license, https://github.com/suno-ai/bark) from a script written for this project, with Bark's stock speaker presets `v2/en_speaker_6` (Dave) and `v2/en_speaker_9` (Maya). Dave and Maya are invented; no real person's voice was cloned or recorded. Used as the two mics of the recorded test call (`docs/voice-bench/call/README.md`). Bark's model weights were used only to generate the audio; nothing of Bark is in this repo or linked into anything.

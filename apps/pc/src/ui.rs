@@ -290,6 +290,19 @@ fn text_fit(ui: &Ui, pos: Pos2, a: Align2, s: &str, f: FontId, c: Color32, w: f3
     ui.painter().text(pos, a, t, f, c);
 }
 
+/// A scan answer (`SCAN <station> SNR <x> dB <tier> [VOICE <names>]`) as
+/// two lines: the station and its SNR, then the tier and voice names.
+fn scan_two_lines(l: &str) -> (String, String) {
+    let l = l.strip_prefix("SCAN ").unwrap_or(l);
+    match l.find(" dB ") {
+        Some(i) => (
+            l.get(..i + 3).unwrap_or(l).to_string(),
+            l.get(i + 4..).unwrap_or("").to_string(),
+        ),
+        None => (l.to_string(), String::new()),
+    }
+}
+
 /// Wrapped text inside `r`; lines past the bottom are not drawn.
 fn text_wrap(ui: &Ui, r: Rect, s: &str, f: FontId, c: Color32) {
     let g = ui.painter().layout(s.to_string(), f, c, r.width());
@@ -529,6 +542,8 @@ struct Script {
     shots: PathBuf,
     shot_pending: Arc<AtomicUsize>,
     t0: Instant,
+    /// The go mark of `sync` (Unix ms), for `at_t`.
+    go: Option<u64>,
 }
 
 pub struct App {
@@ -621,6 +636,7 @@ impl App {
                     shots: args.shots.clone().unwrap_or_else(|| PathBuf::from("shots")),
                     shot_pending: Arc::new(AtomicUsize::new(0)),
                     t0: Instant::now(),
+                    go: None,
                 }),
                 Err(e) => {
                     eprintln!("{}: {e}", p.display());
@@ -2036,15 +2052,16 @@ impl App {
                 MUTED,
             );
         }
-        // Scan answers, 3 to a page.
-        let per = 3usize;
+        // Scan answers, 2 to a page, each on two lines (station and SNR,
+        // then the tier and the voice names) so a long one is not cut.
+        let per = 2usize;
         let pages = self.m.scan.len().div_ceil(per).max(1);
         self.scan_page = self.scan_page.min(pages - 1);
-        if pages > 1 {
+        if pages > 1 && !hidden {
             let label = format!("{} OF {}", self.scan_page + 1, pages);
             text(
                 ui,
-                Pos2::new(x, right.top() + 196.0),
+                Pos2::new(x, right.top() + 106.0),
                 Align2::LEFT_CENTER,
                 &label,
                 mono(11.0),
@@ -2052,7 +2069,7 @@ impl App {
             );
             if button(
                 ui,
-                rect(right.right() - 196.0, right.top() + 182.0, 84.0, 28.0),
+                rect(right.right() - 196.0, right.top() + 92.0, 84.0, 28.0),
                 "PREV",
                 Kind::Plain,
                 self.scan_page > 0,
@@ -2063,7 +2080,7 @@ impl App {
             }
             if button(
                 ui,
-                rect(right.right() - 104.0, right.top() + 182.0, 84.0, 28.0),
+                rect(right.right() - 104.0, right.top() + 92.0, 84.0, 28.0),
                 "NEXT",
                 Kind::Plain,
                 self.scan_page + 1 < pages,
@@ -2081,20 +2098,31 @@ impl App {
             .take(per)
             .enumerate()
         {
+            let (a, b) = scan_two_lines(l);
+            let y = right.top() + 130.0 + i as f32 * 44.0;
             text_fit(
                 ui,
-                Pos2::new(x, right.top() + 116.0 + i as f32 * 22.0),
+                Pos2::new(x, y),
                 Align2::LEFT_TOP,
-                l,
+                &a,
                 mono(11.5),
                 TEXT2,
                 w,
+            );
+            text_fit(
+                ui,
+                Pos2::new(x + 16.0, y + 19.0),
+                Align2::LEFT_TOP,
+                &b,
+                mono(11.5),
+                MUTED,
+                w - 16.0,
             );
         }
         if self.m.scan.is_empty() && !self.m.scanning {
             text(
                 ui,
-                Pos2::new(x, right.top() + 116.0),
+                Pos2::new(x, right.top() + 130.0),
                 Align2::LEFT_TOP,
                 "No scan yet.",
                 sans(13.0),
@@ -3533,7 +3561,11 @@ impl App {
     // (state to stdout); `size <w> <h>` (window size in points);
     // `link_code_file <path>` / `link_join_file <path>` (hand a link code to
     // another copy's script; conditions link_code, linked, not_linking);
-    // `quit`.
+    // `sync <file> [<ms>]` (two copies meet at one wall clock go mark: the
+    // first to get here writes now + ms, default 3000, to the file, the
+    // other reads it; both wait for it); `at_t <ms>` (wait until the go
+    // mark + ms); `play <from_ms> <to_ms>` (play that part of the --play
+    // WAV from now, once; the WAV stops looping); `quit`.
 
     fn run_script(&mut self, ctx: &egui::Context) {
         let Some(sc) = self.script.as_mut() else {
@@ -3699,6 +3731,30 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(v));
             }
+            "sync" => {
+                let (f, ms) = rest.split_once(' ').unwrap_or((rest.as_str(), "3000"));
+                let go = sync_mark(f, ms.parse().unwrap_or(3000));
+                println!("[script] go {go}");
+                if let Some(sc) = self.script.as_mut() {
+                    sc.go = Some(go);
+                    sc.wait_until = Some(instant_at(go));
+                }
+            }
+            "at_t" => {
+                if let Some(sc) = self.script.as_mut() {
+                    let ms: u64 = rest.parse().unwrap_or(0);
+                    if let Some(go) = sc.go {
+                        sc.wait_until = Some(instant_at(go + ms));
+                    }
+                }
+            }
+            "play" => {
+                let (a, b) = rest.split_once(' ').unwrap_or((rest.as_str(), "0"));
+                self.cmd(Cmd::PlaySeg {
+                    from_ms: a.parse().unwrap_or(0),
+                    to_ms: b.parse().unwrap_or(0),
+                });
+            }
             "quit" => {
                 self.stopping = true;
                 self.cmd(Cmd::Quit);
@@ -3850,9 +3906,46 @@ impl App {
     }
 }
 
+/// The script's `sync`: the go mark in the file, or now + `ms` written to
+/// it by the first copy to get there.
+fn sync_mark(file: &str, ms: u64) -> u64 {
+    if let Some(go) = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+    {
+        return go;
+    }
+    let go = crate::trace::unix_ms() + ms;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            let _ = write!(f, "{go}");
+            go
+        }
+        // The other copy made it just now.
+        Err(_) => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::fs::read_to_string(file)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+                .unwrap_or(go)
+        }
+    }
+}
+
+/// The Instant of a wall clock time (Unix ms); now when it has passed.
+fn instant_at(unix: u64) -> Instant {
+    let now = crate::trace::unix_ms();
+    Instant::now() + std::time::Duration::from_millis(unix.saturating_sub(now))
+}
+
 /// A script line as it may be printed: a password after `fill *_pass`,
 /// and after the comma of `AT+WAP=` or `AT+WSTA=`, shows as `********`.
-fn mask_line(line: &str) -> String {
+pub(crate) fn mask_line(line: &str) -> String {
     let mut words = line.splitn(3, ' ');
     if let (Some("fill"), Some(f)) = (words.next(), words.next()) {
         if f.ends_with("_pass") {

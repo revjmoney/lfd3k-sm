@@ -1,0 +1,17 @@
+turn,speaker,start_s,end_s,text
+1,dave,0.3,8.05,"Hey Maya, you will not believe what I just did. I dialed into a BBS over radio."
+2,maya,8.58,14.23,No way. Like an actual bulletin board? With a modem and everything?
+3,dave,14.69,23.34,Yeah! It's called the AXIS BBS. It runs on a little ESP32 board with a color screen.
+4,maya,24.0,28.9,"Wait, a tiny board is running the whole thing? How does it even connect?"
+5,dave,29.33,40.18,"Through the LoRa modem. I typed A T D T, and it started training, and then it said CONNECT."
+6,maya,40.8,43.95,"Okay, that is wild. What did the connect line say?"
+7,dave,44.5,54.65,"CONNECT LORA S F 7. It picks a speed tier by itself, depending on the signal."
+8,maya,55.08,62.33,"Ha, so it slows down when the signal gets bad. Just like the old modems."
+9,dave,62.93,70.08,"Exactly. And then the ANSI art loads, all in color. It looks so good."
+10,maya,70.5,76.09,Stop it. I miss that. What can you actually do on there?
+11,dave,76.66,85.62,"There are message bases, a file area, door games, even a voting booth for new users."
+12,maya,86.05,88.75,Did you post anything? Or leave a message?
+13,dave,89.19,96.95,"Yeah, I left a hello in the general base. Felt like 1994 all over again."
+14,maya,97.52,104.06,"Honestly, calling a BBS over radio is the coolest thing I've heard all week."
+15,dave,104.79,111.2,"Right? No internet, no cell tower. Just two radios and a lot of static."
+16,maya,111.65,117.08,"Okay, I'm sold. Send me the number, and I'm calling tonight."

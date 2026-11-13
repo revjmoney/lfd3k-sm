@@ -9,7 +9,7 @@
 //! lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 //!     [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
 //!     [--auto-answer] [--play <wav>] [--record <wav>]
-//!     [--script <file> --shots <dir>]
+//!     [--script <file> --shots <dir>] [--trace <dir>]
 //! ```
 
 // No console window on Windows release builds.
@@ -18,6 +18,7 @@
 mod audio;
 mod modem_sim;
 mod monitor;
+mod trace;
 mod ui;
 
 use std::net::SocketAddr;
@@ -43,12 +44,13 @@ pub struct Args {
     pub record: Option<PathBuf>,
     pub script: Option<PathBuf>,
     pub shots: Option<PathBuf>,
+    pub trace: Option<PathBuf>,
 }
 
 fn usage() -> String {
     "usage: lfd3k-voice-pc --name <NAME> --label <LABEL> [--bind <addr:port>] [--peer <addr:port>] \
      [--snr <dB>] [--cap-tier <SF5..SF12>] [--data <dir>] [--station <NAME>] [--auto-answer] \
-     [--play <wav>] [--record <wav>] [--script <file> --shots <dir>]"
+     [--play <wav>] [--record <wav>] [--script <file> --shots <dir>] [--trace <dir>]"
         .to_string()
 }
 
@@ -78,6 +80,7 @@ fn parse_args() -> Result<Args, String> {
         record: None,
         script: None,
         shots: None,
+        trace: None,
     };
     let mut data = None;
     let mut station = None;
@@ -106,6 +109,7 @@ fn parse_args() -> Result<Args, String> {
             "--record" => a.record = Some(PathBuf::from(v()?)),
             "--script" => a.script = Some(PathBuf::from(v()?)),
             "--shots" => a.shots = Some(PathBuf::from(v()?)),
+            "--trace" => a.trace = Some(PathBuf::from(v()?)),
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown option {k}\n{}", usage())),
         }
@@ -244,6 +248,7 @@ fn main() -> ExitCode {
                 mic: sound.mic.clone(),
                 spk: sound.spk.clone(),
                 sounds: modem_sim::load_sounds(&a.data),
+                trace: a.trace.clone(),
             };
             modem_sim::spawn(o, cmd_rx, ev_tx, snap.clone(), cc.egui_ctx.clone())?;
             Ok(Box::new(ui::App::new(

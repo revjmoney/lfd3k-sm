@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lfd3k_core::voice::{Floor, TalkMode};
-use lfd3k_core::{Config, Modem, Settings, SimNetRadio, Tier, BLOB_LEN, DIR_BLOB_LEN};
+use lfd3k_core::{Config, Modem, ResultCode, Settings, SimNetRadio, Tier, BLOB_LEN, DIR_BLOB_LEN};
 use lfd3k_sim::UdpPort;
 use lfd3k_voice::{CallStats, ContactView, Engine, Identity, Trust, TrustStore, UiEvent};
 use zeroize::Zeroizing;
@@ -83,6 +83,13 @@ pub enum Cmd {
     Decline,
     Hangup,
     TalkKey(bool),
+    /// Test helper (the script's `play`): play this part of the `--play`
+    /// WAV from now, once, whatever the floor (the engine drops what may
+    /// not be sent); the WAV no longer loops after the first.
+    PlaySeg {
+        from_ms: u32,
+        to_ms: u32,
+    },
     AcceptWords,
     TalkAnyway,
     Mute(bool),
@@ -206,6 +213,8 @@ pub struct Opts {
     pub spk: Option<Queue>,
     /// Connection sounds on.
     pub sounds: bool,
+    /// `--trace <dir>`: log the modem's status, host lines and audio marks.
+    pub trace: Option<PathBuf>,
 }
 
 pub fn identity_path(data: &Path) -> PathBuf {
@@ -327,6 +336,15 @@ struct Worker {
     rec_tail: Option<u32>,
     /// Seconds of connection sound made (test helpers print it).
     chirp_total: u64,
+    /// The `play` segment playing (next sample, end), a segment was asked
+    /// for (no more looping), and its first chunk is next.
+    seg: Option<(usize, usize)>,
+    seg_used: bool,
+    seg_new: bool,
+    /// The `--record` WAV is taking samples (a run of them is marked).
+    rec_on: bool,
+    /// `--trace`.
+    tr: Option<crate::trace::Trace>,
 }
 
 /// Run the modem thread until `Cmd::Quit`.
@@ -414,8 +432,19 @@ pub fn spawn(
                 retrain_until: None,
                 rec_tail: None,
                 chirp_total: 0,
+                seg: None,
+                seg_used: false,
+                seg_new: false,
+                rec_on: false,
+                tr: None,
                 o,
             };
+            if let Some(d) = w.o.trace.clone() {
+                match crate::trace::Trace::open(&d, now) {
+                    Ok(t) => w.tr = Some(t),
+                    Err(e) => w.send(Ev::Note(format!("{}: {e}", d.display()))),
+                }
+            }
             w.run(cmd);
         })
         .map_err(|e| e.to_string())
@@ -492,6 +521,9 @@ impl Worker {
         let tx = self.radio.transmitting();
         let rssi = if tx { 0 } else { self.radio.rx_rssi() };
         self.modem.scope_sample(rssi, tx, now);
+        if let Some(t) = &mut self.tr {
+            t.scope(rssi, tx);
+        }
     }
 
     /// A call is being set up: the modem dialing, ringing or training, or
@@ -603,6 +635,14 @@ impl Worker {
                 e.hangup();
             }
             Cmd::TalkKey(d) => e.talk_key(d),
+            Cmd::PlaySeg { from_ms, to_ms } => {
+                let len = self.o.play.as_ref().map_or(0, Vec::len);
+                let from = (from_ms as usize * 16).min(len);
+                let to = (to_ms as usize * 16).min(len);
+                self.seg = (from < to).then_some((from, to));
+                self.seg_used = true;
+                self.seg_new = true;
+            }
             Cmd::AcceptWords => e.accept_words(),
             Cmd::TalkAnyway => e.talk_anyway(),
             Cmd::Mute(m) => e.set_mute(m),
@@ -684,6 +724,9 @@ impl Worker {
         // A call or attempt that just ended: its Hangup frames sound (NO
         // CARRIER). One that just connected: the setup sounds stop.
         let st = self.modem.call_state();
+        if let Some(t) = &mut self.tr {
+            t.tick(&self.modem, now);
+        }
         if self.last_state != 0 && st == 0 {
             self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
         }
@@ -710,6 +753,9 @@ impl Worker {
                     self.send(Ev::Ui(UiEvent::Air(a)));
                 }
                 UiEvent::AtReply { text, last } => {
+                    if let Some(t) = &mut self.tr {
+                        t.host(now, '<', &text);
+                    }
                     if let Some((_, acc, _)) = self.at.cur.as_mut() {
                         acc.push_str(&text);
                     }
@@ -769,6 +815,13 @@ impl Worker {
                 | UiEvent::Declined
                 | UiEvent::NoAnswer
                 | UiEvent::AnsweredElsewhere) => {
+                    if let Some(t) = &mut self.tr {
+                        match e {
+                            UiEvent::Declined => t.ended(now, &ResultCode::Declined),
+                            UiEvent::NoAnswer => t.ended(now, &ResultCode::NoAnswer),
+                            _ => {}
+                        }
+                    }
                     self.auto_ptt = AutoPtt::Idle;
                     self.ring_until = None;
                     // Written once the NO CARRIER chirps are in.
@@ -827,7 +880,35 @@ impl Worker {
             self.spk_made += CHUNK as u64;
             // Mic: the WAV (looped) while we may talk, else the device.
             let sending = slots && (!ptt || floor == Floor::Mine);
+            // The wall clock time of this chunk (the audio clock).
+            let chunk_ms = self
+                .t0
+                .wrapping_add(((self.spk_made - CHUNK as u64) / 16) as u32);
             let mic: Vec<i16> = match &self.o.play {
+                Some(w) if !w.is_empty() && self.seg_used => match self.seg {
+                    Some((pos, end)) => {
+                        if self.seg_new {
+                            self.seg_new = false;
+                            if let Some(t) = &mut self.tr {
+                                let u = t.unix(chunk_ms);
+                                t.mark("play", u, pos / 16, end / 16);
+                            }
+                        }
+                        let v: Vec<i16> = (pos..pos + CHUNK)
+                            .map(|i| {
+                                if i < end {
+                                    w.get(i).copied().unwrap_or(0)
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
+                        self.seg = (pos + CHUNK < end).then_some((pos + CHUNK, end));
+                        self.played += CHUNK;
+                        v
+                    }
+                    None => vec![0; CHUNK],
+                },
                 Some(w) if !w.is_empty() => {
                     if sending {
                         let v: Vec<i16> = (0..CHUNK)
@@ -866,7 +947,16 @@ impl Worker {
                 self.chirp_total += CHUNK as u64;
             }
             if self.o.record.is_some() && (in_call || self.rec_tail.is_some()) {
+                if !self.rec_on {
+                    self.rec_on = true;
+                    if let Some(t) = &mut self.tr {
+                        let u = t.unix(chunk_ms);
+                        t.mark("rec", u, self.rec.len(), 0);
+                    }
+                }
                 self.rec.extend_from_slice(&out);
+            } else {
+                self.rec_on = false;
             }
             if let Some(q) = &self.o.spk {
                 let mut q = q.lock().unwrap_or_else(|p| p.into_inner());
@@ -898,6 +988,9 @@ impl Worker {
             return;
         };
         if self.engine.at_line(&line) {
+            if let Some(t) = &mut self.tr {
+                t.host(now, '>', &crate::ui::mask_line(&line));
+            }
             self.at.cur = Some((tag, String::new(), now));
         } else {
             self.send(Ev::At {
