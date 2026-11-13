@@ -33,9 +33,10 @@ fn main() {
     let mut b = cc::Build::new();
     // Codec 2 uses C99 variable length arrays, which MSVC cl rejects. On the
     // MSVC target build it with clang-cl: set LFD3K_CLANG_CL to its full path,
-    // or put clang-cl on PATH (on Rev's PC the Android NDK ships one, under
-    // <ndk>\toolchains\llvm\prebuilt\windows-x86_64\bin). Other targets
-    // (Android, Linux) use cc's default compiler.
+    // or put clang-cl on PATH (the Android NDK ships one, under
+    // <ndk>\toolchains\llvm\prebuilt\windows-x86_64\bin, and so do Visual
+    // Studio's C++ Clang tools). Other targets (Android, Linux) use cc's
+    // default compiler.
     println!("cargo:rerun-if-env-changed=LFD3K_CLANG_CL");
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         let clang = std::env::var_os("LFD3K_CLANG_CL")
@@ -54,7 +55,9 @@ fn main() {
                 )
             });
         b.compiler(clang);
-        b.flag("--target=x86_64-pc-windows-msvc");
+        // The target triple cargo builds for (x86_64, aarch64 or i686 MSVC).
+        let target = std::env::var("TARGET").expect("cargo sets TARGET");
+        b.flag(format!("--target={target}"));
         b.flag("-Wno-everything");
     }
     for s in src {
@@ -67,7 +70,14 @@ fn main() {
         println!("cargo:rerun-if-changed={p}");
         b.file(p);
     }
-    println!("cargo:rerun-if-changed=codec2/include/codec2/version.h");
+    for dir in ["codec2/src", "codec2/include/codec2"] {
+        for e in std::fs::read_dir(dir).expect("vendored codec2 headers").flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "h") {
+                println!("cargo:rerun-if-changed={}", p.display());
+            }
+        }
+    }
     b.include("codec2/src")
         .include("codec2/include")
         .define("_USE_MATH_DEFINES", None)

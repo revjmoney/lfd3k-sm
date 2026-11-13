@@ -26,6 +26,7 @@ import argparse
 import csv
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,7 @@ TIERS = ["SF5", "SF6", "SF7", "SF8", "SF9", "SF10", "SF11", "SF12"]
 
 
 def build_replay(gcc):
+    gcc = shutil.which(gcc) or gcc
     exe = ROOT / "target" / "panel_check" / "panel_replay.exe"
     exe.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -176,9 +178,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--tiers", default="SF5,SF7,SF9,SF12")
     ap.add_argument("--t0", required=True, help="tier=unix_ms of the first audio sample, comma separated")
-    ap.add_argument("--gcc", default=r"D:\onerous\msys64\mingw64\bin\gcc.exe")
+    ap.add_argument("--gcc", default="gcc", help="gcc to build the panel replay (default: gcc from PATH)")
     ap.add_argument("--app-width", type=int, default=960)
-    ap.add_argument("--panel-ms", default="SF7=1000", help="tier=ms between panel frames (default 2000)")
+    ap.add_argument("--panel-ms", default="SF7=1000", help="tier=ms between panel frames, comma separated (default SF7=1000; a tier not listed: 2000)")
     a = ap.parse_args()
     exe, env = build_replay(a.gcc)
     t0s = dict((k, int(v)) for k, v in (x.split("=") for x in a.t0.split(",")))

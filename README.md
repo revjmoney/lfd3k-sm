@@ -113,9 +113,24 @@ Settings, S registers and every AT command are in [`docs/FEATURES.md`](docs/FEAT
 | Firmware (ESP-IDF 5.4 via PlatformIO) | `firmware/` | `firmware\build_core.ps1`, then `pio run -d firmware -e heltec_v4` |
 | Firmware for the Heltec V3 (the modem alone) | `firmware/` | `firmware\build_core.ps1`, then `pio run -d firmware -e heltec_v3_single -t upload --upload-port COMn` |
 | Multimode bootloader and picker | `multimode/` | see [`multimode/README.md`](multimode/README.md) |
+| Voice engine and the PC voice app | `voice/`, `apps/pc/` | `cargo build --release -p lfd3k-voice-pc` (prerequisites below; see [`docs/voice-pc.md`](docs/voice-pc.md)) |
 
 The Rust toolchain for the ESP32-S3 is installed with `espup`. The first firmware build downloads
 ESP-IDF and takes a while; later builds take seconds.
+
+### Prerequisites for the voice crates
+
+`cargo build --workspace` builds the voice engine (`voice/`) and the PC voice app (`apps/pc/`) too. They need:
+
+- **clang-cl on Windows (MSVC target).** Codec 2 is C99 with variable length arrays, which MSVC's `cl` cannot compile, so `voice/build.rs` builds it with clang-cl. Set `LFD3K_CLANG_CL` to the full path of `clang-cl.exe`, or put clang-cl on PATH. The Android NDK's clang-cl (under `toolchains\llvm\prebuilt\windows-x86_64\bin`) works, and so does Visual Studio's "C++ Clang tools for Windows" component. Linux and macOS use their usual C compiler.
+- **cmake** on PATH: `opusic-sys` builds the bundled libopus with cmake.
+- **Network on the first build**: the simulator's tests (`sim/`) have a git dev-dependency on the public core at commit 6364009 (`https://github.com/revjmoney/lfd3k-sm`) for the old build compatibility tests; cargo fetches it once and then works offline.
+
+```powershell
+$env:LFD3K_CLANG_CL = 'C:\path\to\clang-cl.exe'   # or have clang-cl on PATH
+cargo build --workspace
+cargo test --workspace
+```
 
 ## Documentation
 

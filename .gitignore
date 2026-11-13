@@ -16,3 +16,4 @@ firmware/managed_components/
 firmware/sdkconfig.heltec_v3
 firmware/sdkconfig.heltec_v3_single
 multimode/picker/sdkconfig.picker_v3
+call-work/

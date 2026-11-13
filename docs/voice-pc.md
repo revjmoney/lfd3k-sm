@@ -8,10 +8,10 @@ Everything in a call is scrambled by the FLOWTRON SCRAMBLER (end to end, keys ma
 
 ## Build
 
-From PowerShell in the repo (the voice crate needs clang-cl, see the voice notes in `docs/FEATURES.md`):
+From PowerShell in the repo. The voice crate needs clang-cl on Windows (for Codec 2) and cmake (for Opus): see "Prerequisites for the voice crates" in the [README](../README.md#prerequisites-for-the-voice-crates). Point `LFD3K_CLANG_CL` at a clang-cl.exe (the Android NDK's clang-cl, or Visual Studio's C++ Clang tools), or put clang-cl on PATH:
 
 ```powershell
-$env:LFD3K_CLANG_CL = 'D:\android\Sdk\ndk\28.2.13676358\toolchains\llvm\prebuilt\windows-x86_64\bin\clang-cl.exe'
+$env:LFD3K_CLANG_CL = 'C:\path\to\clang-cl.exe'
 cargo build --release -p lfd3k-voice-pc
 ```
 

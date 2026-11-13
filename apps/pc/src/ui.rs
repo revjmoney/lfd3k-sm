@@ -1,4 +1,4 @@
-//! The window: the rotatocam.com theme (`F:\ROTATOCAM-PRO\www\css\site.css`
+//! The window: the rotatocam.com theme (the site's `css/site.css`
 //! tokens: graphite surfaces, 1 px hairlines, no shadows, 5 px radius on
 //! buttons only, `#7aa2f7` accent, `--warn` amber only for warnings),
 //! Archivo and IBM Plex Mono, the Simian logo, and every screen laid out
