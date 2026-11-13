@@ -71,7 +71,10 @@ fn main() {
         b.file(p);
     }
     for dir in ["codec2/src", "codec2/include/codec2"] {
-        for e in std::fs::read_dir(dir).expect("vendored codec2 headers").flatten() {
+        for e in std::fs::read_dir(dir)
+            .expect("vendored codec2 headers")
+            .flatten()
+        {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "h") {
                 println!("cargo:rerun-if-changed={}", p.display());

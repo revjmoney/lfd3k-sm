@@ -20,7 +20,9 @@ fn voice_queue_depths_match_the_documents() {
         "up to **{VOICE_QUEUE_DUPLEX}** sealed voice frames from its app in duplex and up to **{VOICE_QUEUE}** in push to talk"
     )));
     // Clause 12.4, VoiceOut.
-    assert!(SPEC.contains(&format!("({VOICE_QUEUE_DUPLEX} held in duplex, {VOICE_QUEUE} in push to talk; more are refused)")));
+    assert!(SPEC.contains(&format!(
+        "({VOICE_QUEUE_DUPLEX} held in duplex, {VOICE_QUEUE} in push to talk; more are refused)"
+    )));
     // Annex A.
     assert!(SPEC.contains(&format!("| Voice frames held | {held} |")));
     // FEATURES.md, 0x08 VoiceOut.

@@ -143,19 +143,20 @@ impl std::fmt::Display for LinkError {
 impl std::error::Error for LinkError {}
 
 /// A new link code: 6 decimal digits, uniform, from the OS random source.
-pub fn new_link_code() -> String {
+/// `None` when the OS gives no random bytes (no code is made).
+pub fn new_link_code() -> Option<String> {
     // 4_294_000_000 is the largest multiple of 1_000_000 below 2^32, so
     // drawing below it and taking the remainder is uniform.
     const LIMIT: u32 = 4_294_000_000;
     let mut b = Zeroizing::new([0u8; 4]);
     loop {
         // An OS without a working random source cannot make keys at all.
-        getrandom::fill(b.as_mut()).expect("OS random source failed");
+        getrandom::fill(b.as_mut()).ok()?;
         let mut v = u32::from_le_bytes(*b);
         if v < LIMIT {
             let code = format!("{:06}", v % 1_000_000);
             v.zeroize();
-            return code;
+            return Some(code);
         }
         v.zeroize();
     }

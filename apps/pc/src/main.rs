@@ -9,7 +9,7 @@
 //! lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 //!     [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
 //!     [--auto-answer] [--play <wav>] [--record <wav>]
-//!     [--script <file> --shots <dir>] [--trace <dir>]
+//!     [--script <file> --shots <dir> [--script-unsafe]] [--trace <dir>]
 //! ```
 
 // No console window on Windows release builds.
@@ -43,6 +43,9 @@ pub struct Args {
     pub play: Option<PathBuf>,
     pub record: Option<PathBuf>,
     pub script: Option<PathBuf>,
+    /// Script commands that write secrets to files (`link_code_file`) are
+    /// allowed in a release build too (a debug build always allows them).
+    pub script_unsafe: bool,
     pub shots: Option<PathBuf>,
     pub trace: Option<PathBuf>,
 }
@@ -50,7 +53,7 @@ pub struct Args {
 fn usage() -> String {
     "usage: lfd3k-voice-pc --name <NAME> --label <LABEL> [--bind <addr:port>] [--peer <addr:port>] \
      [--snr <dB>] [--cap-tier <SF5..SF12>] [--data <dir>] [--station <NAME>] [--auto-answer] \
-     [--play <wav>] [--record <wav>] [--script <file> --shots <dir>] [--trace <dir>]"
+     [--play <wav>] [--record <wav>] [--script <file> --shots <dir> [--script-unsafe]] [--trace <dir>]"
         .to_string()
 }
 
@@ -79,6 +82,7 @@ fn parse_args() -> Result<Args, String> {
         play: None,
         record: None,
         script: None,
+        script_unsafe: false,
         shots: None,
         trace: None,
     };
@@ -108,6 +112,7 @@ fn parse_args() -> Result<Args, String> {
             "--play" => a.play = Some(PathBuf::from(v()?)),
             "--record" => a.record = Some(PathBuf::from(v()?)),
             "--script" => a.script = Some(PathBuf::from(v()?)),
+            "--script-unsafe" => a.script_unsafe = true,
             "--shots" => a.shots = Some(PathBuf::from(v()?)),
             "--trace" => a.trace = Some(PathBuf::from(v()?)),
             "-h" | "--help" => return Err(usage()),
@@ -190,12 +195,16 @@ fn main() -> ExitCode {
     // key). Later runs keep the saved one (change the name in Settings).
     let idp = modem_sim::identity_path(&a.data);
     if !idp.exists() {
-        let Some(id) = Identity::generate(&a.name, &a.label) else {
-            return fail(
-                Some(&data),
-                "--name is 1 to 16 printable characters without ':'; --label 1 to 8 without ':' or '/'",
-                2,
-            );
+        let id = match Identity::generate(&a.name, &a.label) {
+            Ok(id) => id,
+            Err(lfd3k_voice::IdentityError::BadNameOrLabel) => {
+                return fail(
+                    Some(&data),
+                    "--name is 1 to 16 printable characters without ':'; --label 1 to 8 without ':' or '/'",
+                    2,
+                );
+            }
+            Err(e) => return fail(Some(&data), &e.to_string(), 2),
         };
         if let Err(e) = id.save(&idp) {
             return fail(Some(&data), &format!("{}: {e}", idp.display()), 2);

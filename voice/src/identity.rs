@@ -153,12 +153,34 @@ fn take_field(b: &[u8], at: &mut usize) -> Option<String> {
     String::from_utf8(s.to_vec()).ok()
 }
 
-fn random_key() -> SigningKey {
+fn random_key() -> Result<SigningKey, IdentityError> {
     let mut seed = Zeroizing::new([0u8; 32]);
     // An OS without a working random source cannot make keys at all.
-    getrandom::fill(seed.as_mut()).expect("OS random source failed");
-    SigningKey::from_bytes(&seed)
+    getrandom::fill(seed.as_mut()).map_err(|_| IdentityError::Random)?;
+    Ok(SigningKey::from_bytes(&seed))
 }
+
+/// Why [`Identity::generate`] made no identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityError {
+    /// The voice host protocol would refuse the name or the label.
+    BadNameOrLabel,
+    /// The OS random source failed: no keys can be made.
+    Random,
+}
+
+impl std::fmt::Display for IdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            IdentityError::BadNameOrLabel => {
+                "the name is 1 to 16 printable characters without ':'; the label 1 to 8 without ':' or '/'"
+            }
+            IdentityError::Random => "the OS random source failed, so no keys can be made",
+        })
+    }
+}
+
+impl std::error::Error for IdentityError {}
 
 /// This app install's keys: the device key, an optional person key and an
 /// optional cert for the device key. Private keys are wiped on drop.
@@ -171,17 +193,19 @@ pub struct Identity {
 impl Identity {
     /// A first device: makes a device key and a person key, and signs the
     /// device key with the person key (see `DeviceCert::signed_bytes`).
-    /// `None` when the voice host protocol would refuse the name or the
-    /// label: a name is 1 to 16 printable ASCII without `:`, a label 1 to 8
-    /// printable ASCII without `:` or `/` (spec 5.1).
-    pub fn generate(name: &str, label: &str) -> Option<Self> {
+    /// [`IdentityError::BadNameOrLabel`] when the voice host protocol would
+    /// refuse the name or the label: a name is 1 to 16 printable ASCII
+    /// without `:`, a label 1 to 8 printable ASCII without `:` or `/` (spec
+    /// 5.1). [`IdentityError::Random`] when the OS gives no random bytes.
+    pub fn generate(name: &str, label: &str) -> Result<Self, IdentityError> {
         if !valid_voice_name(name) || !lfd3k_core::voice::valid_label(label) {
-            return None;
+            return Err(IdentityError::BadNameOrLabel);
         }
-        let device = random_key();
-        let person = random_key();
-        let cert = DeviceCert::sign(&person, device.verifying_key().to_bytes(), name, label)?;
-        Some(Identity {
+        let device = random_key()?;
+        let person = random_key()?;
+        let cert = DeviceCert::sign(&person, device.verifying_key().to_bytes(), name, label)
+            .ok_or(IdentityError::BadNameOrLabel)?;
+        Ok(Identity {
             device,
             person: Some(person),
             cert: Some(cert),

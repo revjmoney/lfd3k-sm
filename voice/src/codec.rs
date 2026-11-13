@@ -24,17 +24,31 @@ pub trait VoiceCodec: Send {
     fn conceal(&mut self, pcm: &mut Vec<i16>);
 }
 
-pub fn new_codec(id: CodecId, frame_ms: u16) -> Box<dyn VoiceCodec> {
-    match id {
-        CodecId::Opus12k => Box::new(OpusCodec::new(id, 12_000, frame_ms)),
-        CodecId::Opus10k => Box::new(OpusCodec::new(id, 10_000, frame_ms)),
-        CodecId::Opus8k => Box::new(OpusCodec::new(id, 8_000, frame_ms)),
-        CodecId::C2_3200 => Box::new(Codec2Codec::new(id, C2_MODE_3200, frame_ms)),
-        CodecId::C2_2400 => Box::new(Codec2Codec::new(id, C2_MODE_2400, frame_ms)),
-        CodecId::C2_1300 => Box::new(Codec2Codec::new(id, C2_MODE_1300, frame_ms)),
-        CodecId::C2_1200 => Box::new(Codec2Codec::new(id, C2_MODE_1200, frame_ms)),
-        CodecId::C2_700C => Box::new(Codec2Codec::new(id, C2_MODE_700C, frame_ms)),
+/// A codec could not be made (the library refused, or out of memory).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodecError(pub String);
+
+impl std::fmt::Display for CodecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
+}
+
+impl std::error::Error for CodecError {}
+
+/// A codec for `id` with `frame_ms` voice frames. An error (never a panic)
+/// when the library cannot make one; the engine then ends the call.
+pub fn new_codec(id: CodecId, frame_ms: u16) -> Result<Box<dyn VoiceCodec>, CodecError> {
+    Ok(match id {
+        CodecId::Opus12k => Box::new(OpusCodec::new(id, 12_000, frame_ms)?),
+        CodecId::Opus10k => Box::new(OpusCodec::new(id, 10_000, frame_ms)?),
+        CodecId::Opus8k => Box::new(OpusCodec::new(id, 8_000, frame_ms)?),
+        CodecId::C2_3200 => Box::new(Codec2Codec::new(id, C2_MODE_3200, frame_ms)?),
+        CodecId::C2_2400 => Box::new(Codec2Codec::new(id, C2_MODE_2400, frame_ms)?),
+        CodecId::C2_1300 => Box::new(Codec2Codec::new(id, C2_MODE_1300, frame_ms)?),
+        CodecId::C2_1200 => Box::new(Codec2Codec::new(id, C2_MODE_1200, frame_ms)?),
+        CodecId::C2_700C => Box::new(Codec2Codec::new(id, C2_MODE_700C, frame_ms)?),
+    })
 }
 
 fn frame_len(frame_ms: u16) -> usize {
@@ -66,13 +80,14 @@ struct OpusCodec {
 }
 
 impl OpusCodec {
-    fn new(id: CodecId, bps: i32, frame_ms: u16) -> Self {
+    fn new(id: CodecId, bps: i32, frame_ms: u16) -> Result<Self, CodecError> {
         let mut enc =
             opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)
-                .expect("opus encoder");
+                .map_err(|e| CodecError(format!("opus encoder: {e}")))?;
         let _ = enc.set_bitrate(opus::Bitrate::Bits(bps));
         let _ = enc.set_vbr(false);
-        let dec = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).expect("opus decoder");
+        let dec = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono)
+            .map_err(|e| CodecError(format!("opus decoder: {e}")))?;
         let ms = usize::from(frame_ms);
         let pkt_ms = if ms % OPUS_PKT_MS == 0 {
             OPUS_PKT_MS
@@ -81,14 +96,14 @@ impl OpusCodec {
         };
         let pkts = (ms / pkt_ms).max(1);
         let total = encoded_bytes(id, frame_ms);
-        OpusCodec {
+        Ok(OpusCodec {
             id,
             enc,
             dec,
             frame_ms,
             pkts,
             pkt_bytes: total / pkts,
-        }
+        })
     }
 
     fn pkt_samples(&self) -> usize {
@@ -179,17 +194,19 @@ struct C2 {
 unsafe impl Send for C2 {}
 
 impl C2 {
-    fn new(mode: c_int) -> C2 {
+    fn new(mode: c_int) -> Result<C2, CodecError> {
         // SAFETY: codec2_create returns a fresh state or null.
         let p = unsafe { codec2_create(mode) };
-        assert!(!p.is_null(), "codec2_create failed");
+        if p.is_null() {
+            return Err(CodecError(format!("codec2_create failed (mode {mode})")));
+        }
         // SAFETY: p is a live state.
         let (s, b) = unsafe { (codec2_samples_per_frame(p), codec2_bytes_per_frame(p)) };
-        C2 {
+        Ok(C2 {
             p,
             samples: s.max(1) as usize,
             bytes: b.max(1) as usize,
-        }
+        })
     }
 
     /// `speech` must hold `self.samples` samples (8 kHz).
@@ -301,10 +318,10 @@ struct Codec2Codec {
 }
 
 impl Codec2Codec {
-    fn new(id: CodecId, mode: c_int, frame_ms: u16) -> Self {
-        let c2 = C2::new(mode);
+    fn new(id: CodecId, mode: c_int, frame_ms: u16) -> Result<Self, CodecError> {
+        let c2 = C2::new(mode)?;
         let native = (frame_len(frame_ms) / 2 / c2.samples).max(1);
-        Codec2Codec {
+        Ok(Codec2Codec {
             id,
             c2,
             frame_ms,
@@ -313,7 +330,7 @@ impl Codec2Codec {
             up: Fir::new(),
             last: vec![0; frame_len(frame_ms)],
             lost: 0,
-        }
+        })
     }
 }
 

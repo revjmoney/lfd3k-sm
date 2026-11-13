@@ -397,15 +397,22 @@ impl Call {
         self.flags & 1 != 0
     }
 
-    /// New codecs and jitter buffer for `plan`.
-    fn set_plan(&mut self, plan: TalkPlan) {
+    /// New codecs and jitter buffer for `plan`. When a codec cannot be
+    /// made there are none (nothing is sent or played) and the error comes
+    /// back; the caller ends the call.
+    fn set_plan(&mut self, plan: TalkPlan) -> Result<(), crate::codec::CodecError> {
         self.plan = Some(plan);
-        self.enc = Some(new_codec(plan.codec, plan.frame_ms));
-        self.dec = Some(new_codec(plan.codec, plan.frame_ms));
+        self.enc = None;
+        self.dec = None;
+        let enc = new_codec(plan.codec, plan.frame_ms)?;
+        let dec = new_codec(plan.codec, plan.frame_ms)?;
+        self.enc = Some(enc);
+        self.dec = Some(dec);
         self.jitter = Jitter::new(if plan.mode == TalkMode::Duplex { 2 } else { 1 });
         self.mic_buf.clear();
         self.pre.clear();
         self.conceal_run = 0;
+        Ok(())
     }
 
     /// Mic audio may be sent now.
@@ -1030,7 +1037,12 @@ impl Engine {
             ));
             return String::new();
         }
-        let code = new_link_code();
+        let Some(code) = new_link_code() else {
+            self.event(UiEvent::Error(
+                "no link code: the OS random source failed".into(),
+            ));
+            return String::new();
+        };
         self.link_code = Some((Zeroizing::new(code.clone()), self.now));
         self.event(UiEvent::LinkCode(code.clone()));
         code
@@ -1438,10 +1450,13 @@ impl Engine {
         }
         let mut changed = None;
         let mut key_up = false;
+        let mut codec_err = None;
         if let Some(p) = plan {
             if c.plan != Some(p) {
                 let had = c.plan.is_some();
-                c.set_plan(p);
+                if let Err(e) = c.set_plan(p) {
+                    codec_err = Some(e);
+                }
                 if had && c.peer_live {
                     changed = Some(p);
                 }
@@ -1456,6 +1471,12 @@ impl Engine {
         }
         if key_up {
             self.send(msg::TALK_KEY, &[0]);
+        }
+        if let Some(e) = codec_err {
+            // No codec for this plan: the call cannot carry voice.
+            self.event(UiEvent::Error(format!("the call ended: no codec ({e})")));
+            self.hangup();
+            return;
         }
         let Some(c) = self.call.as_mut() else {
             return;

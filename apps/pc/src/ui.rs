@@ -3560,7 +3560,9 @@ impl App {
     // on|off` (connection sounds); `print`
     // (state to stdout); `size <w> <h>` (window size in points);
     // `link_code_file <path>` / `link_join_file <path>` (hand a link code to
-    // another copy's script; conditions link_code, linked, not_linking);
+    // another copy's script; conditions link_code, linked, not_linking;
+    // link_code_file writes the code, a secret, in plain text to a file, so
+    // it runs only in a debug build or with --script-unsafe);
     // `sync <file> [<ms>]` (two copies meet at one wall clock go mark: the
     // first to get here writes now + ms, default 3000, to the file, the
     // other reads it; both wait for it); `at_t <ms>` (wait until the go
@@ -3692,6 +3694,9 @@ impl App {
             "link_offer" => self.cmd(Cmd::LinkOffer),
             // Two copies in one test: hand the code shown here to the
             // other copy's script through a file (it deletes the file).
+            "link_code_file" if !(cfg!(debug_assertions) || self.args.script_unsafe) => {
+                println!("[script] link_code_file needs a debug build or --script-unsafe");
+            }
             "link_code_file" => {
                 if let Some(c) = &self.link_code {
                     if let Err(e) = std::fs::write(&rest, c.as_bytes()) {

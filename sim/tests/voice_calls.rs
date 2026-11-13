@@ -1827,19 +1827,32 @@ fn alternating_turns(cap: Tier, snr_x4: i16) {
     // it only the words kept while waiting (at most 3 frames) and the tail
     // went out.
     for a in [rev, bob] {
-        assert_eq!(w.apps[a].eng.floor(), Floor::Free, "{cap:?}: the floor is free at the end");
+        assert_eq!(
+            w.apps[a].eng.floor(),
+            Floor::Free,
+            "{cap:?}: the floor is free at the end"
+        );
     }
     let after = w.apps[last.0].eng.stats().frames_sent - last.1;
-    assert!(after <= 4, "{cap:?}: {after} frames sent after the last key up");
+    assert!(
+        after <= 4,
+        "{cap:?}: {after} frames sent after the last key up"
+    );
     // With the key up nothing more goes out, even with the mic live.
-    let sent = [w.apps[rev].eng.stats().frames_sent, w.apps[bob].eng.stats().frames_sent];
+    let sent = [
+        w.apps[rev].eng.stats().frames_sent,
+        w.apps[bob].eng.stats().frames_sent,
+    ];
     w.apps[rev].mic = Mic::Tone;
     w.apps[bob].mic = Mic::Tone;
     w.run(4 * frame);
     w.apps[rev].mic = Mic::Silent;
     w.apps[bob].mic = Mic::Silent;
     assert_eq!(
-        [w.apps[rev].eng.stats().frames_sent, w.apps[bob].eng.stats().frames_sent],
+        [
+            w.apps[rev].eng.stats().frames_sent,
+            w.apps[bob].eng.stats().frames_sent
+        ],
         sent,
         "{cap:?}: no frames with the key up"
     );
@@ -1872,7 +1885,11 @@ fn regression_ptt_release_resolves_with_the_mic_stopped_sf12() {
     w.apps[rev].eng.talk_key(true);
     w.apps[rev].mic = Mic::Tone;
     w.run(frame / 2);
-    assert_ne!(w.apps[rev].eng.floor(), Floor::Mine, "let go before the floor came");
+    assert_ne!(
+        w.apps[rev].eng.floor(),
+        Floor::Mine,
+        "let go before the floor came"
+    );
     w.apps[rev].mic = Mic::Off;
     w.apps[rev].eng.talk_key(false);
     assert!(

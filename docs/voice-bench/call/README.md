@@ -8,7 +8,7 @@ The two mics are the two sides of a two speaker conversation about the AXIS BBS 
 
 | File | What |
 |---|---|
-| `SF5.opus`, `SF7.opus`, `SF9.opus`, `SF12.opus` | The call, stereo 16 kHz Ogg Opus at 32 kbps (WAV would be 8 to 16 MB each). Left: what DAVE heard of MAYA. Right: what MAYA heard of DAVE. Both recordings sit on one wall clock, from the first sample either app recorded (the call setup and its connection sounds) to the end of the NO CARRIER sounds |
+| `SF5.opus`, `SF7.opus`, `SF9.opus`, `SF12.opus` | The call, stereo 48 kHz Ogg Opus streams at 32 kbps (from 16 kHz recordings) (WAV would be 8 to 16 MB each). Left: what DAVE heard of MAYA. Right: what MAYA heard of DAVE. Both recordings sit on one wall clock, from the first sample either app recorded (the call setup and its connection sounds) to the end of the NO CARRIER sounds |
 | `source/mix.opus` | The original conversation, both speakers in one mono track (117.5 s) |
 | `source/side_a.flac`, `source/side_b.flac` | Dave's and Maya's sides on one timeline (the other side silent while one speaks), 16 kHz mono |
 | `source/script.md`, `source/timeline.csv` | The lines, and when each turn starts and ends |

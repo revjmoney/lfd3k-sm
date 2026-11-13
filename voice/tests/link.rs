@@ -67,7 +67,7 @@ fn link_with_the_right_code_adopts_the_person_key() {
     let rev_pc = Identity::generate("REV", "PC").unwrap();
     let mut phone = Identity::generate("NEWPHONE", "PHONE").unwrap();
     let own_device = phone.device_pub();
-    let code = new_link_code();
+    let code = new_link_code().unwrap();
     assert_eq!(link(&rev_pc, &code, &mut phone, &code), Ok(()));
     let c = phone.cert().unwrap();
     assert_eq!(
@@ -100,7 +100,7 @@ fn linked_device_trusted_by_existing_contact() {
     assert!(store.contacts()[0].person);
     // Rev links a phone; Bob has never seen that device key.
     let mut phone = Identity::generate("TEMP", "PHONE").unwrap();
-    let code = new_link_code();
+    let code = new_link_code().unwrap();
     link(&rev_pc, &code, &mut phone, &code).unwrap();
     let (_, s) = handshake(&phone, &bob);
     assert_eq!(store.verdict("REV", "PHONE", &s), Trust::Checked);
@@ -202,7 +202,7 @@ fn regression_identity_generate_refuses_bad_names() {
         ("REV", "P C\u{7f}"),
     ] {
         assert!(
-            Identity::generate(name, label).is_none(),
+            Identity::generate(name, label).is_err(),
             "{name:?} {label:?}"
         );
         assert!(!lfd3k_voice::valid_voice_name(name) || !lfd3k_core::voice::valid_label(label));
@@ -212,7 +212,7 @@ fn regression_identity_generate_refuses_bad_names() {
         ("SIXTEENCHARSXXXX", "EIGHTCHR"),
         ("REV J", "MY PC"),
     ] {
-        let id = Identity::generate(name, label).unwrap_or_else(|| panic!("{name:?} {label:?}"));
+        let id = Identity::generate(name, label).unwrap_or_else(|_| panic!("{name:?} {label:?}"));
         assert_eq!(id.cert().unwrap().name, name);
     }
     // Rename follows the same rules and changes nothing when it refuses.
@@ -235,7 +235,7 @@ fn regression_identity_generate_refuses_bad_names() {
 fn link_codes_are_six_digits() {
     let mut seen = std::collections::HashSet::new();
     for _ in 0..50 {
-        let c = new_link_code();
+        let c = new_link_code().unwrap();
         assert_eq!(c.len(), 6);
         assert!(c.bytes().all(|b| b.is_ascii_digit()));
         seen.insert(c);

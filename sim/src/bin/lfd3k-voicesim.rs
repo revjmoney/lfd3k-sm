@@ -302,8 +302,8 @@ fn config(name: &str, tier: Tier) -> Result<Config, String> {
 fn run_tier(tier: Tier, a: &Args, wav: &[i16]) -> Result<Row, String> {
     let chan = SimChannel::constant_db(a.snr_db, a.seed);
     let mut multi = Multi::with_configs(chan, vec![config("ALPHA", tier)?, config("BRAVO", tier)?]);
-    let ann = Identity::generate("ANN", "PC").ok_or("identity ANN")?;
-    let ben = Identity::generate("BEN", "PC").ok_or("identity BEN")?;
+    let ann = Identity::generate("ANN", "PC").map_err(|_| "identity ANN")?;
+    let ben = Identity::generate("BEN", "PC").map_err(|_| "identity BEN")?;
     let tag = format!("SF{}", tier.sf());
     let mut eng = [
         Engine::new(ann, a.out.join(format!("{tag}-ann-trust.json"))),

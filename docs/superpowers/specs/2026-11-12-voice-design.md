@@ -181,7 +181,7 @@ Rev: "like a normal phone call when it's fast enough". The mode follows the tier
 
 | Tier | Talk mode | Codec2 mode (Claude's call, builder tunes) | Voice per frame (guide) |
 |---|---|---|---|
-| SF5 | **Duplex** (phone call) | **Opus** about 12 kbps (Rev) | 100 to 200 ms |
+| SF5 | **Duplex** (phone call) | **Opus** 10 kbps (Rev asked for about 12 kbps; 12 kbps does not fit, see `core/src/voice/plan.rs`) | 120 ms |
 | SF6 | Duplex | **Opus** 6 to 8 kbps if it fits, else Codec2 3200 | 200 ms |
 | SF7 | Duplex | 2400 | 200 ms |
 | SF8 | Duplex **only if it fits**, else push-to-talk | 1300 | 200 ms |

@@ -197,7 +197,7 @@ def launch(name, label, me, peer, script, extra, sub):
         f.write(script.strip() + "\n")
     args = [EXE, "--name", name, "--label", label, "--bind", f"127.0.0.1:{me}",
             "--peer", f"127.0.0.1:{peer}", "--station", f"{name}{label}MODEM"[:16],
-            "--data", os.path.join(DATA, sub), "--script", sp,
+            "--data", os.path.join(DATA, sub), "--script", sp, "--script-unsafe",
             "--shots", os.path.join(D, "shots"), "--trace", os.path.join(sd, "trace")] + extra
     return subprocess.Popen(args, stdout=open(os.path.join(sd, "log.txt"), "w"), stderr=subprocess.STDOUT)
 

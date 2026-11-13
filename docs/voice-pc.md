@@ -23,7 +23,7 @@ The program is `target\release\lfd3k-voice-pc.exe`. Use the release build for ca
 lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
     [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
     [--auto-answer] [--play <wav>] [--record <wav>]
-    [--script <file> --shots <dir>] [--trace <dir>]
+    [--script <file> --shots <dir> [--script-unsafe]] [--trace <dir>]
 ```
 
 | Option | Meaning |
@@ -38,6 +38,7 @@ lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 | `--play <wav>` | Test helper: the WAV is the mic (looped while we may talk). The real mic is not opened |
 | `--record <wav>` | Test helper: what the app hears goes into this WAV (written at the end of each call). The speakers are not used |
 | `--script <file> --shots <dir>` | Test helper: drives the window from a file, one action per line (call, words_match, talk down, set ATS30=5, save, shot <name>...), through the same code as the buttons; the command list is at the top of the script code in `apps/pc/src/ui.rs`. For a recorded call between two copies: `sync <file> [<ms>]` (both copies meet at one wall clock go mark through the file), `at_t <ms>` (wait until the go mark plus ms), `play <from_ms> <to_ms>` (play that part of the `--play` WAV from now, once, whatever the floor; `play 0 0` stops the looping before the call) |
+| `--script-unsafe` | Test helper: lets a release build run the script command `link_code_file <path>`, which writes the link code (a secret) to a file in plain text for another copy's script. A debug build always allows it; without this flag a release build refuses it |
 | `--trace <dir>` | Test helper for the testing video: `status.csv` (every 250 ms the front panel status fields and the last 64 scope samples), `host.log` (the AT lines the app sent, the modem's replies with passwords masked, and the core's own result line for each call state change: RING, CONNECT, RETRAIN, NO CARRIER, DECLINED) and `marks.csv` (where the `--record` WAV and each `play` start, Unix ms) |
 
 ## Two apps on this PC

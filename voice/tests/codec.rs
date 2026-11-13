@@ -143,7 +143,7 @@ fn every_plan_fits_one_frame() {
             t.sf()
         );
         // Every codec gives exactly the plan's encoded size per frame.
-        let mut c = new_codec(p.codec, p.frame_ms);
+        let mut c = new_codec(p.codec, p.frame_ms).unwrap();
         assert_eq!(c.id(), p.codec);
         assert_eq!(c.frame_samples(), 16 * usize::from(p.frame_ms));
         let mut out = Vec::new();
@@ -234,8 +234,8 @@ fn codec_roundtrip_each_id() {
     let wav = speech();
     let clip = &wav[..64_000];
     for (id, ms, snr_floor, env_floor) in floors {
-        let mut enc = new_codec(id, ms);
-        let mut dec = new_codec(id, ms);
+        let mut enc = new_codec(id, ms).unwrap();
+        let mut dec = new_codec(id, ms).unwrap();
         let fs = enc.frame_samples();
         let mut out = Vec::new();
         for f in clip.chunks(fs) {
@@ -286,8 +286,8 @@ fn conceal_never_panics() {
         seed
     };
     for (id, ms) in ids {
-        let mut enc = new_codec(id, ms);
-        let mut dec = new_codec(id, ms);
+        let mut enc = new_codec(id, ms).unwrap();
+        let mut dec = new_codec(id, ms).unwrap();
         let fs = dec.frame_samples();
         let good_len = encoded_bytes(id, ms);
         let mut out = Vec::new();

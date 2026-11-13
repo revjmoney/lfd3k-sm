@@ -18,9 +18,9 @@ pub mod words;
 pub use client::{
     codec_name, mode_name, tier_from_sf, AirFrame, CallStats, DirLine, Engine, UiEvent,
 };
-pub use codec::{new_codec, VoiceCodec, SAMPLE_RATE};
+pub use codec::{new_codec, CodecError, VoiceCodec, SAMPLE_RATE};
 pub use control::{Control, ControlReader};
-pub use identity::{valid_voice_name, DeviceCert, Identity};
+pub use identity::{valid_voice_name, DeviceCert, Identity, IdentityError};
 pub use jitter::Jitter;
 pub use link::{new_link_code, LinkError, LinkJoin, LinkOffer};
 pub use scrambler::{Handshake, Role, ScrambleError, Session};
