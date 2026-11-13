@@ -706,6 +706,14 @@ impl Modem {
             return bytes.len();
         }
         if !self.vhp_flush_hold(i) {
+            // The app is still offering bytes: a slow tier holding its
+            // control bytes must not time the session out.
+            if !bytes.is_empty() {
+                self.voice_session_seen(session, now);
+                if let Some(s) = self.vhp.s.get_mut(i) {
+                    s.last_ms = now;
+                }
+            }
             return 0;
         }
         let mut used = 0;
