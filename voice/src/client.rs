@@ -1536,7 +1536,9 @@ impl Engine {
                 Control::Hello(b) => self.on_sealed_hello(&b),
                 Control::Mute(b) => {
                     if let Some(c) = self.call.as_mut().filter(|c| c.peer_live) {
-                        if let Some(v) = c.session.as_mut().and_then(|s| s.open_control(&b)) {
+                        // Exactly one byte (V223.LRA.92 clause 13.2).
+                        let one = |p: &[u8]| p.len() == 1;
+                        if let Some(v) = c.session.as_mut().and_then(|s| s.open_control(&b, one)) {
                             c.peer_muted = v.first() == Some(&1);
                         }
                     }
@@ -1637,7 +1639,7 @@ impl Engine {
         let Some(s) = c.session.as_mut() else {
             return;
         };
-        if s.open_control(b).as_deref() != Some(control::HELLO_TAG) {
+        if s.open_control(b, |p| p == control::HELLO_TAG).is_none() {
             return;
         }
         c.peer_live = true;
@@ -1726,7 +1728,7 @@ impl Engine {
         let Some(s) = c.session.as_mut() else {
             return;
         };
-        let Some(plain) = s.open_control(b).map(Zeroizing::new) else {
+        let Some(plain) = s.open_control(b, |p| p.len() == 96).map(Zeroizing::new) else {
             return;
         };
         let (Some(dev), Some(sig)) = (

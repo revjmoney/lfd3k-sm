@@ -157,7 +157,7 @@ def body(sf, d, me, tag, every):
                 "wait 1500",
                 f"shot {tag}_{100 + n:03d}_turn{n:02d}_listening",
             ]
-    # Let the last turn arrive (SF12 hears about 4 s late).
+    # Let the last turn arrive (SF12 hears about 5.8 s late).
     s += ["until floor_free 60000", f"wait {3 * frame + 3000}"]
     return s
 

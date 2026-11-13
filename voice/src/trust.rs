@@ -138,8 +138,8 @@ impl TrustStore {
 
     /// Read the store. No file yet gives an empty store (everyone NOT
     /// CHECKED). A file that is not a trust store is moved aside to
-    /// `trust.json.bad` (or `trust.json.bad.<unix seconds>` when that is
-    /// taken), so it is kept for the user and never written over, and the
+    /// `trust.json.bad` (or `trust.json.bad.<unix seconds>`, with `.1`,
+    /// `.2` ... added when that is taken too), so it is kept for the user and never written over, and the
     /// error says where it went. Any other read error is returned with the
     /// file left where it is ([`TrustLoadError::kept`] is `None`); do not
     /// save over it.
@@ -153,6 +153,8 @@ impl TrustStore {
             Ok(s) => Ok(s),
             Err(e) => {
                 let error = io::Error::new(io::ErrorKind::InvalidData, e);
+                // The first free name: trust.json.bad, then .bad.<secs>,
+                // then .bad.<secs>.1, .2 ... (a rename would replace one).
                 let mut bad = path.as_os_str().to_owned();
                 bad.push(".bad");
                 let mut bad = PathBuf::from(bad);
@@ -160,9 +162,17 @@ impl TrustStore {
                     let secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
-                    let mut b = bad.into_os_string();
+                    let mut b = bad.clone().into_os_string();
                     b.push(format!(".{secs}"));
-                    bad = PathBuf::from(b);
+                    let stamped = PathBuf::from(b);
+                    bad = stamped.clone();
+                    let mut k = 1u32;
+                    while bad.exists() && k < 1000 {
+                        let mut b = stamped.clone().into_os_string();
+                        b.push(format!(".{k}"));
+                        bad = PathBuf::from(b);
+                        k += 1;
+                    }
                 }
                 match fs::rename(path, &bad) {
                     Ok(()) => Err(TrustLoadError {

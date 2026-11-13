@@ -782,6 +782,19 @@ fn trust_store_bad_file_is_kept_and_reported() {
     }
     assert!(said, "the engine reports the unreadable trust file");
     assert!(e.contacts().is_empty());
+    // Three bad files kept, none written over.
+    let kept: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|f| {
+            f.file_name()
+                .to_string_lossy()
+                .starts_with("trust.json.bad")
+        })
+        .map(|f| std::fs::read(f.path()).unwrap())
+        .collect();
+    assert_eq!(kept.len(), 3, "three bad files kept");
+    assert!(kept.contains(&b"[1, 2".to_vec()));
 }
 
 #[test]
@@ -792,6 +805,7 @@ fn regression_late_control_message_opens_past_the_voice_window() {
     let rev = Identity::generate("REV", "PC").unwrap();
     let bob = Identity::generate("BOB", "PHONE").unwrap();
     let (mut tx, mut rx) = handshake(&rev, &bob);
+    let one = |p: &[u8]| p.len() == 1;
     let mute = tx.seal(&[1]);
     let voice: Vec<Vec<u8>> = (0..100).map(|i| tx.seal(&[i as u8; 20])).collect();
     let mute2 = tx.seal(&[0]);
@@ -801,13 +815,30 @@ fn regression_late_control_message_opens_past_the_voice_window() {
     // As voice it is too old.
     assert_eq!(rx.open(&mute), None);
     // As control it opens, once.
-    assert_eq!(rx.open_control(&mute).as_deref(), Some(&[1u8][..]));
-    assert_eq!(rx.open_control(&mute), None, "a replayed control message");
+    assert_eq!(rx.open_control(&mute, one).as_deref(), Some(&[1u8][..]));
+    assert_eq!(
+        rx.open_control(&mute, one),
+        None,
+        "a replayed control message"
+    );
     // A voice frame inside the window is never taken as control.
-    assert_eq!(rx.open_control(voice.last().unwrap()), None);
+    assert_eq!(rx.open_control(voice.last().unwrap(), |_| true), None);
     // The next control message opens; the older one cannot come back.
-    assert_eq!(rx.open_control(&mute2).as_deref(), Some(&[0u8][..]));
-    assert_eq!(rx.open_control(&mute), None);
+    assert_eq!(rx.open_control(&mute2, one).as_deref(), Some(&[0u8][..]));
+    assert_eq!(rx.open_control(&mute, one), None);
     // And the control message is not a voice frame either.
     assert_eq!(rx.open(&mute2), None);
+    // An old voice frame (out of the window, counter above the last control
+    // one) fed in as a Mute is not a Mute (20 bytes, not 1): refused, and
+    // the control counter does not move on, so the real Mute sealed after
+    // it still opens.
+    let more: Vec<Vec<u8>> = (0..70).map(|i| tx.seal(&[i as u8; 20])).collect();
+    let mute3 = tx.seal(&[1]);
+    let old_voice = more.first().unwrap().clone();
+    for v in more.iter().skip(1) {
+        assert!(rx.open(v).is_some());
+    }
+    assert!(rx.open(&old_voice).is_none(), "out of the voice window");
+    assert_eq!(rx.open_control(&old_voice, one), None);
+    assert_eq!(rx.open_control(&mute3, one).as_deref(), Some(&[1u8][..]));
 }

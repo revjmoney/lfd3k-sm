@@ -473,10 +473,17 @@ impl Session {
     /// arrive long after the voice frames sealed after them: the 64 frame
     /// voice window does not apply. A control message opens when its
     /// counter is above the last control message opened (the stream is in
-    /// order, so a repeat or an older one is a replay) and it is not a
-    /// counter already opened inside the voice window. `None` otherwise, or
-    /// when it fails to open. V223.LRA.92 clause 12.3.
-    pub fn open_control(&mut self, sealed: &[u8]) -> Option<Vec<u8>> {
+    /// order, so a repeat or an older one is a replay), it is not a counter
+    /// already opened inside the voice window, and its plaintext has the
+    /// shape `ok` wants (the message's own length or tag: so an old voice
+    /// frame fed in neither opens as control nor moves the control counter
+    /// on). `None` otherwise, or when it fails to open. V223.LRA.92 clause
+    /// 12.3.
+    pub fn open_control(
+        &mut self,
+        sealed: &[u8],
+        ok: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<Vec<u8>> {
         if sealed.len() < SEAL_OVERHEAD {
             return None;
         }
@@ -496,6 +503,9 @@ impl Session {
             .recv
             .decrypt(&nonce(self.recv_dir, ctr), sealed.get(4..)?)
             .ok()?;
+        if !ok(&plain) {
+            return None;
+        }
         self.ctrl_last = Some(ctr);
         // Inside the window it is marked too, so it never opens as voice.
         if self.highest.is_none_or(|h| ctr > h || h - ctr < WINDOW) {
