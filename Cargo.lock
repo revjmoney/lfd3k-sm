@@ -1404,11 +1404,11 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "eframe",
- "getrandom 0.4.3",
  "lfd3k-core",
  "lfd3k-sim",
  "lfd3k-voice",
  "png",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

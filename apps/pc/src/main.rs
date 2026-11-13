@@ -126,38 +126,80 @@ fn parse_args() -> Result<Args, String> {
     Ok(a)
 }
 
+/// A start-up error: to stderr, to `<data>/voice-pc.log` when the folder
+/// is known, and in a message box (the release build has no console).
+fn fail(data: Option<&std::path::Path>, msg: &str, code: u8) -> ExitCode {
+    eprintln!("{msg}");
+    if let Some(d) = data {
+        use std::io::Write;
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |t| t.as_secs());
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(d.join("voice-pc.log"))
+        {
+            let _ = writeln!(f, "[unix {when}] {msg}");
+        }
+    }
+    message_box(msg);
+    ExitCode::from(code)
+}
+
+#[cfg(windows)]
+fn message_box(msg: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let text = wide(msg);
+    let title = wide("lfd3k-voice-pc");
+    // SAFETY: both strings are NUL terminated UTF-16 that outlive the call;
+    // no owner window.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn message_box(_msg: &str) {}
+
 fn main() -> ExitCode {
     let a = match parse_args() {
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
+        Err(e) => return fail(None, &e, 2),
     };
     if let Err(e) = std::fs::create_dir_all(&a.data) {
-        eprintln!("{}: {e}", a.data.display());
-        return ExitCode::from(2);
+        return fail(None, &format!("{}: {e}", a.data.display()), 2);
     }
+    let data = a.data.clone();
     // First run: make this device's identity (a device key and a person
     // key). Later runs keep the saved one (change the name in Settings).
     let idp = modem_sim::identity_path(&a.data);
     if !idp.exists() {
         let Some(id) = Identity::generate(&a.name, &a.label) else {
-            eprintln!("--name is 1 to 16 printable characters without ':'; --label 1 to 8 without ':' or '/'");
-            return ExitCode::from(2);
+            return fail(
+                Some(&data),
+                "--name is 1 to 16 printable characters without ':'; --label 1 to 8 without ':' or '/'",
+                2,
+            );
         };
         if let Err(e) = id.save(&idp) {
-            eprintln!("{}: {e}", idp.display());
-            return ExitCode::from(2);
+            return fail(Some(&data), &format!("{}: {e}", idp.display()), 2);
         }
     }
     let play = match &a.play {
         Some(p) => match audio::read_wav(p) {
             Ok(w) => Some(w),
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::from(2);
-            }
+            Err(e) => return fail(Some(&data), &e, 2),
         },
         None => None,
     };
@@ -214,9 +256,10 @@ fn main() -> ExitCode {
     );
     match r {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::from(1)
-        }
+        Err(e) => fail(
+            Some(&data),
+            &format!("lfd3k-voice-pc could not start: {e}"),
+            1,
+        ),
     }
 }

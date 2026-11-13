@@ -294,7 +294,7 @@ pub fn read_wav(path: &std::path::Path) -> Result<Vec<i16>, String> {
                 let ch = le16(at + 10).ok_or_else(bad)?;
                 let rate = le32(at + 12).ok_or_else(bad)?;
                 let bits = le16(at + 22).ok_or_else(bad)?;
-                if (tag != 1 && tag != 0xFFFE) || bits != 16 || ch == 0 {
+                if (tag != 1 && tag != 0xFFFE) || bits != 16 || ch == 0 || rate == 0 {
                     return Err(bad());
                 }
                 fmt = Some((ch, rate));

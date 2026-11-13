@@ -105,7 +105,7 @@ The PGP word list in `voice/src/words.rs` (the two words) is public domain (Juol
 
 ## The PC voice app (`apps/pc`, `lfd3k-voice-pc`; PC only, never in the firmware)
 
-eframe has default features off (`glow`, `wayland`, `x11` on); egui's own fonts are not built in. cpal is a Windows-only dependency, so a Linux build needs no ALSA headers (the app then runs without sound devices). getrandom (already above) makes the built-in modem's first hotspot password. Licenses as declared in each crate's Cargo.toml (`cargo tree -f '{p} {l}'`); crates already listed above for the voice crate or sim are not repeated. "Where": built on Windows, on Linux, or both.
+eframe has default features off (`glow`, `wayland`, `x11` on); egui's own fonts are not built in. cpal is a Windows-only dependency, so a Linux build needs no ALSA headers (the app then runs without sound devices). windows-sys (Windows only, `Win32_UI_WindowsAndMessaging`) shows start-up errors in a message box. Cargo.lock also lists crates that eframe, winit and cpal name for features or systems this app does not build (wgpu, arboard, objc2, ndk, jni, wasm-bindgen and their kin); they are not built for this app and are not listed. Licenses as declared in each crate's Cargo.toml (`cargo tree -f '{p} {l}'`); crates already listed above for the voice crate or sim are not repeated. "Where": built on Windows, on Linux, or both.
 
 | Crate | Version | License | Where | Why |
 |-------|---------|---------|-------|-----|
@@ -208,6 +208,7 @@ eframe has default features off (`glow`, `wayland`, `x11` on); egui's own fonts 
 | wayland-scanner | 0.31.11 | MIT | linux | Via eframe, egui, winit or cpal |
 | wayland-sys | 0.31.11 | MIT | linux | Via eframe, egui, winit or cpal |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | both | Via eframe, egui, winit or cpal |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | win | MessageBoxW for start-up errors (direct dependency; also in the lock for crossterm's Unix side, above) |
 | windows | 0.62.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
 | windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |
 | windows-collections | 0.3.2 | MIT OR Apache-2.0 | win | Via eframe, egui, winit or cpal |

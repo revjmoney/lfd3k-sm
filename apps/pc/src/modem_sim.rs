@@ -9,8 +9,10 @@
 //!
 //! The modem's saved settings (AT&W) and its directory are kept in the data
 //! folder (`modem-settings.bin`, `modem-dir.bin`) as the firmware keeps
-//! them in NVS, and loaded at the next start. The hotspot and client
-//! passwords in the settings are stored as is, as on the modem.
+//! them in NVS, and loaded at the next start. This modem has no Wi-Fi, so
+//! no Wi-Fi password is ever written: the copy on disk carries a fixed
+//! placeholder hotspot password and no client network. Files here are
+//! written owner only on Unix (the user profile's ACL on Windows).
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -35,6 +37,8 @@ const CHUNK: usize = 160;
 const SPK_AHEAD: usize = 3_200;
 /// An AtLine with no final reply after this long is given up.
 const AT_TIMEOUT_MS: u32 = 20_000;
+/// Keep ringing this long after the last Ring (the modem repeats it every 3 s).
+const RING_HOLD_MS: u32 = 7_000;
 /// Auto-answer push to talk: listen this long between two plays of the WAV.
 const AUTO_LISTEN_MS: u32 = 8_000;
 
@@ -77,6 +81,9 @@ pub enum Ev {
     Ui(UiEvent),
     /// The link code to show (wiped when the window drops it).
     LinkCode(Zeroizing<String>),
+    /// The link offer or join is over (used, failed, timed out or
+    /// cancelled): drop the code shown.
+    LinkEnded,
     /// An AtLine's whole answer.
     At {
         tag: u32,
@@ -116,6 +123,8 @@ pub struct Snap {
     /// Longest gap between two passes of the modem loop (ms), and passes.
     pub max_gap_ms: u32,
     pub passes: u64,
+    /// Seconds of ring tone made (test helpers print it).
+    pub ring_s: f32,
 }
 
 impl Default for Snap {
@@ -141,6 +150,7 @@ impl Default for Snap {
             udp_peer: String::new(),
             max_gap_ms: 0,
             passes: 0,
+            ring_s: 0.0,
         }
     }
 }
@@ -198,10 +208,7 @@ fn load_removed(data: &Path) -> Vec<[u8; 32]> {
 fn save_removed(data: &Path, v: &[[u8; 32]]) -> std::io::Result<()> {
     let items: Vec<String> = v.iter().map(|k| format!("  \"{}\"", hex(k))).collect();
     let t = format!("[\n{}\n]\n", items.join(",\n"));
-    let p = removed_path(data);
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, t)?;
-    std::fs::rename(&tmp, &p)
+    write_file(&removed_path(data), t.as_bytes())
 }
 
 /// The AtLine in flight and the ones waiting.
@@ -240,6 +247,14 @@ struct Worker {
     t0: u32,
     auto_ptt: AutoPtt,
     snap_due: u32,
+    /// The engine was linking at the last pass.
+    was_linking: bool,
+    /// A call rings us (no auto-answer): ring until this time (a Ring
+    /// comes every 3 s while it rings).
+    ring_until: Option<u32>,
+    /// Ring tone samples made (the cadence clock).
+    ring_pos: u64,
+    ring_total: u64,
     max_gap: u32,
     passes: u64,
 }
@@ -268,11 +283,10 @@ pub fn spawn(
             {
                 modem.load_settings(s);
             } else {
-                // First start, as the firmware's first boot: the defaults
-                // with a generated 12 character hotspot password, saved (a
-                // profile with no hotspot password would not load again).
-                let pass = new_ap_pass();
-                let s = Settings::defaults(modem.settings().ap_ssid(), &pass);
+                // First start: the defaults, saved. A profile needs a
+                // hotspot password to load again; this modem has no Wi-Fi,
+                // so it gets the fixed placeholder.
+                let s = Settings::defaults(modem.settings().ap_ssid(), AP_PLACEHOLDER);
                 modem.load_settings(s);
                 modem.request_save();
             }
@@ -317,6 +331,10 @@ pub fn spawn(
                 t0: now,
                 auto_ptt: AutoPtt::Idle,
                 snap_due: 0,
+                was_linking: false,
+                ring_until: None,
+                ring_pos: 0,
+                ring_total: 0,
                 max_gap: 0,
                 passes: 0,
                 o,
@@ -409,7 +427,9 @@ impl Worker {
     fn platform(&mut self, now: u32) {
         if self.modem.take_save_request() {
             let mut b = [0u8; BLOB_LEN];
-            let n = self.modem.saved_settings().to_blob(&mut b).min(BLOB_LEN);
+            let n = scrubbed(self.modem.saved_settings())
+                .to_blob(&mut b)
+                .min(BLOB_LEN);
             if let Err(e) = write_file(
                 &self.o.data.join("modem-settings.bin"),
                 b.get(..n).unwrap_or(&[]),
@@ -441,8 +461,14 @@ impl Worker {
         let e = &mut self.engine;
         match c {
             Cmd::Call { name, label } => e.call(&name, label.as_deref()),
-            Cmd::Answer => e.answer(),
-            Cmd::Decline => e.decline(),
+            Cmd::Answer => {
+                self.ring_until = None;
+                e.answer();
+            }
+            Cmd::Decline => {
+                self.ring_until = None;
+                e.decline();
+            }
             Cmd::Hangup => {
                 e.talk_key(false);
                 e.hangup();
@@ -558,6 +584,8 @@ impl Worker {
                 } => {
                     if self.o.auto_answer {
                         self.engine.answer();
+                    } else if !self.engine.in_call() {
+                        self.ring_until = Some(now.wrapping_add(RING_HOLD_MS));
                     }
                     self.send(Ev::Ui(UiEvent::Ringing {
                         name,
@@ -570,6 +598,7 @@ impl Worker {
                         self.engine.talk_anyway();
                     }
                     self.auto_ptt = AutoPtt::Idle;
+                    self.ring_until = None;
                     self.send(Ev::Ui(UiEvent::Connected { plan, words, trust }));
                 }
                 e @ (UiEvent::Ended
@@ -577,13 +606,24 @@ impl Worker {
                 | UiEvent::NoAnswer
                 | UiEvent::AnsweredElsewhere) => {
                     self.auto_ptt = AutoPtt::Idle;
+                    self.ring_until = None;
                     self.write_rec();
                     self.send(Ev::Ui(e));
                 }
                 other => self.send(Ev::Ui(other)),
             }
         }
-        let _ = now;
+        if self
+            .ring_until
+            .is_some_and(|t| now.wrapping_sub(t) < u32::MAX / 2)
+        {
+            self.ring_until = None;
+        }
+        let linking = self.engine.linking();
+        if self.was_linking && !linking {
+            self.send(Ev::LinkEnded);
+        }
+        self.was_linking = linking;
     }
 
     /// Mic in, speaker out, paced by the clock (16 samples a millisecond).
@@ -649,6 +689,13 @@ impl Worker {
             }
             let mut out = [0i16; CHUNK];
             self.engine.speaker(&mut out);
+            if self.ring_until.is_some() && !in_call {
+                ring_tone(&mut out, self.ring_pos);
+                self.ring_pos += CHUNK as u64;
+                self.ring_total += CHUNK as u64;
+            } else {
+                self.ring_pos = 0;
+            }
             if self.o.record.is_some() && in_call {
                 self.rec.extend_from_slice(&out);
             }
@@ -728,6 +775,7 @@ impl Worker {
             udp_peer: self.o.peer.to_string(),
             max_gap_ms: self.max_gap,
             passes: self.passes,
+            ring_s: self.ring_total as f32 / 16_000.0,
         };
         if let Ok(mut g) = self.snap.lock() {
             *g = s;
@@ -735,25 +783,66 @@ impl Worker {
     }
 }
 
-/// 12 characters from letters and digits (no look-alikes), from the OS
-/// random source.
-fn new_ap_pass() -> Zeroizing<String> {
-    const SET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut r = Zeroizing::new([0u8; 12]);
-    // Without a random source the hotspot keeps no password (the profile
-    // then is not saved), which is no worse than before.
-    if getrandom::fill(r.as_mut()).is_err() {
-        return Zeroizing::new(String::new());
-    }
-    Zeroizing::new(
-        r.iter()
-            .map(|b| char::from(SET[usize::from(*b) % SET.len()]))
-            .collect(),
-    )
+/// The hotspot password written to disk in place of any real one (this
+/// modem has no Wi-Fi; a saved profile needs 8 to 63 characters there).
+const AP_PLACEHOLDER: &str = "NO-WIFI-ON-THIS-MODEM";
+
+/// The saved profile as it goes to disk: the placeholder hotspot password
+/// and no client network.
+fn scrubbed(s: &Settings) -> Settings {
+    let mut c = s.clone();
+    let ssid = c.ap_ssid().to_string();
+    let _ = c.set_ap(&ssid, AP_PLACEHOLDER);
+    c.clear_sta();
+    c
 }
 
+/// A US style ring (440 Hz plus 480 Hz, 2 s on, 4 s off) into `out`,
+/// starting at sample `pos` of the cadence.
+fn ring_tone(out: &mut [i16], pos: u64) {
+    for (i, s) in out.iter_mut().enumerate() {
+        let n = pos + i as u64;
+        let in_cycle = n % (6 * 16_000);
+        if in_cycle >= 2 * 16_000 {
+            *s = 0;
+            continue;
+        }
+        let t = n as f64 / 16_000.0;
+        let v = (2.0 * std::f64::consts::PI * 440.0 * t).sin()
+            + (2.0 * std::f64::consts::PI * 480.0 * t).sin();
+        *s = (v * 0.12 * 32767.0) as i16;
+    }
+}
+
+/// Write `b` to `p` through a side file, owner only on Unix.
 fn write_file(p: &Path, b: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, b)?;
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut f = open_private(&tmp)?;
+        f.write_all(b)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, p)
+}
+
+#[cfg(unix)]
+fn open_private(p: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(p)
+}
+
+#[cfg(not(unix))]
+fn open_private(p: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(p)
 }

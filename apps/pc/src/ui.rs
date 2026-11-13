@@ -573,6 +573,8 @@ pub struct App {
     my_name: String,
     my_label: String,
     contacts_page: usize,
+    scan_page: usize,
+    shown_me: (String, String),
     pins_page: usize,
     script: Option<Script>,
     stopping: bool,
@@ -665,6 +667,8 @@ impl App {
             pin_name: String::new(),
             pin_voice: true,
             contacts_page: 0,
+            scan_page: 0,
+            shown_me: (String::new(), String::new()),
             pins_page: 0,
             script,
             stopping: false,
@@ -723,7 +727,24 @@ impl App {
         if let Ok(g) = self.snap_src.lock() {
             self.s = g.clone();
         }
-        while let Ok(ev) = self.rx.try_recv() {
+        // The name and label fields follow the identity (first start, a
+        // rename, or a link that brought a new name).
+        let me = (self.s.name.clone(), self.s.label.clone());
+        if !me.0.is_empty() && me != self.shown_me {
+            self.my_name = me.0.clone();
+            self.my_label = me.1.clone();
+            self.shown_me = me;
+        }
+        loop {
+            let ev = match self.rx.try_recv() {
+                Ok(ev) => ev,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                // The modem thread is gone (it stopped or failed): close too.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.stopped = true;
+                    break;
+                }
+            };
             match ev {
                 Ev::Ui(e) => self.on_ui(e),
                 Ev::LinkCode(c) => {
@@ -734,12 +755,9 @@ impl App {
                 }
                 Ev::At { tag, text, ok } => self.on_at(tag, text, ok),
                 Ev::Note(n) => self.note = n,
+                Ev::LinkEnded => self.link_code = None,
                 Ev::Stopped => self.stopped = true,
             }
-        }
-        // A link that ended takes its code with it.
-        if self.link_code.is_some() && !self.s.linking {
-            self.link_code = None;
         }
         if self
             .banner
@@ -759,6 +777,8 @@ impl App {
             } => {
                 if self.ringing.is_none() && !self.s.in_call {
                     self.ringing = Some((name, label, station));
+                    // A call must be seen whatever screen is open.
+                    self.screen = Screen::Calls;
                 }
             }
             UiEvent::Connected { plan, words, trust } => {
@@ -882,6 +902,9 @@ impl App {
                 }
             }
             T_SAVE => {
+                // Only a save that took makes the readouts that follow
+                // (queued right after it) the new saved copy.
+                self.rebase = ok;
                 self.note = if ok {
                     "saved (AT&W)".into()
                 } else {
@@ -889,6 +912,7 @@ impl App {
                 };
             }
             T_DISCARD => {
+                self.rebase = ok;
                 self.note = if ok {
                     "back to the saved settings (ATZ)".into()
                 } else {
@@ -968,7 +992,6 @@ impl App {
 
     fn do_save(&mut self) {
         self.at(T_SAVE, "AT&W");
-        self.rebase = true;
         self.refresh_settings();
     }
 
@@ -978,7 +1001,6 @@ impl App {
             return;
         }
         self.at(T_DISCARD, "ATZ");
-        self.rebase = true;
         self.refresh_settings();
     }
 
@@ -1489,21 +1511,20 @@ impl App {
             w,
         );
         // The tier, codec and mode line.
-        let mut line = if self.s.in_call {
+        // (SF12 reads `PTT DELAYED` from the mode name.)
+        let line = if self.s.in_call {
             plan_line(st.sf, plan)
         } else {
             "NO LINK".into()
         };
-        if plan.is_some_and(|p| p.mode == TalkMode::PttDelayed) {
-            line.push_str("   DELAYED ABOUT 2 S");
-        }
-        text(
+        text_fit(
             ui,
             Pos2::new(x, r.top() + 92.0),
             Align2::LEFT_TOP,
             &line,
             monob(17.0),
             if self.s.in_call { ACCENT } else { DIM },
+            w,
         );
         let mut sub = String::new();
         if self.s.in_call {
@@ -1528,13 +1549,14 @@ impl App {
                 sub.push_str(s);
             }
         }
-        text(
+        text_fit(
             ui,
             Pos2::new(x, r.top() + 120.0),
             Align2::LEFT_TOP,
             &sub,
             mono(12.0),
             MUTED,
+            w,
         );
         // The two words.
         let wy = r.top() + 150.0;
@@ -1963,7 +1985,51 @@ impl App {
                 MUTED,
             );
         }
-        for (i, l) in self.m.scan.iter().take(6).enumerate() {
+        // Scan answers, 5 to a page.
+        let per = 5usize;
+        let pages = self.m.scan.len().div_ceil(per).max(1);
+        self.scan_page = self.scan_page.min(pages - 1);
+        if pages > 1 {
+            let label = format!("{} OF {}", self.scan_page + 1, pages);
+            text(
+                ui,
+                Pos2::new(x, right.top() + 236.0),
+                Align2::LEFT_CENTER,
+                &label,
+                mono(11.0),
+                MUTED,
+            );
+            if button(
+                ui,
+                rect(right.right() - 196.0, right.top() + 222.0, 84.0, 28.0),
+                "PREV",
+                Kind::Plain,
+                self.scan_page > 0,
+            )
+            .clicked()
+            {
+                self.scan_page -= 1;
+            }
+            if button(
+                ui,
+                rect(right.right() - 104.0, right.top() + 222.0, 84.0, 28.0),
+                "NEXT",
+                Kind::Plain,
+                self.scan_page + 1 < pages,
+            )
+            .clicked()
+            {
+                self.scan_page += 1;
+            }
+        }
+        for (i, l) in self
+            .m
+            .scan
+            .iter()
+            .skip(self.scan_page * per)
+            .take(per)
+            .enumerate()
+        {
             text_fit(
                 ui,
                 Pos2::new(x, right.top() + 116.0 + i as f32 * 22.0),
@@ -2158,6 +2224,18 @@ impl App {
         let Some(v) = v else {
             return;
         };
+        // On/off registers toggle as the menu does (`ATSn=1` or `=0`).
+        if reg == 31 || reg == 32 {
+            let (label, to) = if v == 0 {
+                ("TURN ON", 1)
+            } else {
+                ("TURN OFF", 0)
+            };
+            if button(ui, rect(bx, y + 4.0, 252.0, 36.0), label, Kind::Plain, true).clicked() {
+                self.set(&format!("ATS{reg}={to}"));
+            }
+            return;
+        }
         if button(ui, rect(bx, y + 4.0, 44.0, 36.0), "-", Kind::Plain, true).clicked() {
             self.set(&format!("ATS{reg}={}", v - step));
         }
@@ -2724,7 +2802,7 @@ impl App {
         text_wrap(
             ui,
             rect(x, y + 70.0, w, 40.0),
-            "Names are 1 to 32 printable characters, passwords 8 to 63, neither with a comma. The PC's own modem has no Wi-Fi; a real modem on USB applies these.",
+            "THE BUILT-IN SIMULATED MODEM HAS NO WI-FI: these settings do nothing in this app, and no Wi-Fi password is kept on this PC. Names 1 to 32 printable characters, passwords 8 to 63, no comma.",
             sans(12.5),
             DIM,
         );
@@ -3060,10 +3138,13 @@ impl App {
         let lx = x + half + 30.0;
         kicker(ui, Pos2::new(lx, r.top()), "LINK YOUR DEVICES (SPEC 7.2)");
         if let Some(code) = &self.link_code {
-            let c = code.as_str().to_string();
-            let mut shown = Zeroizing::new(c);
-            if shown.len() == 6 {
-                shown.insert(3, ' ');
+            // "123 456", built at its final size so it never reallocates.
+            let mut shown = Zeroizing::new(String::with_capacity(7));
+            for (i, ch) in code.chars().enumerate() {
+                if i == 3 {
+                    shown.push(' ');
+                }
+                shown.push(ch);
             }
             text(
                 ui,
@@ -3362,7 +3443,10 @@ impl App {
     // `save`; `discard`; `scan`; `dir`; `link_offer`; `fill <field>
     // <text>`; `fake ringing|conflict|answered_elsewhere|declined|link_code|
     // full_dir|real_dir` (screen states only, nothing is sent); `print`
-    // (state to stdout); `size <w> <h>` (window size in points); `quit`.
+    // (state to stdout); `size <w> <h>` (window size in points);
+    // `link_code_file <path>` / `link_join_file <path>` (hand a link code to
+    // another copy's script; conditions link_code, linked, not_linking);
+    // `quit`.
 
     fn run_script(&mut self, ctx: &egui::Context) {
         let Some(sc) = self.script.as_mut() else {
@@ -3404,7 +3488,7 @@ impl App {
             return;
         };
         let t = sc.t0.elapsed().as_secs_f32();
-        println!("[{t:7.1}] {line}");
+        println!("[{t:7.1}] {}", mask_line(&line));
         let (c, rest) = line.split_once(' ').unwrap_or((line.as_str(), ""));
         let rest = rest.trim().to_string();
         match c {
@@ -3487,6 +3571,26 @@ impl App {
             }
             "dir" => self.cmd(Cmd::RefreshDir),
             "link_offer" => self.cmd(Cmd::LinkOffer),
+            // Two copies in one test: hand the code shown here to the
+            // other copy's script through a file (it deletes the file).
+            "link_code_file" => {
+                if let Some(c) = &self.link_code {
+                    if let Err(e) = std::fs::write(&rest, c.as_bytes()) {
+                        println!("[script] {rest}: {e}");
+                    }
+                } else {
+                    println!("[script] no link code shown");
+                }
+            }
+            "link_join_file" => match std::fs::read_to_string(&rest) {
+                Ok(c) => {
+                    let _ = std::fs::remove_file(&rest);
+                    let c = Zeroizing::new(c);
+                    self.cmd(Cmd::LinkJoin(Zeroizing::new(c.trim().to_string())));
+                    self.link_note = "Joining: call your other device by name.".into();
+                }
+                Err(e) => println!("[script] {rest}: {e}"),
+            },
             "fill" => {
                 let (f, v) = rest.split_once(' ').unwrap_or((rest.as_str(), ""));
                 match f {
@@ -3530,6 +3634,9 @@ impl App {
             "saved" => self.baseline.is_some() && !self.unsaved(),
             "heard" => st.frames_heard > 0,
             "dir" => !self.dir.is_empty(),
+            "link_code" => self.link_code.is_some(),
+            "linked" => self.link_note.starts_with("Linked"),
+            "not_linking" => !self.s.linking,
             _ => {
                 if let Some(n) = c.strip_prefix("dir:") {
                     self.dir.iter().any(|d| d.name.eq_ignore_ascii_case(n))
@@ -3568,6 +3675,12 @@ impl App {
             self.s.rec_s,
             self.s.play_s,
             self.unsaved()
+        );
+        println!(
+            "[state] ring tone {:.1} s, linking {}, link code shown {}",
+            self.s.ring_s,
+            self.s.linking,
+            self.link_code.is_some()
         );
         println!(
             "[state] S30={:?} S21={:?} beacon {} name {}",
@@ -3645,6 +3758,26 @@ impl App {
             _ => println!("[script] no fake {what}"),
         }
     }
+}
+
+/// A script line as it may be printed: a password after `fill *_pass`,
+/// and after the comma of `AT+WAP=` or `AT+WSTA=`, shows as `********`.
+fn mask_line(line: &str) -> String {
+    let mut words = line.splitn(3, ' ');
+    if let (Some("fill"), Some(f)) = (words.next(), words.next()) {
+        if f.ends_with("_pass") {
+            return format!("fill {f} ********");
+        }
+    }
+    let up = line.to_ascii_uppercase();
+    for key in ["AT+WAP=", "AT+WSTA="] {
+        if let Some(at) = up.find(key) {
+            if let Some(c) = line.get(at..).and_then(|r| r.find(',')) {
+                return format!("{},********", line.get(..at + c).unwrap_or(""));
+            }
+        }
+    }
+    line.to_string()
 }
 
 fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> Result<(), String> {

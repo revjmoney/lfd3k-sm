@@ -349,7 +349,7 @@ Guide for Rev: docs/voice-pc.md.
 | `--bind <addr:port>`, `--peer <addr:port>` | Our SimNet UDP socket and the other modem's. Defaults 127.0.0.1:4211 and 127.0.0.1:4210 |
 | `--snr <dB>` | What the peer modem hears from ours (default 8) |
 | `--cap-tier <SF5..SF12>` | `ATS21=<index>` on the host stream at start, for this run only (not saved; DISCARD, which is ATZ, removes it) |
-| `--data <dir>` | `identity.bin` (keys), `trust.json` (checked contacts), `removed.json` (our devices published as removed), `modem-settings.bin` (the modem's AT&W profile, passwords as stored on a modem), `modem-dir.bin` (directory blob). Default `%APPDATA%\lfd3k-voice-pc\<NAME>-<LABEL>` |
+| `--data <dir>` | `identity.bin` (keys), `trust.json` (checked contacts), `removed.json` (our devices published as removed), `modem-settings.bin` (the modem's AT&W profile, written owner only on Unix; this modem has no Wi-Fi, so the file carries a fixed placeholder hotspot password and no client network, never a typed password), `modem-dir.bin` (directory blob). Default `%APPDATA%\lfd3k-voice-pc\<NAME>-<LABEL>` |
 | `--station <NAME>` | The built-in modem's station name (default `PCMODEM-<bind port>`) |
 | `--auto-answer` | The app picks up every ring and presses TALK ANYWAY (the modem's S0 still never answers voice). With `--play` on a push to talk tier it takes the floor, plays the WAV once, lets go for 8 s, again |
 | `--play <wav>` | 16 bit PCM WAV (any rate, mixed to mono, resampled to 16 kHz) used as the mic, looped while we may talk; the sound card's mic is not opened |
@@ -359,6 +359,8 @@ Guide for Rev: docs/voice-pc.md.
 App side of the protocols:
 - AtLine one at a time (a queue); an AtLine refused with Error 6 or 5 ends its entry; 20 s without the final AtReply ends it too.
 - The Save / Discard bar compares AT&V's settings lines (`E`, S registers, TX POWER, WIFI AP, PUB, FWD, BEACON), the AT+FWD? list and AT+WAP? (masked) with the copy taken after the last AT&W or ATZ (or at start); setting a hotspot or client password always shows it, since a masked password cannot be compared. DISCARD is refused during a call (ATZ hangs up a voice call).
+- A ring switches to the CALLS screen whatever screen is open and plays a ring tone (440 plus 480 Hz, 2 s on, 4 s off) until it is answered, declined, or the ring stops (7 s after the last Ring).
+- Start-up errors show in a message box and are added to `voice-pc.log` in the data folder. The window closes when the modem thread stops.
 - A hotspot rename sends `AT+WAP=<name>,<password>` with a password the user types (AtLine masks the current one).
 - Voice and keys: renaming signs a new cert with this device's own person key (`Identity::rename`) and starts a new voice host protocol session (Leave, then Hello and Register); the link code shows on screen while the offer lives and the app's copy is dropped when linking ends or is cancelled (`Engine::cancel_link` wipes the engine's); checked contacts come from `TrustStore::contacts`; REMOVE DEVICE on one of our own devices publishes the removal at each later call (kept in `removed.json` and given to the engine at every start), UNCHECK on a contact's device removes it locally.
 - Engine helpers added for the app (no change to the call engine's behavior): `Engine::cancel_link`, `linking`, `contacts`, `peer`; `Identity::rename`; `TrustStore::contacts` and `ContactView`.

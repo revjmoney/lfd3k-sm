@@ -62,7 +62,7 @@ The ANN copy uses no sound devices (`--play` replaces its mic, `--record` its sp
 2. Press CALL on that row, or type the name under CALL BY NAME (`ANN` rings every device of ANN; add the label `PC` for one device).
 3. The two words show once the scrambler is up, with `ANN/PC (NOT CHECKED)` the first time. Read them out; both screens show the same two. Press WORDS MATCH (remembered for next time) or TALK ANYWAY (this call only). Audio is held both ways until then. `NOT THE ANN YOU CHECKED` means a checked device now shows a different key, or a removed one: the call stays muted.
 4. The line under the name shows the real tier, codec and mode, for example `SF7 BW500 21875   CODEC2 2400   CALL`. HANG UP ends it. ANSWERED ELSEWHERE, DECLINED, NO ANSWER and CALL ENDED show in the banner.
-5. Someone calling you fills the right side with INCOMING CALL, ANSWER and DECLINE.
+5. Someone calling you brings up the CALLS screen with INCOMING CALL, ANSWER and DECLINE, and the app rings.
 
 ## Slow tiers and push to talk
 
@@ -92,7 +92,7 @@ A wrong code fails with nothing learned (`link failed` after about a minute); st
 
 SETTINGS runs the whole modem, with the same AT lines the AT+MENU sends: tabs Radio (station name, S30 TX power with a warning above the safe default of 2, S21, S0, S31, S32, S20, S7, S22), Privacy (ON, QUIET, HIDDEN, pinned names), Wi-Fi (hotspot, client network, the live status; passwords never shown, and wiped from the app once sent), Forwards (8 slots, publish), Voice and keys (your name and label, linking, checked contacts, remove a lost device), About (ATI, AT&V). The DIRECTORY screen dials, pins, deletes and scans.
 
-A change is live at once. When the settings differ from the saved ones a bar shows SAVE (AT&W, kept after a restart: the built-in modem keeps its saved settings and directory in the data folder, passwords as is, as a real modem does in its flash) and DISCARD (ATZ, back to the saved ones; not during a call, as ATZ ends it).
+A change is live at once. When the settings differ from the saved ones a bar shows SAVE (AT&W, kept after a restart: the built-in modem keeps its saved settings and directory in the data folder; it has no Wi-Fi, so the Wi-Fi settings do nothing here and no Wi-Fi password is ever written to disk) and DISCARD (ATZ, back to the saved ones; not during a call, as ATZ ends it).
 
 Removed devices (REMOVE DEVICE on one of your own) are kept in `removed.json` in the data folder and told to each contact at your next call with them.
 
