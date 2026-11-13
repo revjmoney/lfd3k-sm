@@ -3,8 +3,22 @@
 
 fn main() {
     let src = [
-        "dump", "lpc", "nlp", "postfilter", "sine", "codec2", "codec2_fft", "kiss_fft",
-        "kiss_fftr", "interp", "lsp", "mbest", "newamp1", "phase", "quantise", "pack",
+        "dump",
+        "lpc",
+        "nlp",
+        "postfilter",
+        "sine",
+        "codec2",
+        "codec2_fft",
+        "kiss_fft",
+        "kiss_fftr",
+        "interp",
+        "lsp",
+        "mbest",
+        "newamp1",
+        "phase",
+        "quantise",
+        "pack",
     ];
     let gen = [
         "codebook",

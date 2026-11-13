@@ -114,11 +114,19 @@ pub struct DirLine {
 #[derive(Clone, Debug)]
 pub enum UiEvent {
     /// Someone calls: ANSWER or DECLINE.
-    Ringing { name: String, label: String, station: String },
+    Ringing {
+        name: String,
+        label: String,
+        station: String,
+    },
     /// The scrambler is up and the peer is live: show the plan, the two
     /// words and the verdict (audio is held until Checked, WORDS MATCH or
     /// TALK ANYWAY).
-    Connected { plan: TalkPlan, words: [&'static str; 2], trust: Trust },
+    Connected {
+        plan: TalkPlan,
+        words: [&'static str; 2],
+        trust: Trust,
+    },
     /// A retrain changed the tier's plan (codec, mode, frame length).
     PlanChanged(TalkPlan),
     /// The push to talk floor changed.
@@ -525,9 +533,13 @@ impl Engine {
     /// The far side of the call: voice name, device label and modem
     /// station (as CallState gives them; label and station may be empty).
     pub fn peer(&self) -> Option<(String, String, String)> {
-        self.call
-            .as_ref()
-            .map(|c| (c.peer_name.clone(), c.peer_label.clone(), c.peer_station.clone()))
+        self.call.as_ref().map(|c| {
+            (
+                c.peer_name.clone(),
+                c.peer_label.clone(),
+                c.peer_station.clone(),
+            )
+        })
     }
 
     /// True while a call is placed, ringing out, or up.
@@ -841,7 +853,9 @@ impl Engine {
         c.trust = Some(Trust::Checked);
         c.audio_ok = true;
         if let Err(e) = self.trust.save(&self.trust_path) {
-            self.event(UiEvent::Error(format!("could not save the checked contacts: {e}")));
+            self.event(UiEvent::Error(format!(
+                "could not save the checked contacts: {e}"
+            )));
         }
         self.after_trust();
     }
@@ -1022,7 +1036,9 @@ impl Engine {
     pub fn remove_contact_device(&mut self, name: &str, device_pub: [u8; 32]) {
         self.trust.remove_device(name, device_pub);
         if let Err(e) = self.trust.save(&self.trust_path) {
-            self.event(UiEvent::Error(format!("could not save the checked contacts: {e}")));
+            self.event(UiEvent::Error(format!(
+                "could not save the checked contacts: {e}"
+            )));
         }
     }
 
@@ -1091,7 +1107,11 @@ impl Engine {
                 };
                 if self.ringing.is_none() && self.call.is_none() {
                     self.ringing = Some((n.clone(), l.clone(), st.clone()));
-                    self.event(UiEvent::Ringing { name: n, label: l, station: st });
+                    self.event(UiEvent::Ringing {
+                        name: n,
+                        label: l,
+                        station: st,
+                    });
                 }
             }
             msg::CALL_STATE => self.on_call_state(&mut r),
@@ -1358,7 +1378,11 @@ impl Engine {
             return;
         }
         c.hs_started = true;
-        let role = if c.placed { Role::Caller } else { Role::Answerer };
+        let role = if c.placed {
+            Role::Caller
+        } else {
+            Role::Answerer
+        };
         let (hs, out) = Handshake::start(&self.id, role);
         c.hs = Some(hs);
         match role {
@@ -1376,7 +1400,9 @@ impl Engine {
             let Some(m) = c.ctrl.next_msg() else {
                 if c.ctrl.broken() && !c.failed {
                     c.failed = true;
-                    self.event(UiEvent::Error("control stream broken: the call stays muted".into()));
+                    self.event(UiEvent::Error(
+                        "control stream broken: the call stays muted".into(),
+                    ));
                 }
                 return;
             };
@@ -1397,7 +1423,11 @@ impl Engine {
     }
 
     fn on_handshake(&mut self, m: &[u8]) {
-        if self.call.as_ref().is_some_and(|c| c.connected() && !c.hs_started) {
+        if self
+            .call
+            .as_ref()
+            .is_some_and(|c| c.connected() && !c.hs_started)
+        {
             self.start_handshake();
         }
         let Some(c) = self.call.as_mut() else {
@@ -1464,7 +1494,9 @@ impl Engine {
                     c.hs = None;
                     c.held_hello = None;
                 }
-                self.event(UiEvent::Error(format!("scrambler: {e}: the call stays muted")));
+                self.event(UiEvent::Error(format!(
+                    "scrambler: {e}: the call stays muted"
+                )));
             }
         }
     }
@@ -1484,12 +1516,20 @@ impl Engine {
             return;
         }
         c.peer_live = true;
-        let s = c.session.as_ref().map(|s| (s.words, self.trust.verdict(&c.peer_name, &c.peer_label, s), s.peer_cert.as_ref().map(|k| k.name.clone())));
+        let s = c.session.as_ref().map(|s| {
+            (
+                s.words,
+                self.trust.verdict(&c.peer_name, &c.peer_label, s),
+                s.peer_cert.as_ref().map(|k| k.name.clone()),
+            )
+        });
         let Some((words, mut verdict, cert_name)) = s else {
             return;
         };
         // A cert that names someone else is not the person checked.
-        if verdict == Trust::Checked && cert_name.is_some_and(|n| !n.eq_ignore_ascii_case(&c.peer_name)) {
+        if verdict == Trust::Checked
+            && cert_name.is_some_and(|n| !n.eq_ignore_ascii_case(&c.peer_name))
+        {
             verdict = Trust::NotChecked;
         }
         c.trust = Some(verdict);
@@ -1497,7 +1537,11 @@ impl Engine {
             .plan
             .unwrap_or_else(|| talk_plan(tier_from_sf(self.stats.sf).unwrap_or(Tier::Sf12)));
         let name = c.peer_name.clone();
-        self.event(UiEvent::Connected { plan, words, trust: verdict });
+        self.event(UiEvent::Connected {
+            plan,
+            words,
+            trust: verdict,
+        });
         // Mute and a link request go first: once VoiceReady is out the
         // stream moves in small listener pieces.
         if self.muted {
@@ -1570,8 +1614,11 @@ impl Engine {
             return;
         };
         let ok = VerifyingKey::from_bytes(&person).is_ok_and(|k| {
-            k.verify_strict(&control::removal_signed_bytes(&dev), &Signature::from_bytes(&sig))
-                .is_ok()
+            k.verify_strict(
+                &control::removal_signed_bytes(&dev),
+                &Signature::from_bytes(&sig),
+            )
+            .is_ok()
         });
         if !ok || !checked {
             return;

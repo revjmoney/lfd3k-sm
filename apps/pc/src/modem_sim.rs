@@ -225,10 +225,7 @@ pub fn load_sounds(data: &Path) -> bool {
 }
 
 fn save_sounds(data: &Path, on: bool) -> std::io::Result<()> {
-    let t = format!(
-        "connection_sounds={}\n",
-        if on { "on" } else { "off" }
-    );
+    let t = format!("connection_sounds={}\n", if on { "on" } else { "off" });
     write_file(&prefs_path(data), t.as_bytes())
 }
 

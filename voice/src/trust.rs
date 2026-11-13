@@ -125,14 +125,23 @@ impl TrustStore {
     }
 
     fn find(&self, name: &str) -> Option<&Contact> {
-        self.contacts.iter().find(|c| c.name.eq_ignore_ascii_case(name))
+        self.contacts
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
     }
 
     fn find_or_add(&mut self, name: &str) -> &mut Contact {
-        let i = match self.contacts.iter().position(|c| c.name.eq_ignore_ascii_case(name)) {
+        let i = match self
+            .contacts
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+        {
             Some(i) => i,
             None => {
-                self.contacts.push(Contact { name: name.to_string(), ..Contact::default() });
+                self.contacts.push(Contact {
+                    name: name.to_string(),
+                    ..Contact::default()
+                });
                 self.contacts.len() - 1
             }
         };
@@ -165,7 +174,10 @@ impl TrustStore {
                 return Trust::Checked;
             }
         }
-        if c.devices.iter().any(|d| d.label.eq_ignore_ascii_case(label) && d.key != dev) {
+        if c.devices
+            .iter()
+            .any(|d| d.label.eq_ignore_ascii_case(label) && d.key != dev)
+        {
             return Trust::Conflict;
         }
         Trust::NotChecked
@@ -180,8 +192,12 @@ impl TrustStore {
         if c.removed.contains(&dev) {
             return;
         }
-        c.devices.retain(|d| !d.label.eq_ignore_ascii_case(label) && d.key != dev);
-        c.devices.push(Device { label: label.to_string(), key: dev });
+        c.devices
+            .retain(|d| !d.label.eq_ignore_ascii_case(label) && d.key != dev);
+        c.devices.push(Device {
+            label: label.to_string(),
+            key: dev,
+        });
         if let Some(cert) = &s.peer_cert {
             c.person = Some(hex(&cert.person_pub));
         }

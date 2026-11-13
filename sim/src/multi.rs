@@ -185,7 +185,9 @@ impl Multi {
             };
             if !pending.is_empty() {
                 let mut took = 0;
-                self.with(i, |m, r, now| took = m.voice_input(s as u8, &pending, r, now));
+                self.with(i, |m, r, now| {
+                    took = m.voice_input(s as u8, &pending, r, now)
+                });
                 if let Some(ss) = self.sessions.get_mut(i) {
                     ss.input[s].drain(..took.min(pending.len()));
                 }

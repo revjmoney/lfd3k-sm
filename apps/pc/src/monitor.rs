@@ -27,9 +27,7 @@ use std::time::Instant;
 use eframe::egui::{Align2, Color32, CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui};
 use lfd3k_voice::AirFrame;
 
-use crate::ui::{
-    mono, monob, text, ACCENT, FAINT, MUTED, RULE, RULE_WARM, SURFACE, TEXT2, TEXT3,
-};
+use crate::ui::{mono, monob, text, ACCENT, FAINT, MUTED, RULE, RULE_WARM, SURFACE, TEXT2, TEXT3};
 
 /// Seconds of signal the scope shows.
 const SHOW_MS: u32 = 10_000;
@@ -175,7 +173,11 @@ impl ScopeView {
                 )
             };
             clip.rect_filled(span, CornerRadius::ZERO, fill);
-            clip.vline(span.left().round() + 0.5, plot.y_range(), Stroke::new(1.0, edge));
+            clip.vline(
+                span.left().round() + 0.5,
+                plot.y_range(),
+                Stroke::new(1.0, edge),
+            );
             if span.left() >= label_end {
                 let lr = clip.text(
                     Pos2::new(span.left() + 3.0, plot.top() + 2.0),
@@ -216,7 +218,12 @@ impl ScopeView {
             }
             prev = Some((pt, tx));
         }
-        p.rect_stroke(plot, CornerRadius::ZERO, Stroke::new(1.0, RULE), StrokeKind::Inside);
+        p.rect_stroke(
+            plot,
+            CornerRadius::ZERO,
+            Stroke::new(1.0, RULE),
+            StrokeKind::Inside,
+        );
         if !self.live() {
             self.no_modem(ui, plot);
         }
@@ -229,7 +236,12 @@ impl ScopeView {
             CornerRadius::ZERO,
             Color32::from_rgba_unmultiplied(0x0e, 0x0f, 0x11, 170),
         );
-        p.rect_stroke(plot, CornerRadius::ZERO, Stroke::new(1.0, RULE), StrokeKind::Inside);
+        p.rect_stroke(
+            plot,
+            CornerRadius::ZERO,
+            Stroke::new(1.0, RULE),
+            StrokeKind::Inside,
+        );
         text(
             ui,
             plot.center(),

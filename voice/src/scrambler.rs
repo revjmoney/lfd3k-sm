@@ -191,7 +191,16 @@ impl Handshake {
             Role::Caller => framed(MSG_COMMIT, &sha256(&[COMMIT_TAG, &hello])),
             Role::Answerer => framed(MSG_HELLO, &hello),
         };
-        (Handshake { role, eph, hello, peer: None, commit: None }, out)
+        (
+            Handshake {
+                role,
+                eph,
+                hello,
+                peer: None,
+                commit: None,
+            },
+            out,
+        )
     }
 
     /// The middle step. Caller: give it the answerer's hello; it is checked
@@ -211,7 +220,10 @@ impl Handshake {
                 if self.commit.is_some() || msg.first() != Some(&MSG_COMMIT) || msg.len() != 33 {
                     return Err(ScrambleError::BadHello);
                 }
-                let c: [u8; 32] = msg.get(1..33).and_then(|s| s.try_into().ok()).ok_or(ScrambleError::BadHello)?;
+                let c: [u8; 32] = msg
+                    .get(1..33)
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or(ScrambleError::BadHello)?;
                 self.commit = Some(c);
                 Ok(None)
             }
@@ -222,12 +234,19 @@ impl Handshake {
     /// (or an empty slice). Answerer: the caller's reveal, checked against the
     /// commit. Both sides end with the same words and matching keys.
     pub fn finish(self, peer_hello: &[u8]) -> Result<Session, ScrambleError> {
-        let Handshake { role, eph, hello, peer, commit } = self;
+        let Handshake {
+            role,
+            eph,
+            hello,
+            peer,
+            commit,
+        } = self;
         let peer = match role {
             Role::Caller => {
                 let p = peer.ok_or(ScrambleError::BadHello)?;
                 if !peer_hello.is_empty()
-                    && (peer_hello.first() != Some(&MSG_HELLO) || peer_hello.get(1..) != Some(p.body.as_slice()))
+                    && (peer_hello.first() != Some(&MSG_HELLO)
+                        || peer_hello.get(1..) != Some(p.body.as_slice()))
                 {
                     return Err(ScrambleError::BadHello);
                 }
@@ -260,8 +279,10 @@ impl Handshake {
         let hk = Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
         let mut k_c2a = Zeroizing::new([0u8; 32]);
         let mut k_a2c = Zeroizing::new([0u8; 32]);
-        hk.expand(INFO_C2A, k_c2a.as_mut()).map_err(|_| ScrambleError::BadHello)?;
-        hk.expand(INFO_A2C, k_a2c.as_mut()).map_err(|_| ScrambleError::BadHello)?;
+        hk.expand(INFO_C2A, k_c2a.as_mut())
+            .map_err(|_| ScrambleError::BadHello)?;
+        hk.expand(INFO_A2C, k_a2c.as_mut())
+            .map_err(|_| ScrambleError::BadHello)?;
 
         let w = sha256(&[WORDS_TAG, caller_hello, answerer_hello]);
         let words = words::two_words(w[0], w[1]);
@@ -274,11 +295,13 @@ impl Handshake {
             words,
             peer_device: peer.device,
             peer_cert: peer.cert,
-            send: ChaCha20Poly1305::new_from_slice(send_key.as_slice()).map_err(|_| ScrambleError::BadHello)?,
+            send: ChaCha20Poly1305::new_from_slice(send_key.as_slice())
+                .map_err(|_| ScrambleError::BadHello)?,
             send_dir,
             send_ctr: 0,
             send_done: false,
-            recv: ChaCha20Poly1305::new_from_slice(recv_key.as_slice()).map_err(|_| ScrambleError::BadHello)?,
+            recv: ChaCha20Poly1305::new_from_slice(recv_key.as_slice())
+                .map_err(|_| ScrambleError::BadHello)?,
             recv_dir,
             highest: None,
             window: 0,
@@ -318,7 +341,12 @@ fn parse_hello(b: &[u8], want_role: u8) -> Result<PeerHello, ScrambleError> {
             return Err(ScrambleError::BadCert);
         }
     }
-    Ok(PeerHello { body: b.to_vec(), eph, device, cert })
+    Ok(PeerHello {
+        body: b.to_vec(),
+        eph,
+        device,
+        cert,
+    })
 }
 
 /// A running scrambled call: the words to show, who the peer is, and the two
@@ -384,7 +412,10 @@ impl Session {
                 }
             }
         }
-        let plain = self.recv.decrypt(&nonce(self.recv_dir, ctr), sealed.get(4..)?).ok()?;
+        let plain = self
+            .recv
+            .decrypt(&nonce(self.recv_dir, ctr), sealed.get(4..)?)
+            .ok()?;
         match self.highest {
             None => {
                 self.highest = Some(ctr);
@@ -392,7 +423,11 @@ impl Session {
             }
             Some(h) if ctr > h => {
                 let shift = ctr - h;
-                self.window = if shift >= WINDOW { 0 } else { self.window << shift };
+                self.window = if shift >= WINDOW {
+                    0
+                } else {
+                    self.window << shift
+                };
                 self.window |= 1;
                 self.highest = Some(ctr);
             }

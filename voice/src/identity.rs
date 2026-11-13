@@ -60,7 +60,12 @@ impl DeviceCert {
 
     /// Make a cert for `device_pub`, signed by `person`. `None` when the name
     /// or the label is longer than [`MAX_FIELD`].
-    pub(crate) fn sign(person: &SigningKey, device_pub: [u8; 32], name: &str, label: &str) -> Option<Self> {
+    pub(crate) fn sign(
+        person: &SigningKey,
+        device_pub: [u8; 32],
+        name: &str,
+        label: &str,
+    ) -> Option<Self> {
         let sig = person.sign(&Self::signed_bytes(&device_pub, name, label)?);
         Some(DeviceCert {
             person_pub: person.verifying_key().to_bytes(),
@@ -105,7 +110,16 @@ impl DeviceCert {
         let label = take_field(b, &mut at)?;
         let sig: [u8; 64] = b.get(at..at + 64)?.try_into().ok()?;
         at += 64;
-        Some((DeviceCert { person_pub, device_pub, name, label, sig }, at))
+        Some((
+            DeviceCert {
+                person_pub,
+                device_pub,
+                name,
+                label,
+                sig,
+            },
+            at,
+        ))
     }
 }
 
@@ -167,7 +181,11 @@ impl Identity {
         let device = random_key();
         let person = random_key();
         let cert = DeviceCert::sign(&person, device.verifying_key().to_bytes(), name, label)?;
-        Some(Identity { device, person: Some(person), cert: Some(cert) })
+        Some(Identity {
+            device,
+            person: Some(person),
+            cert: Some(cert),
+        })
     }
 
     /// The device public key.
@@ -245,7 +263,9 @@ impl Identity {
     pub fn save(&self, path: &Path) -> io::Result<()> {
         // Sized for the largest file up front, so the buffer never regrows
         // and leaves a copy of the seeds behind unwiped.
-        let mut buf = Zeroizing::new(Vec::with_capacity(8 + 32 + 33 + 1 + 32 + 2 * (1 + MAX_FIELD) + 64));
+        let mut buf = Zeroizing::new(Vec::with_capacity(
+            8 + 32 + 33 + 1 + 32 + 2 * (1 + MAX_FIELD) + 64,
+        ));
         buf.extend_from_slice(FILE_MAGIC);
         buf.extend_from_slice(self.device.as_bytes());
         match &self.person {
@@ -278,7 +298,8 @@ impl Identity {
     /// Read an identity file written by [`Identity::save`].
     pub fn load(path: &Path) -> io::Result<Self> {
         let buf = Zeroizing::new(fs::read(path)?);
-        Self::decode(&buf).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not an LFD3K identity file"))
+        Self::decode(&buf)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not an LFD3K identity file"))
     }
 
     fn decode(b: &[u8]) -> Option<Self> {
@@ -308,7 +329,8 @@ impl Identity {
                 None
             }
             1 => {
-                let (c, used) = DeviceCert::decode(b.get(at + 1..)?, device.verifying_key().to_bytes())?;
+                let (c, used) =
+                    DeviceCert::decode(b.get(at + 1..)?, device.verifying_key().to_bytes())?;
                 at += 1 + used;
                 if !c.verify() {
                     return None;
@@ -320,17 +342,30 @@ impl Identity {
         if at != b.len() {
             return None;
         }
-        Some(Identity { device, person, cert })
+        Some(Identity {
+            device,
+            person,
+            cert,
+        })
     }
 }
 
 #[cfg(unix)]
 fn open_private(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
 }
 
 #[cfg(not(unix))]
 fn open_private(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
 }

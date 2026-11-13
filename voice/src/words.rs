@@ -7,6 +7,7 @@
 //! The apps may show them in capitals (`WRENCH TANGO` style).
 
 /// Even list: two syllable words, indexed by byte value (word 1).
+#[rustfmt::skip]
 pub const EVEN: [&str; 256] = [
     "aardvark", "absurd", "accrue", "acme", "adrift", "adult", "afflict", "ahead",
     "aimless", "Algol", "allow", "alone", "ammo", "ancient", "apple", "artist",
@@ -43,6 +44,7 @@ pub const EVEN: [&str; 256] = [
 ];
 
 /// Odd list: three syllable words, indexed by byte value (word 2).
+#[rustfmt::skip]
 pub const ODD: [&str; 256] = [
     "adroitness", "adviser", "aftermath", "aggregate", "alkali", "almighty", "amulet", "amusement",
     "antenna", "applicant", "Apollo", "armistice", "article", "asteroid", "Atlantic", "atmosphere",

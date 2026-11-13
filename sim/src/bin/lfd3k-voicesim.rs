@@ -64,8 +64,12 @@ fn parse_tier(s: &str) -> Result<Vec<Tier>, String> {
         v.reverse();
         return Ok(v);
     }
-    let n = s.trim_start_matches(['S', 's']).trim_start_matches(['F', 'f']);
-    let sf: u8 = n.parse().map_err(|_| format!("--tier: {s} is not SF5 to SF12 or all"))?;
+    let n = s
+        .trim_start_matches(['S', 's'])
+        .trim_start_matches(['F', 'f']);
+    let sf: u8 = n
+        .parse()
+        .map_err(|_| format!("--tier: {s} is not SF5 to SF12 or all"))?;
     lfd3k_voice::tier_from_sf(sf)
         .map(|t| vec![t])
         .ok_or_else(|| format!("--tier: {s} is not SF5 to SF12 or all"))
@@ -81,7 +85,10 @@ fn parse_args() -> Result<Args, String> {
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
-        let mut v = || it.next().ok_or_else(|| format!("{k} needs a value\n{}", usage()));
+        let mut v = || {
+            it.next()
+                .ok_or_else(|| format!("{k} needs a value\n{}", usage()))
+        };
         match k.as_str() {
             "--tier" => a.tiers = parse_tier(&v()?)?,
             "--snr" => a.snr_db = v()?.parse().map_err(|e| format!("--snr: {e}"))?,
@@ -223,7 +230,9 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
 /// The first 10 ms block louder than a tenth of the loudest.
 fn onset(env: &[f64]) -> Option<usize> {
     let max = env.iter().copied().fold(0.0, f64::max);
-    (max > 0.0).then(|| env.iter().position(|&e| e > max / 10.0)).flatten()
+    (max > 0.0)
+        .then(|| env.iter().position(|&e| e > max / 10.0))
+        .flatten()
 }
 
 /// (lag in ms, match) where the recording's envelope best follows the
@@ -324,7 +333,10 @@ fn run_tier(tier: Tier, a: &Args, wav: &[i16]) -> Result<Row, String> {
                     UiEvent::Ringing { .. } if k == 1 => e.answer(),
                     UiEvent::Connected { trust, .. } if trust != Trust::Conflict => e.talk_anyway(),
                     UiEvent::Error(s) => eprintln!("  {tag} {}: {s}", ["ANN", "BEN"][k]),
-                    UiEvent::Ended | UiEvent::Declined | UiEvent::NoAnswer | UiEvent::AnsweredElsewhere => {
+                    UiEvent::Ended
+                    | UiEvent::Declined
+                    | UiEvent::NoAnswer
+                    | UiEvent::AnsweredElsewhere => {
                         ended = true;
                     }
                     _ => {}
@@ -365,7 +377,10 @@ fn run_tier(tier: Tier, a: &Args, wav: &[i16]) -> Result<Row, String> {
         }
         let playing = matches!(phase, Phase::Playing(_));
         let mic: Vec<i16> = if playing {
-            let mut v: Vec<i16> = wav.get(pos..(pos + CHUNK).min(wav.len())).unwrap_or(&[]).to_vec();
+            let mut v: Vec<i16> = wav
+                .get(pos..(pos + CHUNK).min(wav.len()))
+                .unwrap_or(&[])
+                .to_vec();
             v.resize(CHUNK, 0);
             pos += CHUNK;
             v
@@ -437,8 +452,14 @@ fn run_tier(tier: Tier, a: &Args, wav: &[i16]) -> Result<Row, String> {
         concealed: sb.frames_concealed,
         delay_ms,
         matched,
-        first_audio_ms: sb.first_audio_ms.zip(sa.connected_ms).map(|(f, c)| f.wrapping_sub(c)),
-        slots_ms: sa.slots_ms.zip(sa.connected_ms).map(|(s, c)| s.wrapping_sub(c)),
+        first_audio_ms: sb
+            .first_audio_ms
+            .zip(sa.connected_ms)
+            .map(|(f, c)| f.wrapping_sub(c)),
+        slots_ms: sa
+            .slots_ms
+            .zip(sa.connected_ms)
+            .map(|(s, c)| s.wrapping_sub(c)),
     })
 }
 
@@ -479,7 +500,12 @@ fn main() -> ExitCode {
         match run_tier(t, &a, &wav) {
             Ok(r) => {
                 if r.sf != t.sf() {
-                    println!("(asked for SF{}; the call trained to SF{}; the WAV is SF{}.wav)", t.sf(), r.sf, t.sf());
+                    println!(
+                        "(asked for SF{}; the call trained to SF{}; the WAV is SF{}.wav)",
+                        t.sf(),
+                        r.sf,
+                        t.sf()
+                    );
                 }
                 let ms = |v: Option<u32>| v.map_or("none".to_string(), |v| format!("{v} ms"));
                 println!(

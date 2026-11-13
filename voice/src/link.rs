@@ -176,9 +176,12 @@ impl Keys {
             offer_mac: Zeroizing::new([0u8; 32]),
             seal: Zeroizing::new([0u8; 32]),
         };
-        hk.expand(INFO_JOIN_MAC, k.join_mac.as_mut()).map_err(|_| LinkError::BadMessage)?;
-        hk.expand(INFO_OFFER_MAC, k.offer_mac.as_mut()).map_err(|_| LinkError::BadMessage)?;
-        hk.expand(INFO_SEAL, k.seal.as_mut()).map_err(|_| LinkError::BadMessage)?;
+        hk.expand(INFO_JOIN_MAC, k.join_mac.as_mut())
+            .map_err(|_| LinkError::BadMessage)?;
+        hk.expand(INFO_OFFER_MAC, k.offer_mac.as_mut())
+            .map_err(|_| LinkError::BadMessage)?;
+        hk.expand(INFO_SEAL, k.seal.as_mut())
+            .map_err(|_| LinkError::BadMessage)?;
         Ok(k)
     }
 }
@@ -201,7 +204,8 @@ fn transcript(offer_pake: &[u8], join_pake: &[u8]) -> Vec<u8> {
 }
 
 fn hmac(key: &[u8; 32], tag: &[u8], transcript: &[u8]) -> Result<HmacSha256, LinkError> {
-    let mut m = <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| LinkError::BadMessage)?;
+    let mut m =
+        <HmacSha256 as hmac::KeyInit>::new_from_slice(key).map_err(|_| LinkError::BadMessage)?;
     m.update(tag);
     m.update(transcript);
     Ok(m)
@@ -213,7 +217,9 @@ fn mac(key: &[u8; 32], tag: &[u8], transcript: &[u8]) -> Result<[u8; MAC_LEN], L
 
 /// Constant time check of a confirm; a mismatch means the codes differ.
 fn check_mac(key: &[u8; 32], tag: &[u8], transcript: &[u8], got: &[u8]) -> Result<(), LinkError> {
-    hmac(key, tag, transcript)?.verify_slice(got).map_err(|_| LinkError::WrongCode)
+    hmac(key, tag, transcript)?
+        .verify_slice(got)
+        .map_err(|_| LinkError::WrongCode)
 }
 
 fn seal_aad(transcript: &[u8]) -> Vec<u8> {
@@ -291,10 +297,17 @@ impl LinkOffer {
         plain.extend_from_slice(seed.as_ref());
         plain.push(name.len() as u8);
         plain.extend_from_slice(name.as_bytes());
-        let cipher = ChaCha20Poly1305::new_from_slice(keys.seal.as_ref()).map_err(|_| LinkError::BadMessage)?;
+        let cipher = ChaCha20Poly1305::new_from_slice(keys.seal.as_ref())
+            .map_err(|_| LinkError::BadMessage)?;
         let aad = seal_aad(&tr);
         let ct = cipher
-            .encrypt(&Nonce::from([0u8; 12]), Payload { msg: &plain, aad: &aad })
+            .encrypt(
+                &Nonce::from([0u8; 12]),
+                Payload {
+                    msg: &plain,
+                    aad: &aad,
+                },
+            )
             .map_err(|_| LinkError::BadMessage)?;
         let offer_mac = mac(&keys.offer_mac, MAC_OFFER_TAG, &tr)?;
 
@@ -322,7 +335,14 @@ impl LinkJoin {
     /// message to send.
     pub fn start(code: &str) -> (LinkJoin, Vec<u8>) {
         let (spake, pake) = start_spake(code, false);
-        (LinkJoin { spake: Some(spake), pake, done: None }, vec![MSG_LINK_REQUEST, VERSION])
+        (
+            LinkJoin {
+                spake: Some(spake),
+                pake,
+                done: None,
+            },
+            vec![MSG_LINK_REQUEST, VERSION],
+        )
     }
 
     /// Take the offer's OFFER message; returns `Some(JOIN message)` to send.
@@ -330,7 +350,11 @@ impl LinkJoin {
     /// first OFFER, or a malformed one, gives [`LinkError::BadMessage`].
     pub fn step(&mut self, msg: &[u8]) -> Result<Option<Vec<u8>>, LinkError> {
         if let Some((offer, _, _)) = &self.done {
-            return if msg == offer.as_slice() { Ok(None) } else { Err(LinkError::BadMessage) };
+            return if msg == offer.as_slice() {
+                Ok(None)
+            } else {
+                Err(LinkError::BadMessage)
+            };
         }
         if msg.len() != OFFER_LEN {
             return Err(LinkError::BadMessage);
@@ -365,7 +389,8 @@ impl LinkJoin {
         let ct = b.get(MAC_LEN..).ok_or(LinkError::BadMessage)?;
         check_mac(&keys.offer_mac, MAC_OFFER_TAG, &tr, offer_mac)?;
 
-        let cipher = ChaCha20Poly1305::new_from_slice(keys.seal.as_ref()).map_err(|_| LinkError::BadMessage)?;
+        let cipher = ChaCha20Poly1305::new_from_slice(keys.seal.as_ref())
+            .map_err(|_| LinkError::BadMessage)?;
         let aad = seal_aad(&tr);
         let plain = Zeroizing::new(
             cipher
