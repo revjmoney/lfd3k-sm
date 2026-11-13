@@ -17,6 +17,7 @@
 
 mod audio;
 mod modem_sim;
+mod monitor;
 mod ui;
 
 use std::net::SocketAddr;
@@ -242,6 +243,7 @@ fn main() -> ExitCode {
                 record: a.record.clone(),
                 mic: sound.mic.clone(),
                 spk: sound.spk.clone(),
+                sounds: modem_sim::load_sounds(&a.data),
             };
             modem_sim::spawn(o, cmd_rx, ev_tx, snap.clone(), cc.egui_ctx.clone())?;
             Ok(Box::new(ui::App::new(

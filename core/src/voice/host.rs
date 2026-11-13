@@ -31,12 +31,23 @@
 //! flags, an error queue and one frame being written, and `voice_output`
 //! builds the next frame when the last one has gone, in a fixed order
 //! (HelloAck, Error, Ring, end of ring or call, CallState, Floor,
-//! ControlIn, VoiceIn, AtReply, DirEntry). So an end of call or a state
+//! ControlIn, VoiceIn, AtReply, DirEntry, AirEvent, Scope). So an end of call or a state
 //! change is never crowded out by voice. VoiceIn is the link's last heard
 //! frame (one is kept; poll `voice_output` every tick). ControlIn reads
 //! the call's ARQ stream only as fast as the app takes it; ControlOut that
 //! the link cannot take at once is held, and `voice_input` takes no more
 //! bytes from that session until it is.
+//!
+//! **Scope and AirEvent.** The platform feeds a channel sample every 50 ms
+//! (`Modem::scope_sample`: the RSSI it reads, and whether it was taken
+//! while transmitting) into a ring of `SCOPE_RING`; every `SCOPE_BATCH`
+//! samples each open session is due a Scope frame with what it has not
+//! had yet (at most `SCOPE_MAX`, the newest; older ones are dropped). Every
+//! frame this modem starts sending (`Link` notes it) or finishes receiving
+//! (`radio_rx`) goes into a ring of `AIR_RING` AirEvents, which each open
+//! session reads at its own pace; one that falls more than `AIR_RING`
+//! behind loses the oldest. Both come last in the output order, so they
+//! never hold back anything else, and nothing is queued for them.
 //!
 //! **AtLine.** One AT line at a time for the whole modem, run through the
 //! same parser and dispatch as the terminal and the menu. Everything it
@@ -51,9 +62,11 @@ use super::sched::Floor;
 use super::VOICE_DIR_MAX;
 use crate::at::AtCmd;
 use crate::directory::DIR_MAX;
+use crate::frame::{AIR_ID, HEADER_LEN};
 use crate::link::{Event, Role, State};
 use crate::modem::Modem;
-use crate::radio::Radio;
+use crate::radio::{Radio, RxInfo};
+use crate::tier::Tier;
 
 /// The protocol version in Hello and HelloAck.
 pub const VHP_VERSION: u8 = 1;
@@ -82,7 +95,20 @@ const ERRQ: usize = 4;
 /// While connected, CallState goes out again this often (fresh SNR and
 /// RSSI) even when nothing else changed.
 const STATE_EVERY_MS: u32 = 1_000;
+/// Channel samples kept for the Scope frames (the newest).
+pub const SCOPE_RING: usize = 16;
+/// A Scope frame is due every this many samples (250 ms at one sample
+/// every 50 ms).
+pub const SCOPE_BATCH: u32 = 5;
+/// Most samples in one Scope frame.
+pub const SCOPE_MAX: usize = 8;
+/// AirEvents kept for the sessions (the newest).
+pub const AIR_RING: usize = 8;
+/// AirEvent `sub` when the frame is not type 15.
+pub const AIR_NO_SUB: u8 = 0xFF;
 
+const _: () = assert!(SCOPE_MAX <= 8 && SCOPE_MAX <= SCOPE_RING);
+const _: () = assert!(SCOPE_RING.is_power_of_two() && AIR_RING.is_power_of_two());
 const _: () = assert!(VHP_AT_CHUNK + 2 <= VHP_FRAME_MAX);
 const _: () = assert!(VHP_CONTROL_MAX < VHP_FRAME_MAX);
 const _: () = assert!(super::VOICE_MAX < VHP_FRAME_MAX);
@@ -122,6 +148,74 @@ pub mod msg {
     pub const ERROR: u8 = 0x8D;
     pub const AT_REPLY: u8 = 0x8E;
     pub const RING_ENDED: u8 = 0x8F;
+    pub const SCOPE: u8 = 0x90;
+    pub const AIR_EVENT: u8 = 0x91;
+}
+
+/// One frame on the air, for an AirEvent: sent (`rx` false, `start_ms`
+/// when sending began) or heard (`rx` true, `start_ms` its end less its
+/// airtime).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AirNote {
+    pub(crate) rx: bool,
+    pub(crate) sf: u8,
+    /// Header type (1 to 15); 0 for a frame that is not ours (or too short).
+    pub(crate) ftype: u8,
+    /// Type 15 sub-type, else `AIR_NO_SUB`.
+    pub(crate) sub: u8,
+    pub(crate) len: u8,
+    pub(crate) start_ms: u32,
+    pub(crate) air_ms: u16,
+    /// What the frame was heard at (`i16::MIN` for a frame sent).
+    pub(crate) rssi_dbm: i16,
+    pub(crate) snr_x4: i16,
+}
+
+impl AirNote {
+    pub(crate) const EMPTY: AirNote = AirNote {
+        rx: false,
+        sf: 0,
+        ftype: 0,
+        sub: AIR_NO_SUB,
+        len: 0,
+        start_ms: 0,
+        air_ms: 0,
+        rssi_dbm: i16::MIN,
+        snr_x4: i16::MIN,
+    };
+
+    /// `frame` sent on `tier` starting at `now`, or heard (`heard`: its
+    /// metadata) ending at `now`.
+    pub(crate) fn new(tier: Tier, frame: &[u8], heard: Option<RxInfo>, now: u32) -> AirNote {
+        let air_us = tier.airtime_us(frame.len());
+        let air_ms = air_us.saturating_add(500) / 1000;
+        let ours = frame.first() == Some(&AIR_ID) && frame.len() >= HEADER_LEN;
+        let ftype = if ours {
+            frame.get(1).map_or(0, |b| b >> 4)
+        } else {
+            0
+        };
+        let sub = if ftype == 15 {
+            frame.get(HEADER_LEN).copied().unwrap_or(AIR_NO_SUB)
+        } else {
+            AIR_NO_SUB
+        };
+        AirNote {
+            rx: heard.is_some(),
+            sf: tier.sf(),
+            ftype,
+            sub,
+            len: u8::try_from(frame.len()).unwrap_or(u8::MAX),
+            start_ms: if heard.is_some() {
+                now.wrapping_sub(air_ms)
+            } else {
+                now
+            },
+            air_ms: u16::try_from(air_ms).unwrap_or(u16::MAX),
+            rssi_dbm: heard.map_or(i16::MIN, |h| h.rssi_dbm),
+            snr_x4: heard.map_or(i16::MIN, |h| h.snr_x4),
+        }
+    }
 }
 
 /// Error codes (the second byte of an Error frame).
@@ -183,6 +277,7 @@ const P_RING_ENDED: u16 = 1 << 5;
 const P_ENDED: u16 = 1 << 6;
 const P_STATE: u16 = 1 << 7;
 const P_FLOOR: u16 = 1 << 8;
+const P_SCOPE: u16 = 1 << 9;
 /// The end of ring and end of call messages, in output order.
 const ENDS: [(u16, u8); 5] = [
     (P_ANS_ELSE, msg::ANSWERED_ELSEWHERE),
@@ -346,6 +441,10 @@ pub(crate) struct Session {
     /// DirList in progress: next index (voice entries, then stations), the
     /// time asked (ages are as of then) and entries sent so far.
     dir: Option<(u8, u32, u8)>,
+    /// The next scope sample and AirEvent (counts, see `Vhp`) this
+    /// session has not had yet.
+    scope_next: u32,
+    air_next: u32,
 }
 
 impl Session {
@@ -368,6 +467,8 @@ impl Session {
             errs: [(0, 0); ERRQ],
             err_len: 0,
             dir: None,
+            scope_next: 0,
+            air_next: 0,
         }
     }
 
@@ -389,6 +490,8 @@ impl Session {
         self.pend = 0;
         self.err_len = 0;
         self.dir = None;
+        self.scope_next = 0;
+        self.air_next = 0;
     }
 
     fn put(&mut self, b: u8) {
@@ -578,6 +681,17 @@ pub(crate) struct Vhp {
     state_at: u32,
     floor: Floor,
     pub(crate) cap: Capture,
+    /// Channel samples (dBm, taken while transmitting) by sample count
+    /// modulo `SCOPE_RING`; samples taken so far (wraps), the time of the
+    /// newest and the gap before it.
+    scope_dbm: [i8; SCOPE_RING],
+    scope_tx: [bool; SCOPE_RING],
+    scope_n: u32,
+    scope_t: u32,
+    scope_step: u8,
+    /// Frames on the air by count modulo `AIR_RING`, and the count (wraps).
+    air: [AirNote; AIR_RING],
+    air_n: u32,
 }
 
 impl Vhp {
@@ -599,6 +713,13 @@ impl Vhp {
             state_at: 0,
             floor: Floor::Free,
             cap: Capture::new(),
+            scope_dbm: [0; SCOPE_RING],
+            scope_tx: [false; SCOPE_RING],
+            scope_n: 0,
+            scope_t: 0,
+            scope_step: 0,
+            air: [AirNote::EMPTY; AIR_RING],
+            air_n: 0,
         }
     }
 
@@ -617,6 +738,22 @@ impl Vhp {
         self.state_at = 0;
         self.floor = Floor::Free;
         self.cap.reset();
+        self.scope_dbm = [0; SCOPE_RING];
+        self.scope_tx = [false; SCOPE_RING];
+        self.scope_n = 0;
+        self.scope_t = 0;
+        self.scope_step = 0;
+        self.air = [AirNote::EMPTY; AIR_RING];
+        self.air_n = 0;
+    }
+
+    /// A session just opened: it starts with the next sample and AirEvent.
+    fn fresh(&mut self, i: usize) {
+        let (sn, an) = (self.scope_n, self.air_n);
+        if let Some(s) = self.s.get_mut(i) {
+            s.scope_next = sn;
+            s.air_next = an;
+        }
     }
 
     /// Set `bit` on every open session in `mask`.
@@ -671,7 +808,43 @@ impl Modem {
         s.reset();
         s.open = true;
         s.last_ms = now_ms;
+        self.vhp.fresh(usize::from(session));
         true
+    }
+
+    /// One channel sample for the Scope frames, taken by the platform every
+    /// 50 ms: the RSSI it reads (dBm, kept as -128 to 127; GetRssiInst on
+    /// the SX1262, `SimNetRadio::rx_rssi` on SimNet) and whether it was
+    /// taken while transmitting. Every `SCOPE_BATCH` samples each open
+    /// session is due a Scope frame.
+    pub fn scope_sample(&mut self, rssi_dbm: i16, tx: bool, now_ms: u32) {
+        let v = &mut self.vhp;
+        let k = v.scope_n as usize % SCOPE_RING;
+        if let Some(d) = v.scope_dbm.get_mut(k) {
+            *d = rssi_dbm.clamp(i16::from(i8::MIN), i16::from(i8::MAX)) as i8;
+        }
+        if let Some(t) = v.scope_tx.get_mut(k) {
+            *t = tx;
+        }
+        v.scope_step = if v.scope_n == 0 {
+            0
+        } else {
+            u8::try_from(now_ms.wrapping_sub(v.scope_t)).unwrap_or(u8::MAX)
+        };
+        v.scope_n = v.scope_n.wrapping_add(1);
+        v.scope_t = now_ms;
+        if v.scope_n.is_multiple_of(SCOPE_BATCH) {
+            v.tell(0x0F, P_SCOPE);
+        }
+    }
+
+    /// A frame went on the air or was heard: an AirEvent for every session.
+    pub(crate) fn vhp_air(&mut self, n: AirNote) {
+        let v = &mut self.vhp;
+        if let Some(d) = v.air.get_mut(v.air_n as usize % AIR_RING) {
+            *d = n;
+        }
+        v.air_n = v.air_n.wrapping_add(1);
     }
 
     /// Bytes from the app on `session`. Returns the bytes taken; offer the
@@ -737,6 +910,7 @@ impl Modem {
             s.last_ms = now;
             s.skip_lf = true;
         }
+        self.vhp.fresh(0);
         self.vhp.host = true;
     }
 
@@ -1393,7 +1567,93 @@ impl Modem {
                 return w.done();
             }
         }
-        self.vhp_dir_next(i, f)
+        let n = self.vhp_dir_next(i, f);
+        if n > 0 {
+            return n;
+        }
+        let n = self.vhp_air_next(i, f);
+        if n > 0 {
+            return n;
+        }
+        if self.take_pend(i, P_SCOPE) {
+            return self.vhp_scope(i, f);
+        }
+        0
+    }
+
+    /// The next AirEvent session `i` has not had, into `f` (0: none).
+    fn vhp_air_next(&mut self, i: usize, f: &mut [u8; VHP_FRAME_MAX]) -> usize {
+        let v = &mut self.vhp;
+        let Some(s) = v.s.get_mut(i) else {
+            return 0;
+        };
+        let behind = v.air_n.wrapping_sub(s.air_next);
+        if behind == 0 {
+            return 0;
+        }
+        if behind > AIR_RING as u32 {
+            // Fell behind: the oldest ones are gone.
+            s.air_next = v.air_n.wrapping_sub(AIR_RING as u32);
+        }
+        let a = v
+            .air
+            .get(s.air_next as usize % AIR_RING)
+            .copied()
+            .unwrap_or(AirNote::EMPTY);
+        s.air_next = s.air_next.wrapping_add(1);
+        let mut w = W {
+            b: f,
+            n: 0,
+            over: false,
+        };
+        w.u8(msg::AIR_EVENT)
+            .u8(u8::from(a.rx))
+            .u8(a.sf)
+            .u8(a.ftype)
+            .u8(a.sub)
+            .u8(a.len)
+            .u32(a.start_ms)
+            .u16(a.air_ms)
+            .i16(a.rssi_dbm)
+            .i16(a.snr_x4);
+        w.done()
+    }
+
+    /// A Scope frame for session `i`: the samples it has not had, at most
+    /// `SCOPE_MAX` (the newest), into `f` (0: none new).
+    fn vhp_scope(&mut self, i: usize, f: &mut [u8; VHP_FRAME_MAX]) -> usize {
+        let v = &mut self.vhp;
+        let Some(s) = v.s.get_mut(i) else {
+            return 0;
+        };
+        let new = v.scope_n.wrapping_sub(s.scope_next);
+        if new == 0 {
+            return 0;
+        }
+        let count = new.min(SCOPE_MAX as u32);
+        let first = v.scope_n.wrapping_sub(count);
+        s.scope_next = v.scope_n;
+        let mut dbm = [0u8; SCOPE_MAX];
+        let mut mask = 0u8;
+        for (k, d) in dbm.iter_mut().enumerate().take(count as usize) {
+            let at = first.wrapping_add(k as u32) as usize % SCOPE_RING;
+            *d = v.scope_dbm.get(at).map_or(0, |&x| x as u8);
+            if v.scope_tx.get(at).copied().unwrap_or(false) {
+                mask |= 1 << k;
+            }
+        }
+        let mut w = W {
+            b: f,
+            n: 0,
+            over: false,
+        };
+        w.u8(msg::SCOPE)
+            .u32(v.scope_t)
+            .u8(v.scope_step)
+            .u8(count as u8)
+            .u8(mask)
+            .bytes(dbm.get(..count as usize).unwrap_or(&[]));
+        w.done()
     }
 
     /// CallState into `f`: the call's for its owner, idle for anyone else.

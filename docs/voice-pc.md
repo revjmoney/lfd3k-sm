@@ -64,6 +64,12 @@ The ANN copy uses no sound devices (`--play` replaces its mic, `--record` its sp
 4. The line under the name shows the real tier, codec and mode, for example `SF7 BW500 21875   CODEC2 2400   CALL`. HANG UP ends it. ANSWERED ELSEWHERE, DECLINED, NO ANSWER and CALL ENDED show in the banner.
 5. Someone calling you brings up the CALLS screen with INCOMING CALL, ANSWER and DECLINE, and the app rings.
 
+## The signal scope and the connection sounds
+
+The band at the bottom of every screen is the modem's own view of the radio (no SDR): MODEM SIGNAL with the modem's state and the newest RSSI, and a scope of the last 10 s. The grey line is the channel level the modem reads every 50 ms (on this PC's built-in modem: -110 dBm when nothing is heard, the level of a frame while it is being received); blue points are samples taken while our modem was sending. Every frame the modem hears shows as a grey span with its tier (SF5 to SF12), every frame it sends as a blue span. NO MODEM means no samples are coming from the modem.
+
+While a call is being set up (dialing, ringing, training, a retrain) and when it ends (NO CARRIER), the app plays the frames as LoRa-like chirps, made live from what the modem sends and hears: slow sweeps for SF12 frames, a fast flutter for SF5, as long as each frame is on the air. Frames heard sound a little brighter and softer than frames sent. It goes quiet once the call is connected, and stays quiet while idle (beacons and scans make no sound). Turn it off or on with CONNECTION SOUNDS in Settings, About (remembered in `app-prefs.txt` in the data folder; on by default). A `--record` WAV carries the chirps of the call setup too.
+
 ## Slow tiers and push to talk
 
 Start your copy with `--cap-tier SF9` (or `--snr -12`). From SF9 down the call is push to talk: hold the big TALK button, or the space bar, and let go to listen. `WAITING FOR THE FLOOR` means the other side holds it; you get it when they let go. At SF12 the line reads `PTT DELAYED`: the listener hears you about 2 s late. The `--auto-answer --play` copy takes the floor, plays the whole WAV, lets go for 8 s so you can answer, and starts again.
@@ -90,7 +96,7 @@ A wrong code fails with nothing learned (`link failed` after about a minute); st
 
 ## Settings
 
-SETTINGS runs the whole modem, with the same AT lines the AT+MENU sends: tabs Radio (station name, S30 TX power with a warning above the safe default of 2, S21, S0, S31, S32, S20, S7, S22), Privacy (ON, QUIET, HIDDEN, pinned names), Wi-Fi (hotspot, client network, the live status; passwords never shown, and wiped from the app once sent), Forwards (8 slots, publish), Voice and keys (your name and label, linking, checked contacts, remove a lost device), About (ATI, AT&V). The DIRECTORY screen dials, pins, deletes and scans.
+SETTINGS runs the whole modem, with the same AT lines the AT+MENU sends: tabs Radio (station name, S30 TX power with a warning above the safe default of 2, S21, S0, S31, S32, S20, S7, S22), Privacy (ON, QUIET, HIDDEN, pinned names), Wi-Fi (hotspot, client network, the live status; passwords never shown, and wiped from the app once sent), Forwards (8 slots, publish), Voice and keys (your name and label, linking, checked contacts, remove a lost device), About (ATI, AT&V, CONNECTION SOUNDS ON or OFF). The DIRECTORY screen dials, pins, deletes and scans.
 
 A change is live at once. When the settings differ from the saved ones a bar shows SAVE (AT&W, kept after a restart: the built-in modem keeps its saved settings and directory in the data folder; it has no Wi-Fi, so the Wi-Fi settings do nothing here and no Wi-Fi password is ever written to disk) and DISCARD (ATZ, back to the saved ones; not during a call, as ATZ ends it).
 

@@ -43,6 +43,7 @@ use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
 use crate::voice::call::{self as vcall, VoiceCallInfo, VoiceLink};
+use crate::voice::host::AirNote;
 use crate::voice::sched::VoiceSched;
 
 mod data;
@@ -293,6 +294,11 @@ pub struct Link {
     voice: VoiceLink,
     /// Voice slots, floor and voice buffers (see `voice::sched`).
     vs: VoiceSched,
+    /// Frames sent since the modem last took them (its AirEvents); more
+    /// than fit are not noted (one send per pump, the modem takes them
+    /// after every pump).
+    air_tx: [AirNote; 2],
+    air_tx_len: u8,
 }
 
 impl Default for Link {
@@ -367,7 +373,28 @@ impl Link {
             moved: 0,
             voice: VoiceLink::new(),
             vs: VoiceSched::new(),
+            air_tx: [AirNote::EMPTY; 2],
+            air_tx_len: 0,
         }
+    }
+
+    /// A frame just went to the radio: note it for the AirEvents.
+    pub(crate) fn note_tx(&mut self, tier: Tier, frame: &[u8], now: u32) {
+        if let Some(d) = self.air_tx.get_mut(usize::from(self.air_tx_len)) {
+            *d = AirNote::new(tier, frame, None, now);
+            self.air_tx_len += 1;
+        }
+    }
+
+    /// The oldest frame sent that the modem has not taken yet.
+    pub(crate) fn take_air_tx(&mut self) -> Option<AirNote> {
+        if self.air_tx_len == 0 {
+            return None;
+        }
+        let n = self.air_tx.first().copied();
+        self.air_tx.rotate_left(1);
+        self.air_tx_len -= 1;
+        n
     }
 
     /// Compression is on for the current (or last) call.

@@ -175,6 +175,7 @@ impl Link {
             }
         }
         radio.send(tier, buf.get(..len).unwrap_or(&[]));
+        self.note_tx(tier, buf.get(..len).unwrap_or(&[]), now);
         self.need_listen = true;
         self.last_tx = now;
         if is_data {
@@ -526,6 +527,7 @@ impl Link {
             return;
         };
         radio.send(tier, buf.get(..len).unwrap_or(&[]));
+        self.note_tx(tier, buf.get(..len).unwrap_or(&[]), now);
         self.need_listen = true;
         self.last_tx = now;
         self.vs.on_sent(now, air_ms(tier, len), listener);

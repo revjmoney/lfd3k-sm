@@ -1287,6 +1287,13 @@ impl Modem {
 
     pub fn radio_rx<R: Radio>(&mut self, frame: &[u8], info: RxInfo, radio: &mut R, now_ms: u32) {
         self.last_rx = Some(info);
+        // Every frame heard is an AirEvent for the voice apps (the scope).
+        self.vhp_air(crate::voice::host::AirNote::new(
+            info.tier,
+            frame,
+            Some(info),
+            now_ms,
+        ));
         // A frame of the call in progress (its call id, a link that is not
         // idle): the call's own signal for LFD3K-LINK.
         if let Ok(f) = crate::frame::decode(frame) {
@@ -3104,6 +3111,10 @@ impl Modem {
         self.wire_pump(now);
         self.vhp_poll(now);
         self.link.pump(radio, now);
+        // Frames the link sent (here or in its tick): AirEvents.
+        while let Some(n) = self.link.take_air_tx() {
+            self.vhp_air(n);
+        }
         if self.dir_list.is_some() {
             self.pump_list();
         }

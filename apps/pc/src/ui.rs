@@ -33,24 +33,25 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::audio::Audio;
 use crate::modem_sim::{Cmd, Ev, Snap};
+use crate::monitor::ScopeView;
 use crate::Args;
 
 // ---- Theme (site.css tokens).
 
 const BG: Color32 = Color32::from_rgb(0x0e, 0x0f, 0x11);
 const BG_FOOT: Color32 = Color32::from_rgb(0x0b, 0x0c, 0x0e);
-const SURFACE: Color32 = Color32::from_rgb(0x16, 0x18, 0x1b);
+pub(crate) const SURFACE: Color32 = Color32::from_rgb(0x16, 0x18, 0x1b);
 const SURFACE2: Color32 = Color32::from_rgb(0x14, 0x17, 0x1c);
 const ZEBRA: Color32 = Color32::from_rgb(0x12, 0x14, 0x17);
-const RULE: Color32 = Color32::from_rgb(0x24, 0x27, 0x2c);
-const RULE_WARM: Color32 = Color32::from_rgb(0x2e, 0x34, 0x40);
+pub(crate) const RULE: Color32 = Color32::from_rgb(0x24, 0x27, 0x2c);
+pub(crate) const RULE_WARM: Color32 = Color32::from_rgb(0x2e, 0x34, 0x40);
 const TEXT: Color32 = Color32::from_rgb(0xe8, 0xea, 0xed);
-const TEXT2: Color32 = Color32::from_rgb(0xb6, 0xbb, 0xc3);
-const TEXT3: Color32 = Color32::from_rgb(0xa8, 0xad, 0xb5);
-const MUTED: Color32 = Color32::from_rgb(0x8a, 0x90, 0x99);
+pub(crate) const TEXT2: Color32 = Color32::from_rgb(0xb6, 0xbb, 0xc3);
+pub(crate) const TEXT3: Color32 = Color32::from_rgb(0xa8, 0xad, 0xb5);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(0x8a, 0x90, 0x99);
 const DIM: Color32 = Color32::from_rgb(0x6b, 0x70, 0x79);
-const FAINT: Color32 = Color32::from_rgb(0x4c, 0x50, 0x58);
-const ACCENT: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
+pub(crate) const FAINT: Color32 = Color32::from_rgb(0x4c, 0x50, 0x58);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
 const ACCENT_HOVER: Color32 = Color32::from_rgb(0x9d, 0xb8, 0xff);
 const WARN: Color32 = Color32::from_rgb(0xd9, 0xa4, 0x41);
 const OK: Color32 = Color32::from_rgb(0x8b, 0xbf, 0x5a);
@@ -61,6 +62,11 @@ const TAGLINE_2: &str = "Call anyone with a modem. No carrier. No tower. No one 
 /// NOTICE.md, additional term 2.
 const ATTRIBUTION: &str = "Based on LFD3K-SM by Rev. J. Money / jmscnc.com";
 const PRODUCT: &str = "LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM";
+
+/// Height of the bottom band (modem state, attribution, signal scope) on
+/// every screen. With the Save bar and a banner the screens above it get
+/// 720 - 64 - 44 - 38 - 12 - 132 = 430 points.
+const MON_H: f32 = 132.0;
 
 /// S30 at or below this is the safe default range (FEATURES.md: default 2).
 const S30_SAFE: i32 = 2;
@@ -73,10 +79,10 @@ fn sans(s: f32) -> FontId {
 fn heavy(s: f32) -> FontId {
     FontId::new(s, FontFamily::Name("heavy".into()))
 }
-fn mono(s: f32) -> FontId {
+pub(crate) fn mono(s: f32) -> FontId {
     FontId::new(s, FontFamily::Monospace)
 }
-fn monob(s: f32) -> FontId {
+pub(crate) fn monob(s: f32) -> FontId {
     FontId::new(s, FontFamily::Name("monob".into()))
 }
 
@@ -260,7 +266,7 @@ fn button(ui: &mut Ui, r: Rect, text: &str, k: Kind, enabled: bool) -> egui::Res
     .inner
 }
 
-fn text(ui: &Ui, pos: Pos2, a: Align2, s: &str, f: FontId, c: Color32) -> Rect {
+pub(crate) fn text(ui: &Ui, pos: Pos2, a: Align2, s: &str, f: FontId, c: Color32) -> Rect {
     ui.painter().text(pos, a, s, f, c)
 }
 
@@ -580,6 +586,10 @@ pub struct App {
     stopping: bool,
     stopped: bool,
     fake_dir: bool,
+    /// The modem signal scope on every screen.
+    scope: ScopeView,
+    /// Connection sounds on (Settings, About).
+    sounds: bool,
 }
 
 impl App {
@@ -674,7 +684,10 @@ impl App {
             stopping: false,
             stopped: false,
             fake_dir: false,
+            scope: ScopeView::default(),
+            sounds: false,
         };
+        a.sounds = crate::modem_sim::load_sounds(&a.args.data);
         a.at(T_ATI, "ATI");
         a.refresh_settings();
         a
@@ -826,6 +839,12 @@ impl App {
                 self.banner(t, warn);
             }
             UiEvent::AtReply { .. } => {}
+            UiEvent::Scope {
+                t_ms,
+                step_ms,
+                samples,
+            } => self.scope.on_scope(t_ms, step_ms, &samples),
+            UiEvent::Air(a) => self.scope.on_air(a),
         }
     }
 
@@ -1140,7 +1159,9 @@ impl App {
         }
     }
 
-    fn footer(&mut self, ui: &mut Ui, r: Rect) {
+    /// The bottom band on every screen: the modem's state, the attribution
+    /// and the signal scope.
+    fn monitor(&mut self, ui: &mut Ui, r: Rect) {
         ui.painter().rect_filled(r, CornerRadius::ZERO, BG_FOOT);
         hline(ui, r.top() + 0.5, r.left(), r.right());
         let st = match self.s.call_state {
@@ -1152,24 +1173,49 @@ impl App {
             5 => "IN CALL",
             _ => "",
         };
-        let left = format!("MODEM {}  {}   {}", self.s.station, st, self.note);
+        let ty = r.top() + 15.0;
+        text(
+            ui,
+            Pos2::new(r.left() + 16.0, ty),
+            Align2::LEFT_CENTER,
+            "MODEM SIGNAL",
+            monob(11.5),
+            TEXT2,
+        );
+        let level = self
+            .scope
+            .level()
+            .map_or("NO SIGNAL DATA".to_string(), |d| format!("{d} DBM"));
+        let left = format!(
+            "{}  {}   {}   CONNECTION SOUNDS {}   {}",
+            self.s.station,
+            st,
+            level,
+            if self.sounds { "ON" } else { "OFF" },
+            self.note
+        );
         text_fit(
             ui,
-            Pos2::new(r.left() + 16.0, r.center().y),
+            Pos2::new(r.left() + 128.0, ty),
             Align2::LEFT_CENTER,
             &left,
             mono(11.5),
             MUTED,
-            820.0,
+            760.0,
         );
         text(
             ui,
-            Pos2::new(r.right() - 16.0, r.center().y),
+            Pos2::new(r.right() - 16.0, ty),
             Align2::RIGHT_CENTER,
             ATTRIBUTION,
             mono(11.5),
             DIM,
         );
+        let plot = Rect::from_min_max(
+            Pos2::new(r.left() + 16.0, r.top() + 30.0),
+            Pos2::new(r.right() - 16.0, r.bottom() - 10.0),
+        );
+        self.scope.draw(ui, plot);
     }
 
     // ---- CALLS.
@@ -1193,8 +1239,8 @@ impl App {
             Pos2::new(r.left() + 20.0, r.top() + 16.0),
             "PEOPLE AND STATIONS NEARBY",
         );
-        let rows = 7usize;
-        let row_h = 46.0;
+        let rows = 6usize;
+        let row_h = 44.0;
         let pages = self.dir.len().div_ceil(rows).max(1);
         self.calls_page = self.calls_page.min(pages - 1);
         let top = r.top() + 40.0;
@@ -1232,7 +1278,7 @@ impl App {
             }
             text_fit(
                 ui,
-                Pos2::new(rr.left() + 18.0, y + 13.0),
+                Pos2::new(rr.left() + 18.0, y + 12.0),
                 Align2::LEFT_CENTER,
                 &who,
                 heavy(16.0),
@@ -1258,7 +1304,7 @@ impl App {
             };
             text_fit(
                 ui,
-                Pos2::new(rr.left() + 18.0, y + 33.0),
+                Pos2::new(rr.left() + 18.0, y + 31.0),
                 Align2::LEFT_CENTER,
                 &sub,
                 mono(11.0),
@@ -1293,7 +1339,7 @@ impl App {
                 if d.pinned {
                     text(
                         ui,
-                        Pos2::new(rr.left() + 400.0, y + 36.0),
+                        Pos2::new(rr.left() + 400.0, y + 34.0),
                         Align2::LEFT_CENTER,
                         "PIN",
                         mono(10.0),
@@ -1351,14 +1397,14 @@ impl App {
             self.calls_page += 1;
         }
         // Call by name.
-        let cy = py + 50.0;
+        let cy = py + 46.0;
         hline(ui, cy - 6.0, r.left() + 1.0, r.right() - 1.0);
         kicker(
             ui,
             Pos2::new(r.left() + 20.0, cy + 4.0),
             "CALL BY NAME (ANY DEVICE, OR NAME / LABEL FOR ONE)",
         );
-        let fy = cy + 26.0;
+        let fy = cy + 24.0;
         field(
             ui,
             rect(r.left() + 20.0, fy, 230.0, 40.0),
@@ -1559,8 +1605,8 @@ impl App {
             w,
         );
         // The two words.
-        let wy = r.top() + 150.0;
-        let wr = rect(x, wy, w, 124.0);
+        let wy = r.top() + 144.0;
+        let wr = rect(x, wy, w, 108.0);
         ui.painter().rect_filled(wr, CornerRadius::ZERO, SURFACE2);
         ui.painter().rect_stroke(
             wr,
@@ -1611,7 +1657,7 @@ impl App {
                 };
                 text(
                     ui,
-                    Pos2::new(x + 18.0, wy + 92.0),
+                    Pos2::new(x + 18.0, wy + 82.0),
                     Align2::LEFT_TOP,
                     note,
                     sans(13.5),
@@ -1621,7 +1667,7 @@ impl App {
                     let bw = 170.0;
                     if button(
                         ui,
-                        rect(wr.right() - 18.0 - bw, wy + 18.0, bw, 40.0),
+                        rect(wr.right() - 18.0 - bw, wy + 12.0, bw, 40.0),
                         "WORDS MATCH",
                         Kind::Primary,
                         true,
@@ -1632,7 +1678,7 @@ impl App {
                     }
                     if button(
                         ui,
-                        rect(wr.right() - 18.0 - bw, wy + 66.0, bw, 40.0),
+                        rect(wr.right() - 18.0 - bw, wy + 58.0, bw, 40.0),
                         "TALK ANYWAY",
                         Kind::Warn,
                         true,
@@ -1647,7 +1693,7 @@ impl App {
                 kicker(ui, Pos2::new(x + 18.0, wy + 14.0), "FLOWTRON SCRAMBLER");
                 text_wrap(
                     ui,
-                    rect(x + 18.0, wy + 38.0, w - 36.0, 80.0),
+                    rect(x + 18.0, wy + 36.0, w - 36.0, 66.0),
                     "Every call is encrypted end to end. Two words appear here once the scrambler is up: read them to each other. Matching words mean nobody is in the middle.",
                     sans(14.0),
                     TEXT3,
@@ -1655,8 +1701,8 @@ impl App {
             }
         }
         // The big buttons.
-        let by = wy + 140.0;
-        let bh = 76.0;
+        let by = wy + 120.0;
+        let bh = 62.0;
         if self.s.in_call {
             let mute_w = 150.0;
             if button(
@@ -1708,7 +1754,7 @@ impl App {
                 Floor::Free if self.talk_sent => ("WAITING FOR THE FLOOR", Kind::Plain),
                 Floor::Free => ("HOLD TO TALK  (OR SPACE)", Kind::Primary),
             };
-            let resp = button(ui, rect(x, ty, w, 96.0), label, k, true);
+            let resp = button(ui, rect(x, ty, w, 84.0), label, k, true);
             let resp = resp.interact(Sense::drag());
             held = resp.is_pointer_button_down_on();
         } else if self.s.in_call
@@ -1724,12 +1770,6 @@ impl App {
             );
         }
         self.talk_level(ui.ctx(), held);
-        // Room kept free for the radio monitor (signal trace and sounds),
-        // a later task: nothing is drawn there yet.
-        let _monitor = Rect::from_min_max(
-            Pos2::new(x, ty + 110.0),
-            Pos2::new(x + w, r.bottom() - 20.0),
-        );
     }
 
     // ---- DIRECTORY.
@@ -1760,7 +1800,7 @@ impl App {
                 DIM,
             );
         }
-        let rows = 8usize;
+        let rows = 6usize;
         let row_h = 44.0;
         let top = left.top() + 64.0;
         let pages = self.dir.len().div_ceil(rows).max(1);
@@ -1985,15 +2025,15 @@ impl App {
                 MUTED,
             );
         }
-        // Scan answers, 5 to a page.
-        let per = 5usize;
+        // Scan answers, 3 to a page.
+        let per = 3usize;
         let pages = self.m.scan.len().div_ceil(per).max(1);
         self.scan_page = self.scan_page.min(pages - 1);
         if pages > 1 {
             let label = format!("{} OF {}", self.scan_page + 1, pages);
             text(
                 ui,
-                Pos2::new(x, right.top() + 236.0),
+                Pos2::new(x, right.top() + 196.0),
                 Align2::LEFT_CENTER,
                 &label,
                 mono(11.0),
@@ -2001,7 +2041,7 @@ impl App {
             );
             if button(
                 ui,
-                rect(right.right() - 196.0, right.top() + 222.0, 84.0, 28.0),
+                rect(right.right() - 196.0, right.top() + 182.0, 84.0, 28.0),
                 "PREV",
                 Kind::Plain,
                 self.scan_page > 0,
@@ -2012,7 +2052,7 @@ impl App {
             }
             if button(
                 ui,
-                rect(right.right() - 104.0, right.top() + 222.0, 84.0, 28.0),
+                rect(right.right() - 104.0, right.top() + 182.0, 84.0, 28.0),
                 "NEXT",
                 Kind::Plain,
                 self.scan_page + 1 < pages,
@@ -2050,12 +2090,12 @@ impl App {
                 DIM,
             );
         }
-        let py = right.top() + 260.0;
+        let py = right.top() + 218.0;
         hline(ui, py, right.left() + 1.0, right.right() - 1.0);
         kicker(ui, Pos2::new(x, py + 14.0), "PIN A NAME NOT HEARD YET");
         field(
             ui,
-            rect(x, py + 38.0, w, 40.0),
+            rect(x, py + 34.0, w, 40.0),
             &mut self.pin_name,
             "pin_name",
             false,
@@ -2065,7 +2105,7 @@ impl App {
         let half = (w - 8.0) / 2.0;
         if button(
             ui,
-            rect(x, py + 86.0, half, 34.0),
+            rect(x, py + 80.0, half, 32.0),
             "VOICE NAME",
             if self.pin_voice {
                 Kind::On
@@ -2080,7 +2120,7 @@ impl App {
         }
         if button(
             ui,
-            rect(x + half + 8.0, py + 86.0, half, 34.0),
+            rect(x + half + 8.0, py + 80.0, half, 32.0),
             "STATION",
             if self.pin_voice {
                 Kind::Plain
@@ -2096,7 +2136,7 @@ impl App {
         let n = self.pin_name.trim().to_string();
         if button(
             ui,
-            rect(x, py + 128.0, w, 40.0),
+            rect(x, py + 120.0, w, 36.0),
             "PIN",
             Kind::Primary,
             !n.is_empty(),
@@ -2113,7 +2153,7 @@ impl App {
         }
         if button(
             ui,
-            rect(x, right.bottom() - 54.0, w, 38.0),
+            rect(x, right.bottom() - 40.0, w, 34.0),
             "CLEAR UNPINNED (AT+DIR=0)",
             Kind::Plain,
             true,
@@ -2137,9 +2177,9 @@ impl App {
         for (i, (t, name)) in TABS.iter().enumerate() {
             let b = rect(
                 nav.left() + 12.0,
-                nav.top() + 40.0 + i as f32 * 48.0,
+                nav.top() + 40.0 + i as f32 * 44.0,
                 nav.width() - 24.0,
-                40.0,
+                38.0,
             );
             if button(
                 ui,
@@ -2159,14 +2199,14 @@ impl App {
         }
         text_wrap(
             ui,
-            rect(nav.left() + 18.0, nav.bottom() - 120.0, nav.width() - 36.0, 110.0),
+            rect(nav.left() + 18.0, nav.bottom() - 104.0, nav.width() - 36.0, 96.0),
             "Every change is one AT line, the same the AT+MENU sends, and is live at once. SAVE (the bar on top) keeps it after a restart.",
             sans(12.5),
             DIM,
         );
         let body = Rect::from_min_max(Pos2::new(nav.right() + 20.0, r.top()), r.max);
         panel(ui, body);
-        let inner = body.shrink2(Vec2::new(24.0, 18.0));
+        let inner = body.shrink2(Vec2::new(24.0, 14.0));
         match self.tab {
             Tab::Radio => self.tab_radio(ui, inner),
             Tab::Privacy => self.tab_privacy(ui, inner),
@@ -2195,7 +2235,7 @@ impl App {
         let v = self.m.sreg(reg);
         text(
             ui,
-            Pos2::new(x, y + 4.0),
+            Pos2::new(x, y + 2.0),
             Align2::LEFT_TOP,
             title,
             heavy(15.0),
@@ -2203,7 +2243,7 @@ impl App {
         );
         text_fit(
             ui,
-            Pos2::new(x, y + 25.0),
+            Pos2::new(x, y + 21.0),
             Align2::LEFT_TOP,
             note,
             sans(12.5),
@@ -2214,7 +2254,7 @@ impl App {
         let vs = v.map_or("-".into(), show);
         text(
             ui,
-            Pos2::new(vx, y + 22.0),
+            Pos2::new(vx, y + 18.0),
             Align2::LEFT_CENTER,
             &vs,
             monob(15.0),
@@ -2231,17 +2271,17 @@ impl App {
             } else {
                 ("TURN OFF", 0)
             };
-            if button(ui, rect(bx, y + 4.0, 252.0, 36.0), label, Kind::Plain, true).clicked() {
+            if button(ui, rect(bx, y + 3.0, 252.0, 32.0), label, Kind::Plain, true).clicked() {
                 self.set(&format!("ATS{reg}={to}"));
             }
             return;
         }
-        if button(ui, rect(bx, y + 4.0, 44.0, 36.0), "-", Kind::Plain, true).clicked() {
+        if button(ui, rect(bx, y + 3.0, 44.0, 32.0), "-", Kind::Plain, true).clicked() {
             self.set(&format!("ATS{reg}={}", v - step));
         }
         if button(
             ui,
-            rect(bx + 52.0, y + 4.0, 44.0, 36.0),
+            rect(bx + 52.0, y + 3.0, 44.0, 32.0),
             "+",
             Kind::Plain,
             true,
@@ -2254,7 +2294,7 @@ impl App {
         let mut s = std::mem::take(&mut self.s_edit[idx]);
         let resp = field(
             ui,
-            rect(bx + 104.0, y + 4.0, 70.0, 36.0),
+            rect(bx + 104.0, y + 3.0, 70.0, 32.0),
             &mut s,
             &format!("sreg{reg}"),
             false,
@@ -2264,7 +2304,7 @@ impl App {
         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
         if button(
             ui,
-            rect(bx + 182.0, y + 4.0, 70.0, 36.0),
+            rect(bx + 182.0, y + 3.0, 70.0, 32.0),
             "SET",
             Kind::Plain,
             !s.trim().is_empty(),
@@ -2285,7 +2325,7 @@ impl App {
         let y0 = r.top() + 22.0;
         text(
             ui,
-            Pos2::new(x, y0 + 4.0),
+            Pos2::new(x, y0 + 2.0),
             Align2::LEFT_TOP,
             "Station name",
             heavy(15.0),
@@ -2293,7 +2333,7 @@ impl App {
         );
         text(
             ui,
-            Pos2::new(x, y0 + 25.0),
+            Pos2::new(x, y0 + 21.0),
             Align2::LEFT_TOP,
             "The modem's name on the air (AT+NAME). Empty: the firmware's name.",
             sans(12.5),
@@ -2302,7 +2342,7 @@ impl App {
         let mut n = std::mem::take(&mut self.st_name);
         field(
             ui,
-            rect(x + 490.0, y0 + 4.0, 220.0, 36.0),
+            rect(x + 490.0, y0 + 3.0, 220.0, 32.0),
             &mut n,
             "st_name",
             false,
@@ -2311,7 +2351,7 @@ impl App {
         );
         if button(
             ui,
-            rect(x + w - 120.0, y0 + 4.0, 120.0, 36.0),
+            rect(x + w - 120.0, y0 + 3.0, 120.0, 32.0),
             "SET NAME",
             Kind::Plain,
             !self.s.in_call,
@@ -2369,7 +2409,7 @@ impl App {
         ];
         let tx_line = self.m.line("TX POWER").unwrap_or("").to_string();
         for (i, (reg, title, note, step)) in rows.into_iter().enumerate() {
-            let y = y0 + 52.0 + i as f32 * 52.0;
+            let y = y0 + 46.0 + i as f32 * 40.0;
             hline(ui, y - 4.0, x, x + w);
             let v = self.m.sreg(reg);
             let warn = reg == 30 && v.is_some_and(|v| v > S30_SAFE);
@@ -2433,14 +2473,14 @@ impl App {
             ("HIDDEN", "Sends nothing but answers to pinned callers. Only pinned voice names can ring you."),
         ];
         for (i, (m, note)) in modes.iter().enumerate() {
-            let y = r.top() + 24.0 + i as f32 * 52.0;
+            let y = r.top() + 22.0 + i as f32 * 44.0;
             let k = if cur == *m { Kind::On } else { Kind::Plain };
-            if button(ui, rect(x, y, 150.0, 42.0), m, k, true).clicked() && cur != *m {
+            if button(ui, rect(x, y, 150.0, 38.0), m, k, true).clicked() && cur != *m {
                 self.set(&format!("AT+BEACON={m}"));
             }
             text_fit(
                 ui,
-                Pos2::new(x + 170.0, y + 21.0),
+                Pos2::new(x + 170.0, y + 19.0),
                 Align2::LEFT_CENTER,
                 note,
                 sans(14.0),
@@ -2448,7 +2488,7 @@ impl App {
                 w - 170.0,
             );
         }
-        let y = r.top() + 196.0;
+        let y = r.top() + 164.0;
         hline(ui, y, x, x + w);
         kicker(
             ui,
@@ -2477,14 +2517,14 @@ impl App {
                 .cloned()
                 .collect()
         };
-        let rows = 5usize;
+        let rows = 4usize;
         let pages = pins.len().div_ceil(rows).max(1);
         self.pins_page = self.pins_page.min(pages - 1);
         for i in 0..rows {
-            let ry = y + 38.0 + i as f32 * 42.0;
+            let ry = y + 36.0 + i as f32 * 40.0;
             if i % 2 == 1 {
                 ui.painter()
-                    .rect_filled(rect(x, ry, w * 0.6, 42.0), CornerRadius::ZERO, ZEBRA);
+                    .rect_filled(rect(x, ry, w * 0.6, 40.0), CornerRadius::ZERO, ZEBRA);
             }
             let Some(d) = pins.get(self.pins_page * rows + i) else {
                 continue;
@@ -2492,7 +2532,7 @@ impl App {
             let voice = !d.label.is_empty() || d.station != d.name;
             text(
                 ui,
-                Pos2::new(x + 12.0, ry + 21.0),
+                Pos2::new(x + 12.0, ry + 20.0),
                 Align2::LEFT_CENTER,
                 &d.name,
                 heavy(15.0),
@@ -2500,7 +2540,7 @@ impl App {
             );
             text(
                 ui,
-                Pos2::new(x + 240.0, ry + 21.0),
+                Pos2::new(x + 240.0, ry + 20.0),
                 Align2::LEFT_CENTER,
                 if voice { "VOICE NAME" } else { "STATION" },
                 mono(12.0),
@@ -2513,7 +2553,7 @@ impl App {
             };
             if button(
                 ui,
-                rect(x + w * 0.6 - 110.0, ry + 5.0, 100.0, 32.0),
+                rect(x + w * 0.6 - 110.0, ry + 4.0, 100.0, 32.0),
                 if voice { "UNPIN" } else { "DELETE" },
                 Kind::Plain,
                 true,
@@ -2526,14 +2566,14 @@ impl App {
         if pins.is_empty() {
             text(
                 ui,
-                Pos2::new(x + 12.0, y + 58.0),
+                Pos2::new(x + 12.0, y + 56.0),
                 Align2::LEFT_CENTER,
                 "Nothing pinned.",
                 sans(14.0),
                 DIM,
             );
         }
-        let py = y + 38.0 + rows as f32 * 42.0 + 8.0;
+        let py = y + 36.0 + rows as f32 * 40.0 + 6.0;
         if button(
             ui,
             rect(x, py, 88.0, 32.0),
@@ -2624,10 +2664,10 @@ impl App {
         let (x, w) = (r.left(), r.width());
         let (ap_on, ap_ssid, sta) = self.m.wifi_ap();
         kicker(ui, Pos2::new(x, r.top()), "HOTSPOT (AT+WAP)");
-        let y = r.top() + 24.0;
+        let y = r.top() + 22.0;
         text(
             ui,
-            Pos2::new(x, y + 20.0),
+            Pos2::new(x, y + 18.0),
             Align2::LEFT_CENTER,
             &format!("{}   {}", if ap_on { "ON" } else { "OFF" }, ap_ssid),
             monob(16.0),
@@ -2635,7 +2675,7 @@ impl App {
         );
         if button(
             ui,
-            rect(x + w - 180.0, y, 180.0, 40.0),
+            rect(x + w - 180.0, y, 180.0, 36.0),
             if ap_on { "TURN OFF" } else { "TURN ON" },
             Kind::Plain,
             true,
@@ -2644,7 +2684,7 @@ impl App {
         {
             self.set(if ap_on { "AT+WAP=0" } else { "AT+WAP=1" });
         }
-        let y = y + 56.0;
+        let y = y + 46.0;
         text(
             ui,
             Pos2::new(x, y - 2.0),
@@ -2658,7 +2698,7 @@ impl App {
         }
         field(
             ui,
-            rect(x, y + 20.0, 300.0, 40.0),
+            rect(x, y + 16.0, 300.0, 36.0),
             &mut self.ap_ssid,
             "ap_ssid",
             false,
@@ -2668,7 +2708,7 @@ impl App {
         let mut pw = std::mem::take(&mut self.ap_pass);
         field(
             ui,
-            rect(x + 312.0, y + 20.0, 300.0, 40.0),
+            rect(x + 312.0, y + 16.0, 300.0, 36.0),
             &mut pw,
             "ap_pass",
             true,
@@ -2678,7 +2718,7 @@ impl App {
         let ok = valid_ssid(&self.ap_ssid) && valid_pass(&pw);
         if button(
             ui,
-            rect(x + w - 180.0, y + 20.0, 180.0, 40.0),
+            rect(x + w - 180.0, y + 16.0, 180.0, 36.0),
             "SET HOTSPOT",
             Kind::Plain,
             ok,
@@ -2695,19 +2735,19 @@ impl App {
         self.ap_pass = pw;
         text(
             ui,
-            Pos2::new(x, y + 70.0),
+            Pos2::new(x, y + 58.0),
             Align2::LEFT_TOP,
             &self.m.wap.clone(),
             mono(12.0),
             TEXT2,
         );
 
-        let y = y + 108.0;
+        let y = y + 84.0;
         hline(ui, y, x, x + w);
-        kicker(ui, Pos2::new(x, y + 14.0), "CLIENT NETWORK (AT+WSTA)");
+        kicker(ui, Pos2::new(x, y + 12.0), "CLIENT NETWORK (AT+WSTA)");
         text(
             ui,
-            Pos2::new(x, y + 40.0),
+            Pos2::new(x, y + 32.0),
             Align2::LEFT_TOP,
             &format!(
                 "NOW: {}",
@@ -2722,7 +2762,7 @@ impl App {
         );
         field(
             ui,
-            rect(x, y + 66.0, 300.0, 40.0),
+            rect(x, y + 52.0, 300.0, 36.0),
             &mut self.sta_ssid,
             "sta_ssid",
             false,
@@ -2732,7 +2772,7 @@ impl App {
         let mut pw = std::mem::take(&mut self.sta_pass);
         field(
             ui,
-            rect(x + 312.0, y + 66.0, 300.0, 40.0),
+            rect(x + 312.0, y + 52.0, 300.0, 36.0),
             &mut pw,
             "sta_pass",
             true,
@@ -2742,7 +2782,7 @@ impl App {
         let ok = valid_ssid(&self.sta_ssid) && valid_pass(&pw);
         if button(
             ui,
-            rect(x + w - 180.0, y + 66.0, 180.0, 40.0),
+            rect(x + w - 180.0, y + 52.0, 180.0, 36.0),
             "JOIN",
             Kind::Plain,
             ok,
@@ -2760,7 +2800,7 @@ impl App {
         let has_sta = !(sta.is_empty() || sta == "OFF");
         if button(
             ui,
-            rect(x + w - 180.0, y + 114.0, 180.0, 36.0),
+            rect(x + w - 180.0, y + 94.0, 180.0, 32.0),
             "FORGET",
             Kind::Plain,
             has_sta,
@@ -2771,18 +2811,18 @@ impl App {
         }
         text(
             ui,
-            Pos2::new(x, y + 122.0),
+            Pos2::new(x, y + 98.0),
             Align2::LEFT_TOP,
             &self.m.wsta.clone(),
             mono(12.0),
             TEXT2,
         );
 
-        let y = y + 170.0;
+        let y = y + 136.0;
         hline(ui, y, x, x + w);
         kicker(
             ui,
-            Pos2::new(x, y + 14.0),
+            Pos2::new(x, y + 12.0),
             "LIVE STATUS (AT+WIFI?, EVERY 2 S)",
         );
         let live = if self.m.wifi.is_empty() {
@@ -2792,7 +2832,7 @@ impl App {
         };
         text_fit(
             ui,
-            Pos2::new(x, y + 40.0),
+            Pos2::new(x, y + 32.0),
             Align2::LEFT_TOP,
             &live,
             mono(14.0),
@@ -2801,7 +2841,7 @@ impl App {
         );
         text_wrap(
             ui,
-            rect(x, y + 70.0, w, 40.0),
+            rect(x, y + 56.0, w, 40.0),
             "THE BUILT-IN SIMULATED MODEM HAS NO WI-FI: these settings do nothing in this app, and no Wi-Fi password is kept on this PC. Names 1 to 32 printable characters, passwords 8 to 63, no comma.",
             sans(12.5),
             DIM,
@@ -2839,7 +2879,7 @@ impl App {
                 DIM,
             );
         }
-        let row_h = 38.0;
+        let row_h = 32.0;
         for i in 0..8usize {
             let y = r.top() + 40.0 + i as f32 * row_h;
             if i % 2 == 1 {
@@ -2903,7 +2943,7 @@ impl App {
             let bx = x + w - 3.0 * 96.0;
             if button(
                 ui,
-                rect(bx, y + 4.0, 88.0, row_h - 8.0),
+                rect(bx, y + 3.0, 88.0, row_h - 6.0),
                 "EDIT",
                 Kind::Plain,
                 true,
@@ -2917,7 +2957,7 @@ impl App {
             }
             if button(
                 ui,
-                rect(bx + 96.0, y + 4.0, 88.0, row_h - 8.0),
+                rect(bx + 96.0, y + 3.0, 88.0, row_h - 6.0),
                 if pubd { "PUBLISHED" } else { "PUBLISH" },
                 if pubd { Kind::On } else { Kind::Plain },
                 true,
@@ -2933,7 +2973,7 @@ impl App {
             }
             if button(
                 ui,
-                rect(bx + 192.0, y + 4.0, 88.0, row_h - 8.0),
+                rect(bx + 192.0, y + 3.0, 88.0, row_h - 6.0),
                 "DELETE",
                 Kind::Plain,
                 true,
@@ -2953,7 +2993,7 @@ impl App {
         let fy = y + 28.0;
         field(
             ui,
-            rect(x, fy, 190.0, 40.0),
+            rect(x, fy, 190.0, 36.0),
             &mut self.fwd_name,
             "fwd_name",
             false,
@@ -2962,7 +3002,7 @@ impl App {
         );
         field(
             ui,
-            rect(x + 198.0, fy, 300.0, 40.0),
+            rect(x + 198.0, fy, 300.0, 36.0),
             &mut self.fwd_host,
             "fwd_host",
             false,
@@ -2971,7 +3011,7 @@ impl App {
         );
         field(
             ui,
-            rect(x + 506.0, fy, 90.0, 40.0),
+            rect(x + 506.0, fy, 90.0, 36.0),
             &mut self.fwd_port,
             "fwd_port",
             false,
@@ -2980,7 +3020,7 @@ impl App {
         );
         if button(
             ui,
-            rect(x + 604.0, fy, 90.0, 40.0),
+            rect(x + 604.0, fy, 90.0, 36.0),
             "TELNET",
             if self.fwd_mode_t {
                 Kind::On
@@ -2995,7 +3035,7 @@ impl App {
         }
         if button(
             ui,
-            rect(x + 700.0, fy, 70.0, 40.0),
+            rect(x + 700.0, fy, 70.0, 36.0),
             "RAW",
             if self.fwd_mode_t {
                 Kind::Plain
@@ -3018,7 +3058,7 @@ impl App {
             && !full;
         if button(
             ui,
-            rect(x + w - 150.0, fy, 150.0, 40.0),
+            rect(x + w - 150.0, fy, 150.0, 36.0),
             "SAVE FORWARD",
             Kind::Primary,
             ok,
@@ -3051,7 +3091,7 @@ impl App {
         };
         text(
             ui,
-            Pos2::new(x, fy + 50.0),
+            Pos2::new(x, fy + 44.0),
             Align2::LEFT_TOP,
             &msg,
             sans(12.5),
@@ -3236,10 +3276,10 @@ impl App {
                 rows.push((c.name.clone(), "(person key)".into(), [0; 32], true, mine));
             }
         }
-        let per = 6usize;
+        let per = 5usize;
         let pages = rows.len().div_ceil(per).max(1);
         self.contacts_page = self.contacts_page.min(pages - 1);
-        let rh = 40.0;
+        let rh = 36.0;
         for i in 0..per {
             let ry = y + 34.0 + i as f32 * rh;
             if i % 2 == 1 {
@@ -3301,7 +3341,7 @@ impl App {
                 DIM,
             );
         }
-        let py = y + 34.0 + per as f32 * rh + 8.0;
+        let py = y + 34.0 + per as f32 * rh + 6.0;
         if button(
             ui,
             rect(x, py, 88.0, 32.0),
@@ -3339,7 +3379,7 @@ impl App {
     fn tab_about(&mut self, ui: &mut Ui, r: Rect) {
         let (x, w) = (r.left(), r.width());
         if let Some(t) = &self.logo {
-            let lr = rect(x, r.top(), 150.0, 150.0);
+            let lr = rect(x, r.top(), 100.0, 100.0);
             ui.painter().image(
                 t.id(),
                 lr,
@@ -3347,12 +3387,12 @@ impl App {
                 Color32::WHITE,
             );
         }
-        let tx = x + 172.0;
-        let tw = w - 172.0;
+        let tx = x + 120.0;
+        let tw = w - 120.0;
         kicker(ui, Pos2::new(tx, r.top()), "ABOUT");
         text_fit(
             ui,
-            Pos2::new(tx, r.top() + 18.0),
+            Pos2::new(tx, r.top() + 14.0),
             Align2::LEFT_TOP,
             PRODUCT,
             heavy(22.0),
@@ -3361,7 +3401,7 @@ impl App {
         );
         text_fit(
             ui,
-            Pos2::new(tx, r.top() + 50.0),
+            Pos2::new(tx, r.top() + 42.0),
             Align2::LEFT_TOP,
             TAGLINE_1,
             heavy(18.0),
@@ -3370,16 +3410,16 @@ impl App {
         );
         text_fit(
             ui,
-            Pos2::new(tx, r.top() + 74.0),
+            Pos2::new(tx, r.top() + 64.0),
             Align2::LEFT_TOP,
             TAGLINE_2,
             sans(16.0),
             TEXT2,
             tw,
         );
-        text(
+        let rev = text(
             ui,
-            Pos2::new(tx, r.top() + 104.0),
+            Pos2::new(tx, r.top() + 86.0),
             Align2::LEFT_TOP,
             "Rev. J. Money",
             heavy(16.0),
@@ -3387,47 +3427,80 @@ impl App {
         );
         text(
             ui,
-            Pos2::new(tx, r.top() + 126.0),
-            Align2::LEFT_TOP,
+            Pos2::new(rev.right() + 16.0, rev.center().y),
+            Align2::LEFT_CENTER,
             ATTRIBUTION,
             mono(12.5),
             TEXT2,
         );
-        let y = r.top() + 166.0;
+        let y = r.top() + 112.0;
         hline(ui, y, x, x + w);
         let col = (w - 24.0) / 2.0;
-        kicker(ui, Pos2::new(x, y + 12.0), "ATI");
+        kicker(ui, Pos2::new(x, y + 10.0), "ATI");
         text_wrap(
             ui,
-            rect(x, y + 32.0, col, 80.0),
+            rect(x, y + 28.0, col, 50.0),
             &self.m.ati.clone(),
             mono(12.0),
             TEXT2,
         );
-        kicker(ui, Pos2::new(x, y + 118.0), "THIS APP");
+        kicker(ui, Pos2::new(x, y + 80.0), "THIS APP");
         let app = format!(
             "lfd3k-voice-pc {}, GPL-3.0-or-later (LICENSE, NOTICE.md, THIRD_PARTY.md)\nSound: {}\nData: {}\nFonts: Archivo and IBM Plex Mono (SIL Open Font License 1.1)",
             env!("CARGO_PKG_VERSION"),
             if self.audio.note.is_empty() { "none (WAV test helpers)" } else { &self.audio.note },
             self.args.data.display()
         );
-        text_wrap(ui, rect(x, y + 138.0, col, 120.0), &app, mono(11.5), TEXT2);
+        text_wrap(ui, rect(x, y + 98.0, col, 106.0), &app, mono(11.5), TEXT2);
+        // Connection sounds: live chirps from the modem's frames while a
+        // call is set up (and at NO CARRIER).
+        let on = self.sounds;
+        if button(
+            ui,
+            rect(x, y + 208.0, 250.0, 30.0),
+            if on {
+                "CONNECTION SOUNDS ON"
+            } else {
+                "CONNECTION SOUNDS OFF"
+            },
+            if on { Kind::On } else { Kind::Plain },
+            true,
+        )
+        .clicked()
+        {
+            self.set_sounds(!on);
+        }
+        text_fit(
+            ui,
+            Pos2::new(x + 262.0, y + 223.0),
+            Align2::LEFT_CENTER,
+            "Chirps while a call is set up",
+            sans(12.5),
+            MUTED,
+            col - 262.0,
+        );
         text_wrap(
             ui,
-            rect(x, y + 268.0, col, 70.0),
+            rect(x, y + 246.0, col, 40.0),
             "No ham mode yet, so the FLOWTRON SCRAMBLER is always on. Use a headset for CALL mode: there is no echo canceller in this version.",
             sans(12.5),
             MUTED,
         );
         let ax = x + col + 24.0;
-        kicker(ui, Pos2::new(ax, y + 12.0), "AT&V");
+        kicker(ui, Pos2::new(ax, y + 10.0), "AT&V");
         text_wrap(
             ui,
-            rect(ax, y + 32.0, col, r.bottom() - y - 36.0),
+            rect(ax, y + 28.0, col, r.bottom() - y - 30.0),
             &self.m.atv.clone(),
             mono(11.5),
             TEXT2,
         );
+    }
+
+    /// Connection sounds on or off (the modem thread saves it).
+    fn set_sounds(&mut self, on: bool) {
+        self.sounds = on;
+        self.cmd(Cmd::Sounds(on));
     }
 
     // ---- The script (test helper).
@@ -3442,7 +3515,8 @@ impl App {
     // `mute on|off`; `set <AT line>` (a settings change); `at <AT line>`;
     // `save`; `discard`; `scan`; `dir`; `link_offer`; `fill <field>
     // <text>`; `fake ringing|conflict|answered_elsewhere|declined|link_code|
-    // full_dir|real_dir` (screen states only, nothing is sent); `print`
+    // full_dir|real_dir` (screen states only, nothing is sent); `sounds
+    // on|off` (connection sounds); `print`
     // (state to stdout); `size <w> <h>` (window size in points);
     // `link_code_file <path>` / `link_join_file <path>` (hand a link code to
     // another copy's script; conditions link_code, linked, not_linking);
@@ -3604,6 +3678,7 @@ impl App {
                 }
             }
             "fake" => self.fake(&rest),
+            "sounds" => self.set_sounds(rest == "on"),
             "print" => self.print_state(),
             "size" => {
                 let (w, h) = rest.split_once(' ').unwrap_or(("1280", "720"));
@@ -3677,8 +3752,10 @@ impl App {
             self.unsaved()
         );
         println!(
-            "[state] ring tone {:.1} s, linking {}, link code shown {}",
+            "[state] ring tone {:.1} s, connection sounds {} ({:.1} s made), linking {}, link code shown {}",
             self.s.ring_s,
+            if self.sounds { "on" } else { "off" },
+            self.s.chirp_s,
             self.s.linking,
             self.link_code.is_some()
         );
@@ -3841,11 +3918,11 @@ impl eframe::App for App {
         }
         self.banner_row(ui, rect(full.left(), y, full.width(), 38.0));
         y += 38.0;
-        let foot = rect(full.left(), full.bottom() - 28.0, full.width(), 28.0);
-        self.footer(ui, foot);
+        let mon = rect(full.left(), full.bottom() - MON_H, full.width(), MON_H);
+        self.monitor(ui, mon);
         let content = Rect::from_min_max(
             Pos2::new(full.left() + 20.0, y),
-            Pos2::new(full.right() - 20.0, foot.top() - 14.0),
+            Pos2::new(full.right() - 20.0, mon.top() - 12.0),
         );
         match self.screen {
             Screen::Calls => self.calls(ui, content),
@@ -3859,7 +3936,7 @@ impl eframe::App for App {
             }
         }
         self.run_script(&ctx);
-        // Live numbers: redraw a few times a second.
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // Live numbers and the moving scope: redraw 20 times a second.
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 }

@@ -7,6 +7,18 @@
 //! The thread runs every millisecond. The window talks to it with [`Cmd`]
 //! and hears back through [`Ev`] plus a shared [`Snap`].
 //!
+//! The modem monitor: every 50 ms the thread gives the modem one channel
+//! sample from the simulated radio (`SimNetRadio::rx_rssi`, the RSSI of a
+//! frame being received or the -110 dBm floor, and 0 dBm flagged as
+//! transmit while sending, as the firmware's trace does), so the modem's
+//! Scope frames reach the engine like a real modem's would. AirEvents from
+//! the engine start the connection sounds ([`crate::monitor::Chirps`]) only
+//! while a call is set up (dialing, ringing, training, a retrain or a
+//! resync) and for 2 s after a call or attempt ends (NO CARRIER); never
+//! while a call is up or idle. They are mixed into the speaker here, not in
+//! the sound card's callback. The ON/OFF choice is kept in
+//! `app-prefs.txt` in the data folder (default ON).
+//!
 //! The modem's saved settings (AT&W) and its directory are kept in the data
 //! folder (`modem-settings.bin`, `modem-dir.bin`) as the firmware keeps
 //! them in NVS, and loaded at the next start. This modem has no Wi-Fi, so
@@ -28,6 +40,7 @@ use lfd3k_voice::{CallStats, ContactView, Engine, Identity, Trust, TrustStore, U
 use zeroize::Zeroizing;
 
 use crate::audio::{self, Queue};
+use crate::monitor::Chirps;
 
 /// The voice host protocol session the app uses (1 to 3 are the platform's).
 const SESSION: u8 = 1;
@@ -41,6 +54,15 @@ const AT_TIMEOUT_MS: u32 = 20_000;
 const RING_HOLD_MS: u32 = 7_000;
 /// Auto-answer push to talk: listen this long between two plays of the WAV.
 const AUTO_LISTEN_MS: u32 = 8_000;
+/// One channel sample for the modem's scope this often.
+const SCOPE_MS: u32 = 50;
+/// Connection sounds go on this long after a call or attempt ends (the
+/// Hangup frames: NO CARRIER) and after a retrain frame while connected.
+const SOUND_AFTER_MS: u32 = 2_000;
+/// Frame types of a retrain (TierSet, TierAck).
+const RETRAIN_TYPES: [u8; 2] = [8, 9];
+/// CallState `state` while the link resyncs.
+const STATE_RESYNC: u8 = 5;
 
 /// What the window asks of the modem thread.
 pub enum Cmd {
@@ -73,6 +95,8 @@ pub enum Cmd {
         name: String,
         label: String,
     },
+    /// Connection sounds on or off (saved in `app-prefs.txt`).
+    Sounds(bool),
     Quit,
 }
 
@@ -125,6 +149,8 @@ pub struct Snap {
     pub passes: u64,
     /// Seconds of ring tone made (test helpers print it).
     pub ring_s: f32,
+    /// Seconds of connection sound made (test helpers print it).
+    pub chirp_s: f32,
 }
 
 impl Default for Snap {
@@ -151,6 +177,7 @@ impl Default for Snap {
             max_gap_ms: 0,
             passes: 0,
             ring_s: 0.0,
+            chirp_s: 0.0,
         }
     }
 }
@@ -168,10 +195,32 @@ pub struct Opts {
     pub record: Option<PathBuf>,
     pub mic: Option<Queue>,
     pub spk: Option<Queue>,
+    /// Connection sounds on.
+    pub sounds: bool,
 }
 
 pub fn identity_path(data: &Path) -> PathBuf {
     data.join("identity.bin")
+}
+
+fn prefs_path(data: &Path) -> PathBuf {
+    data.join("app-prefs.txt")
+}
+
+/// Connection sounds on (the default) unless `app-prefs.txt` says
+/// `connection_sounds=off`.
+pub fn load_sounds(data: &Path) -> bool {
+    let t = std::fs::read_to_string(prefs_path(data)).unwrap_or_default();
+    !t.lines()
+        .any(|l| l.trim().eq_ignore_ascii_case("connection_sounds=off"))
+}
+
+fn save_sounds(data: &Path, on: bool) -> std::io::Result<()> {
+    let t = format!(
+        "connection_sounds={}\n",
+        if on { "on" } else { "off" }
+    );
+    write_file(&prefs_path(data), t.as_bytes())
 }
 
 fn removed_path(data: &Path) -> PathBuf {
@@ -257,6 +306,16 @@ struct Worker {
     ring_total: u64,
     max_gap: u32,
     passes: u64,
+    /// When the next scope sample is due.
+    scope_due: u32,
+    chirps: Chirps,
+    /// The modem's call state at the last pass, and connection sounds
+    /// allowed until this time whatever the state (after an end or a
+    /// retrain frame).
+    last_state: u8,
+    sound_until: Option<u32>,
+    /// Seconds of connection sound made (test helpers print it).
+    chirp_total: u64,
 }
 
 /// Run the modem thread until `Cmd::Quit`.
@@ -337,6 +396,11 @@ pub fn spawn(
                 ring_total: 0,
                 max_gap: 0,
                 passes: 0,
+                scope_due: now,
+                chirps: Chirps::default(),
+                last_state: 0,
+                sound_until: None,
+                chirp_total: 0,
                 o,
             };
             w.run(cmd);
@@ -367,6 +431,7 @@ impl Worker {
                 self.modem
                     .radio_rx(frame.get(..n).unwrap_or(&[]), info, &mut self.radio, now);
             }
+            self.scope_sample(now);
             if quit_at.is_none() {
                 while let Ok(c) = cmd.try_recv() {
                     if matches!(c, Cmd::Quit) {
@@ -398,6 +463,34 @@ impl Worker {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Every 50 ms: the simulated channel's RSSI (0 dBm and flagged while
+    /// we transmit) into the modem's scope.
+    fn scope_sample(&mut self, now: u32) {
+        if now.wrapping_sub(self.scope_due) >= u32::MAX / 2 {
+            return;
+        }
+        // Keep the 50 ms cadence; start again after a long stall.
+        self.scope_due = self.scope_due.wrapping_add(SCOPE_MS);
+        if now.wrapping_sub(self.scope_due) < u32::MAX / 2 {
+            self.scope_due = now.wrapping_add(SCOPE_MS);
+        }
+        let tx = self.radio.transmitting();
+        let rssi = if tx { 0 } else { self.radio.rx_rssi() };
+        self.modem.scope_sample(rssi, tx, now);
+    }
+
+    /// Connection sounds may play now: on, and a call being set up (the
+    /// modem dialing, ringing or training, the link resyncing) or just
+    /// ended or retrained.
+    fn sounding(&self, now: u32) -> bool {
+        self.o.sounds
+            && (matches!(self.modem.call_state(), 1..=3)
+                || self.engine.in_call() && self.engine.stats().state == STATE_RESYNC
+                || self
+                    .sound_until
+                    .is_some_and(|t| t.wrapping_sub(now) < u32::MAX / 2))
     }
 
     /// Engine bytes to the modem's session, the modem's back to the engine.
@@ -500,6 +593,15 @@ impl Worker {
             }
             Cmd::RemoveContactDevice(n, d) => e.remove_contact_device(&n, d),
             Cmd::Rename { name, label } => self.rename(&name, &label, now),
+            Cmd::Sounds(on) => {
+                self.o.sounds = on;
+                if !on {
+                    self.chirps.stop();
+                }
+                if let Err(err) = save_sounds(&self.o.data, on) {
+                    self.send(Ev::Note(format!("could not save the preferences: {err}")));
+                }
+            }
             Cmd::Quit => {}
         }
     }
@@ -543,8 +645,34 @@ impl Worker {
     }
 
     fn events(&mut self, now: u32) {
+        // A call or attempt that just ended: its Hangup frames sound (NO
+        // CARRIER). One that just connected: the setup sounds stop.
+        let st = self.modem.call_state();
+        if self.last_state != 0 && st == 0 {
+            self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
+        }
+        self.last_state = st;
+        if self
+            .sound_until
+            .is_some_and(|t| now.wrapping_sub(t) < u32::MAX / 2)
+        {
+            self.sound_until = None;
+        }
+        if !self.sounding(now) {
+            self.chirps.stop();
+        }
         while let Some(ev) = self.engine.poll_event() {
             match ev {
+                UiEvent::Air(a) => {
+                    // A retrain while connected sounds too.
+                    if st >= 4 && RETRAIN_TYPES.contains(&a.ftype) {
+                        self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
+                    }
+                    if self.sounding(now) {
+                        self.chirps.start(&a);
+                    }
+                    self.send(Ev::Ui(UiEvent::Air(a)));
+                }
                 UiEvent::AtReply { text, last } => {
                     if let Some((_, acc, _)) = self.at.cur.as_mut() {
                         acc.push_str(&text);
@@ -696,6 +824,10 @@ impl Worker {
             } else {
                 self.ring_pos = 0;
             }
+            if self.chirps.playing() {
+                self.chirps.mix(&mut out);
+                self.chirp_total += CHUNK as u64;
+            }
             if self.o.record.is_some() && in_call {
                 self.rec.extend_from_slice(&out);
             }
@@ -776,6 +908,7 @@ impl Worker {
             max_gap_ms: self.max_gap,
             passes: self.passes,
             ring_s: self.ring_total as f32 / 16_000.0,
+            chirp_s: self.chirp_total as f32 / 16_000.0,
         };
         if let Ok(mut g) = self.snap.lock() {
             *g = s;

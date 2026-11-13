@@ -141,6 +141,38 @@ pub enum UiEvent {
     Error(String),
     /// AtLine output; `last` on the final piece (with the result code).
     AtReply { text: String, last: bool },
+    /// Channel samples from the modem (Scope), oldest first: dBm and
+    /// "taken while transmitting". The last was taken at `t_ms` (the
+    /// modem's clock), each `step_ms` after the one before.
+    Scope {
+        t_ms: u32,
+        step_ms: u8,
+        samples: Vec<(i8, bool)>,
+    },
+    /// A frame the modem sent or heard (AirEvent).
+    Air(AirFrame),
+}
+
+/// One frame on the air, from an AirEvent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AirFrame {
+    /// Heard (true) or sent (false).
+    pub rx: bool,
+    /// Spreading factor (5 to 12).
+    pub sf: u8,
+    /// Header frame type (1 to 15; 0 for a frame that is not ours).
+    pub ftype: u8,
+    /// Type 15 sub-type, `0xFF` for other types.
+    pub sub: u8,
+    /// Bytes on the air.
+    pub len: u8,
+    /// When it started on the air (the modem's clock, ms).
+    pub start_ms: u32,
+    /// Its airtime (ms).
+    pub air_ms: u16,
+    /// What it was heard at (None for a frame sent).
+    pub rssi_dbm: Option<i16>,
+    pub snr_x4: Option<i16>,
 }
 
 /// Numbers from the current (or last) call, for the simulator and the UI.
@@ -167,6 +199,9 @@ pub struct CallStats {
     pub sf: u8,
     /// The talk plan as CallState shows it.
     pub plan: Option<TalkPlan>,
+    /// The last CallState `state` byte (`call_state`: 0 idle, 1 dialing,
+    /// 2 ringing, 3 training, 4 connected, 5 resync).
+    pub state: u8,
 }
 
 /// The codec as the app shows it (`CODEC2 2400`, `OPUS 10K`).
@@ -1122,6 +1157,50 @@ impl Engine {
                 let lines = std::mem::take(&mut self.dir_building);
                 self.event(UiEvent::Directory(lines));
             }
+            msg::SCOPE => {
+                let (Some(t_ms), Some(step_ms), Some(n), Some(mask)) =
+                    (r.u32(), r.u8(), r.u8(), r.u8())
+                else {
+                    return;
+                };
+                let Some(d) = r.bytes(usize::from(n).min(8)) else {
+                    return;
+                };
+                let samples = d
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &b)| (b as i8, mask & (1 << k) != 0))
+                    .collect();
+                self.event(UiEvent::Scope {
+                    t_ms,
+                    step_ms,
+                    samples,
+                });
+            }
+            msg::AIR_EVENT => {
+                let (Some(flags), Some(sf), Some(ftype), Some(sub), Some(len)) =
+                    (r.u8(), r.u8(), r.u8(), r.u8(), r.u8())
+                else {
+                    return;
+                };
+                let (Some(start_ms), Some(air_ms), Some(rssi), Some(snr)) =
+                    (r.u32(), r.u16(), r.i16(), r.i16())
+                else {
+                    return;
+                };
+                let rx = flags & 1 != 0;
+                self.event(UiEvent::Air(AirFrame {
+                    rx,
+                    sf,
+                    ftype,
+                    sub,
+                    len,
+                    start_ms,
+                    air_ms,
+                    rssi_dbm: (rx && rssi != i16::MIN).then_some(rssi),
+                    snr_x4: (rx && snr != i16::MIN).then_some(snr),
+                }));
+            }
             _ => {}
         }
     }
@@ -1189,6 +1268,7 @@ impl Engine {
         let (Some(st), Some(name), Some(label)) = (r.str(), r.str(), r.str()) else {
             return;
         };
+        self.stats.state = state;
         if state == call_state::IDLE {
             self.hung_up = false;
             self.end_call();
