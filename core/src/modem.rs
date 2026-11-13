@@ -441,6 +441,21 @@ pub struct Modem {
     pub(crate) vhp: Vhp,
 }
 
+/// The host input starts with an `AT+VOICE` line (any case, after any CR
+/// or LF, the line ending with CR or LF): with S32 = 1 such a first input
+/// starts the voice host protocol instead of opening the menu.
+fn voice_line(bytes: &[u8]) -> bool {
+    let start = bytes
+        .iter()
+        .position(|&b| b != b'\r' && b != b'\n')
+        .unwrap_or(bytes.len());
+    let rest = bytes.get(start..).unwrap_or(&[]);
+    let cmd = b"AT+VOICE";
+    rest.get(..cmd.len())
+        .is_some_and(|h| h.eq_ignore_ascii_case(cmd))
+        && matches!(rest.get(cmd.len()), Some(b'\r' | b'\n'))
+}
+
 fn onoff(on: bool) -> &'static [u8] {
     if on {
         b"ON"
@@ -1212,6 +1227,12 @@ impl Modem {
         &self.found
     }
 
+    /// True while the host stream is voice host protocol session 0 (after
+    /// `AT+VOICE`): host bytes are frames, to be offered in one piece.
+    pub fn in_voice_host(&self) -> bool {
+        self.vhp.host
+    }
+
     /// True while host bytes are call data (online, not escaped by `+++`).
     pub fn in_data_mode(&self) -> bool {
         self.mode == Mode::Data
@@ -1228,7 +1249,9 @@ impl Modem {
         // Boot to menu (S32): the first host bytes open it and are dropped.
         if self.boot_menu && !bytes.is_empty() {
             self.boot_menu = false;
-            if self.mode == Mode::Command && !self.menu.open {
+            // A voice app's AT+VOICE line is a command, not a key: it goes
+            // to the AT parser and starts framed mode.
+            if self.mode == Mode::Command && !self.menu.open && !voice_line(bytes) {
                 self.menu_open(now_ms, false);
                 self.after(radio, now_ms);
                 return bytes.len();

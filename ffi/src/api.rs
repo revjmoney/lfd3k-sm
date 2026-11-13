@@ -423,7 +423,8 @@ pub unsafe extern "C" fn lfd3k_host_in(buf: *const u8, len: usize, now_ms: u32) 
         // so CRLF-heavy screens fill whole ARQ chunks. The +++ guard time
         // means commands after an escape arrive in a later batch.
         sync_power(d);
-        if d.modem.in_data_mode() {
+        // Voice host protocol frames (after AT+VOICE) are not lines either.
+        if d.modem.in_data_mode() || d.modem.in_voice_host() {
             return d.modem.host_input(bytes, &mut d.radio, now_ms);
         }
         let mut used = 0;

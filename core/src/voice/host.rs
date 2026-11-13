@@ -217,6 +217,34 @@ fn cobs_encode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
     Some(o + 1)
 }
 
+/// Decode one COBS frame (without its zero delimiter) into `dst`. None for
+/// a zero inside, a block cut short, or a frame longer than `dst`.
+fn cobs_decode(src: &[u8], dst: &mut [u8]) -> Option<usize> {
+    let mut i = 0usize;
+    let mut o = 0usize;
+    while i < src.len() {
+        let code = *src.get(i)?;
+        if code == 0 {
+            return None;
+        }
+        i += 1;
+        for _ in 1..code {
+            let b = *src.get(i)?;
+            if b == 0 {
+                return None;
+            }
+            *dst.get_mut(o)? = b;
+            o += 1;
+            i += 1;
+        }
+        if code < 0xFF && i < src.len() {
+            *dst.get_mut(o)? = 0;
+            o += 1;
+        }
+    }
+    Some(o)
+}
+
 /// A length-prefixed string and the bytes after it.
 fn take_str(p: &[u8]) -> Option<(&str, &[u8])> {
     let (&l, rest) = p.split_first()?;
@@ -693,7 +721,10 @@ impl Modem {
 
     /// `voice_input` without the link pump (the host stream's
     /// `host_input` pumps once at its end). Stops after a frame that closed
-    /// the session (Leave) or left a ControlOut held.
+    /// the session (Leave). While a ControlOut is held, whole frames are
+    /// still taken and acted on (Hangup, Decline, Leave, TalkKey, Heartbeat
+    /// and the rest), except a ControlOut or VoiceOut, which waits behind
+    /// the held bytes, with everything after it.
     pub(crate) fn vhp_input<R: Radio>(
         &mut self,
         session: u8,
@@ -705,50 +736,97 @@ impl Modem {
         if !self.vhp.s.get(i).is_some_and(|s| s.open) {
             return bytes.len();
         }
-        if !self.vhp_flush_hold(i) {
-            // The app is still offering bytes: a slow tier holding its
-            // control bytes must not time the session out.
-            if !bytes.is_empty() {
-                self.voice_session_seen(session, now);
-                if let Some(s) = self.vhp.s.get_mut(i) {
-                    s.last_ms = now;
+        let mut used = 0;
+        'outer: while self.vhp.s.get(i).is_some_and(|s| s.open) {
+            let rest = bytes.get(used..).unwrap_or(&[]);
+            if !self.vhp_flush_hold(i, now) {
+                match self.vhp_held_frame(i, rest, radio, now) {
+                    Some(k) => {
+                        used += k;
+                        continue;
+                    }
+                    None => break,
                 }
             }
-            return 0;
-        }
-        let mut used = 0;
-        for &b in bytes {
-            used += 1;
-            let Some(s) = self.vhp.s.get_mut(i) else {
-                break;
-            };
-            if core::mem::take(&mut s.skip_lf) && b == b'\n' {
-                continue;
-            }
-            let Some(n) = s.feed(b) else {
-                continue;
-            };
-            let mut f = [0u8; VHP_FRAME_MAX];
-            if let (Some(d), Some(src)) = (f.get_mut(..n), s.rx.get_mut(..n)) {
-                d.copy_from_slice(src);
-                src.fill(0);
-            }
-            self.vhp_frame(i, f.get(..n).unwrap_or(&[]), radio, now);
-            f.fill(0);
-            if !self
-                .vhp
-                .s
-                .get(i)
-                .is_some_and(|s| s.open && s.hold.is_none())
-            {
+            if rest.is_empty() {
                 break;
             }
+            for &b in rest {
+                used += 1;
+                let Some(s) = self.vhp.s.get_mut(i) else {
+                    break 'outer;
+                };
+                if core::mem::take(&mut s.skip_lf) && b == b'\n' {
+                    continue;
+                }
+                let Some(n) = s.feed(b) else {
+                    continue;
+                };
+                let mut f = [0u8; VHP_FRAME_MAX];
+                if let (Some(d), Some(src)) = (f.get_mut(..n), s.rx.get_mut(..n)) {
+                    d.copy_from_slice(src);
+                    src.fill(0);
+                }
+                self.vhp_frame(i, f.get(..n).unwrap_or(&[]), radio, now);
+                f.fill(0);
+                if !self
+                    .vhp
+                    .s
+                    .get(i)
+                    .is_some_and(|s| s.open && s.hold.is_none())
+                {
+                    // Closed (Leave), or a ControlOut is now held.
+                    continue 'outer;
+                }
+            }
+            break;
         }
         used
     }
 
-    /// Push held ControlOut bytes. True when nothing is held any more.
-    fn vhp_flush_hold(&mut self, i: usize) -> bool {
+    /// One step of input while a ControlOut is held on session `i`: zero
+    /// bytes between frames, or one whole frame from `rest`, decoded from
+    /// the slice (the session's decoder buffer holds the held bytes). The
+    /// bytes taken, or None to take nothing more now: no whole frame yet,
+    /// or a ControlOut or VoiceOut, which waits. Offered bytes keep the
+    /// session alive.
+    fn vhp_held_frame<R: Radio>(
+        &mut self,
+        i: usize,
+        rest: &[u8],
+        radio: &mut R,
+        now: u32,
+    ) -> Option<usize> {
+        if rest.is_empty() {
+            return None;
+        }
+        self.voice_session_seen(i as u8, now);
+        if let Some(s) = self.vhp.s.get_mut(i) {
+            s.last_ms = now;
+            s.skip_lf = false;
+        }
+        let zeros = rest.iter().take_while(|&&b| b == 0).count();
+        if zeros > 0 {
+            return Some(zeros);
+        }
+        let z = rest.iter().position(|&b| b == 0)?;
+        let mut f = [0u8; VHP_FRAME_MAX];
+        let n = cobs_decode(rest.get(..z).unwrap_or(&[]), &mut f).unwrap_or(0);
+        if n > 0 {
+            if matches!(f.first(), Some(&(msg::CONTROL_OUT | msg::VOICE_OUT))) {
+                f.fill(0);
+                return None;
+            }
+            self.vhp_frame(i, f.get(..n).unwrap_or(&[]), radio, now);
+            f.fill(0);
+        }
+        Some(z + 1)
+    }
+
+    /// Push held ControlOut bytes. True when nothing is held any more
+    /// (the session's heartbeat clock restarts then: it never runs out
+    /// while the session only waits).
+    fn vhp_flush_hold(&mut self, i: usize, now: u32) -> bool {
         let owner = self.vhp.owner == Some(i as u8);
         let up = owner && self.link.is_connected() && self.link.voice().is_some();
         let Some(s) = self.vhp.s.get_mut(i) else {
@@ -761,6 +839,7 @@ impl Modem {
             // The call went: its control bytes go with it.
             s.hold = None;
             s.rx.fill(0);
+            s.last_ms = now;
             return true;
         }
         let k = self
@@ -770,6 +849,7 @@ impl Modem {
         if a >= b {
             s.hold = None;
             s.rx.fill(0);
+            s.last_ms = now;
             true
         } else {
             s.hold = Some((a, b));
@@ -985,7 +1065,7 @@ impl Modem {
         for i in 0..VHP_SESSIONS {
             let late = self.vhp.s.get(i).is_some_and(|s| {
                 let d = now.wrapping_sub(s.last_ms);
-                s.open && (VOICE_HEARTBEAT_MS..u32::MAX / 2).contains(&d)
+                s.open && s.hold.is_none() && (VOICE_HEARTBEAT_MS..u32::MAX / 2).contains(&d)
             });
             if late {
                 self.vhp_close(i as u8, false, now);
@@ -1047,7 +1127,7 @@ impl Modem {
     /// here, a ring that times out), CallState and Floor changes.
     pub(crate) fn vhp_poll(&mut self, now: u32) {
         for i in 0..VHP_SESSIONS {
-            self.vhp_flush_hold(i);
+            self.vhp_flush_hold(i, now);
         }
         let ringing = (self.link.state() == State::Ringing && self.link.voice().is_some())
             .then(|| self.link.call_id());
