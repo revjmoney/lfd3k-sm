@@ -20,3 +20,6 @@ crossterm = { version = "0.29", default-features = false, features = ["events", 
 [dev-dependencies]
 # Fuzz tests only (MIT OR Apache-2.0). Default features off: no fork/timeout crates.
 proptest = { version = "1", default-features = false, features = ["std"] }
+# voice_compat.rs only: the core of the last build without voice (public commit
+# 6364009), as a second crate, so an old and a new modem share one channel.
+lfd3k-core-old = { package = "lfd3k-core", git = "https://github.com/revjmoney/lfd3k-sm", rev = "6364009" }

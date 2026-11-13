@@ -1361,10 +1361,15 @@ name = "lfd3k-core"
 version = "0.1.0"
 
 [[package]]
+name = "lfd3k-core"
+version = "0.1.0"
+source = "git+https://github.com/revjmoney/lfd3k-sm?rev=6364009#6364009e8007f4c8eeeda74424ec1688e27ddbf1"
+
+[[package]]
 name = "lfd3k-ffi"
 version = "0.1.0"
 dependencies = [
- "lfd3k-core",
+ "lfd3k-core 0.1.0",
  "sx1262",
 ]
 
@@ -1373,7 +1378,8 @@ name = "lfd3k-sim"
 version = "0.1.0"
 dependencies = [
  "crossterm",
- "lfd3k-core",
+ "lfd3k-core 0.1.0",
+ "lfd3k-core 0.1.0 (git+https://github.com/revjmoney/lfd3k-sm?rev=6364009)",
  "lfd3k-voice",
  "proptest",
 ]
@@ -1388,7 +1394,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac",
- "lfd3k-core",
+ "lfd3k-core 0.1.0",
  "opus",
  "serde",
  "serde_json",
@@ -1404,7 +1410,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "eframe",
- "lfd3k-core",
+ "lfd3k-core 0.1.0",
  "lfd3k-sim",
  "lfd3k-voice",
  "png",
@@ -2674,7 +2680,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "sx1262"
 version = "0.1.0"
 dependencies = [
- "lfd3k-core",
+ "lfd3k-core 0.1.0",
 ]
 
 [[package]]
