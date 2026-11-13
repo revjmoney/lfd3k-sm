@@ -16,7 +16,12 @@
 //! sessions: input bytes a modem did not take yet are offered again, and
 //! everything `voice_output` has is collected (every step: the modem keeps
 //! only the last VoiceIn frame, so it must be read often). Host output
-//! (the terminal) is read and dropped.
+//! (the terminal) is kept (the newest `HOST_KEEP` bytes) for `host_text`,
+//! and `host_send` types into a modem's terminal.
+//!
+//! For tests: `set_snr_x4` changes the channel SNR from now on, `air_log`
+//! lists every frame put on the air (start time, sender, tier, bytes) and
+//! `collisions` counts receptions spoiled by an overlapping frame.
 //!
 //! Sessions 1 to 3 only (session 0 is the host stream after `AT+VOICE`).
 //! A session opens on the first `voice_send` to it.
@@ -27,6 +32,12 @@ use lfd3k_core::voice::VHP_SESSIONS;
 use lfd3k_core::{Config, Modem, RxInfo, Tier};
 
 use crate::{loss_x1000, preamble_us, Outcome, Rng, Rx, SimChannel, SimRadio};
+
+/// Host output kept per modem for `host_text` (the newest bytes).
+const HOST_KEEP: usize = 64 * 1024;
+
+/// One frame put on the air: start (ms), sender, tier, bytes.
+pub type AirLogEntry = (u32, usize, Tier, Vec<u8>);
 
 /// Per modem: pending input and collected output for each session.
 struct Sessions {
@@ -55,6 +66,10 @@ pub struct Multi {
     rng: Rng,
     sent: Vec<usize>,
     sessions: Vec<Sessions>,
+    host_in: Vec<VecDeque<u8>>,
+    host_out: Vec<Vec<u8>>,
+    air_log: Vec<AirLogEntry>,
+    collisions: usize,
 }
 
 impl Multi {
@@ -82,7 +97,47 @@ impl Multi {
             chan,
             sent: vec![0; n],
             sessions: (0..n).map(|_| Sessions::new()).collect(),
+            host_in: (0..n).map(|_| VecDeque::new()).collect(),
+            host_out: vec![Vec::new(); n],
+            air_log: Vec::new(),
+            collisions: 0,
         }
+    }
+
+    /// The channel SNR (dB x4) from now on, for every pair.
+    pub fn set_snr_x4(&mut self, snr_x4: i16) {
+        self.chan.profile = crate::SnrProfile::Constant(snr_x4);
+    }
+
+    /// Bytes typed into modem `m`'s terminal (host stream). What the modem
+    /// does not take at once is offered again every step.
+    pub fn host_send(&mut self, m: usize, bytes: &[u8]) {
+        if let Some(q) = self.host_in.get_mut(m) {
+            q.extend(bytes.iter().copied());
+        }
+        self.host_service(m);
+    }
+
+    /// Modem `m`'s terminal output since the last call (the newest
+    /// `HOST_KEEP` bytes), as text.
+    pub fn host_text(&mut self, m: usize) -> String {
+        let b = self
+            .host_out
+            .get_mut(m)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        String::from_utf8_lossy(&b).into_owned()
+    }
+
+    /// Every frame put on the air so far, in start order.
+    pub fn air_log(&self) -> &[AirLogEntry] {
+        &self.air_log
+    }
+
+    /// Receptions spoiled because another frame overlapped them at that
+    /// receiver (counted once per receiver and frame).
+    pub fn collisions(&self) -> usize {
+        self.collisions
     }
 
     /// Advance `ms` milliseconds.
@@ -170,7 +225,21 @@ impl Multi {
             }
         }
         for i in 0..self.modems.len() {
+            self.host_service(i);
             self.service(i);
+        }
+    }
+
+    /// Offer typed bytes to modem `i`'s terminal.
+    fn host_service(&mut self, i: usize) {
+        let pending: Vec<u8> = match self.host_in.get(i) {
+            Some(q) if !q.is_empty() => q.iter().copied().collect(),
+            _ => return,
+        };
+        let mut took = 0;
+        self.with(i, |m, r, now| took = m.host_input(&pending, r, now));
+        if let Some(q) = self.host_in.get_mut(i) {
+            q.drain(..took.min(pending.len()));
         }
     }
 
@@ -223,7 +292,19 @@ impl Multi {
         f(m, r, now);
         let out = std::mem::take(&mut r.outbox);
         let mut buf = [0u8; 256];
-        while m.host_output(&mut buf) > 0 {}
+        loop {
+            let n = m.host_output(&mut buf);
+            if n == 0 {
+                break;
+            }
+            if let Some(h) = self.host_out.get_mut(i) {
+                h.extend_from_slice(buf.get(..n).unwrap_or(&[]));
+                if h.len() > HOST_KEEP {
+                    let cut = h.len() - HOST_KEEP;
+                    h.drain(..cut);
+                }
+            }
+        }
         for (tier, bytes) in out {
             self.start_frame(i, tier, bytes);
         }
@@ -278,6 +359,7 @@ impl Multi {
         if let Some(n) = self.sent.get_mut(from) {
             *n += 1;
         }
+        self.air_log.push((now, from, tier, bytes.clone()));
         let hooked = self.chan.drop.is_some_and(|f| f(now, &bytes));
         let snr = self.chan.profile.at(now);
         let margin = snr.saturating_sub(tier.snr_floor_x4());
@@ -294,7 +376,11 @@ impl Multi {
                 collided = true;
                 if other.outcome == Outcome::Pending {
                     other.outcome = Outcome::Collided;
+                    self.collisions += 1;
                 }
+            }
+            if collided {
+                self.collisions += 1;
             }
             r.rx.push(Rx {
                 trace: 0,

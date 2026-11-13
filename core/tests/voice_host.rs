@@ -525,7 +525,7 @@ fn session_timeout_hangs_up() {
     let took = net.now - t0;
     // Counted from REV's last Heartbeat, up to a second before it went quiet.
     assert!(
-        took >= VOICE_HEARTBEAT_MS - 1_000 && took < VOICE_HEARTBEAT_MS + 5_000,
+        (VOICE_HEARTBEAT_MS - 1_000..VOICE_HEARTBEAT_MS + 5_000).contains(&took),
         "after {took} ms"
     );
     assert!(net.m[0].voice_call().is_none() && net.m[1].voice_call().is_none());
@@ -1013,5 +1013,73 @@ fn regression_scope_and_airevent_never_delay_voicein() {
     assert!(
         checked > 50,
         "VoiceIn and scope traffic met {checked} times"
+    );
+}
+
+#[test]
+fn regression_voice_out_never_blocks_hangup_or_talk_key_behind_held_control() {
+    // Task 7 review I1 (630f172) and the held control ruling (a316123):
+    // while a ControlOut's bytes are held (the call's stream cannot take
+    // them all), the frames after it (a stream of VoiceOut, then TalkKey
+    // up and Hangup) are still taken and acted on at once; only a later
+    // ControlOut waits behind the held bytes.
+    let mut net = connected_pair(Some(Tier::Sf9));
+    voice_ready(&mut net);
+    net.send(0, 1, &[msg::TALK_KEY, 1]);
+    let mine = net.run_until(20_000, |n| {
+        n.read(0, 1).iter().any(|f| f[0] == msg::FLOOR && f[1] == 1)
+    });
+    assert!(mine);
+    let enc = |f: &[u8]| {
+        let mut w = [0u8; 300];
+        let n = cobs_encode(f, &mut w).unwrap();
+        w[..n].to_vec()
+    };
+    // 259 control bytes: more than the stream takes at once (8 chunks of
+    // 32 on SF9), so the rest is held.
+    let mut big = vec![msg::CONTROL_OUT];
+    big.extend(std::iter::repeat_n(0x5A, 259));
+    net.pending[0][1].extend_from_slice(&enc(&big));
+    net.step();
+    assert!(
+        net.pending[0][1].is_empty(),
+        "the ControlOut frame was taken"
+    );
+    // Proof that bytes are held: a second ControlOut is not taken now.
+    let tiny = enc(&[msg::CONTROL_OUT, 1]);
+    let now = net.now;
+    let took = net.m[0].voice_input(1, &tiny, &mut net.r[0], now);
+    assert_eq!(took, 0, "a later ControlOut waits behind the held bytes");
+    // VoiceOut, TalkKey up and Hangup go through at once.
+    let mut batch = Vec::new();
+    for _ in 0..10 {
+        let mut v = vec![msg::VOICE_OUT];
+        v.extend_from_slice(&[0x42; 60]);
+        batch.extend_from_slice(&enc(&v));
+    }
+    batch.extend_from_slice(&enc(&[msg::TALK_KEY, 0]));
+    batch.extend_from_slice(&enc(&[msg::HANGUP]));
+    net.pending[0][1].extend_from_slice(&batch);
+    net.step();
+    assert!(
+        net.pending[0][1].is_empty(),
+        "every frame after the held ControlOut was taken"
+    );
+    let t0 = net.now;
+    let mut got = Vec::new();
+    let ended = net.run_until(3_000, |n| {
+        got.extend(n.read(0, 1));
+        got.iter().any(|f| f[0] == msg::ENDED)
+    });
+    assert!(ended, "Ended within 3 s of the Hangup");
+    assert!(net.now - t0 < 3_000);
+    assert!(
+        errors(&got).is_empty(),
+        "no Error for TalkKey or Hangup: {:?}",
+        errors(&got)
+    );
+    assert!(
+        got.iter().any(|f| f[0] == msg::FLOOR && f[1] == 0),
+        "the floor went free"
     );
 }
