@@ -1,0 +1,106 @@
+# Push a tag like v0.5.0 and this builds the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM
+# for the AXIS installer (https://revjmoney.github.io/axis-bbs/install.html) and its PC scripts:
+#   heltec_v4         the multimode V4's modem slot (ota_1 at 0x4A0000; an update writes only that)
+#   heltec_v4_single  the modem alone on a V4 (16 MB)
+#   heltec_v3_single  the modem alone on a V3 (8 MB)
+# Each env becomes releases/<tag>/<env>/ (its images and manifest.json, from
+# tools/release_manifest.py) on the gh-pages branch, which also gets releases/index.json
+# (tools/ghpages.py, the three newest releases). gh-pages is only the store: the website is
+# deployed by pages.yml, which copies releases/ from it, so this ends by running pages.yml on main.
+# Uses only the built in GITHUB_TOKEN: no repository secret needed.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TAG: ${{ github.ref_name }}
+      RUST_VERSION: "1.100.0"
+      ESPUP_VERSION: "0.19.0"
+      ESP_TOOLCHAIN_VERSION: "1.97.0.0"
+    steps:
+      # full history and tags, so the app header's version is the tag (git describe)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Manifest writer tests
+        run: python -I -m unittest discover -s tools -p "test_release_manifest.py"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-6.1.18-espressif32-6.11.0-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini', 'firmware/dependencies.lock') }}
+      - name: PlatformIO 6.1.18
+        run: pip install --retries 5 platformio==6.1.18
+      # The same pins as the AXIS build scripts (site/install.sh there).
+      - name: Rust for the ESP32-S3 (espup)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}  # espup downloads its toolchain from GitHub releases
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          cargo "+$RUST_VERSION" install espup --version "$ESPUP_VERSION" --locked
+          espup install --targets esp32s3 --toolchain-version "$ESP_TOOLCHAIN_VERSION" --export-file "$HOME/export-esp.sh"
+      # firmware/build_core.ps1, in sh
+      - name: Rust core
+        run: |
+          . "$HOME/export-esp.sh"
+          RUSTFLAGS='-C panic=abort' cargo +esp build -p lfd3k-ffi --release --target xtensa-esp32s3-none-elf -Zbuild-std=core
+          mkdir -p firmware/lib
+          cp target/xtensa-esp32s3-none-elf/release/liblfd3k_ffi.a firmware/lib/liblfd3k_ffi.a
+      - name: Compile the three envs
+        run: |
+          for env in heltec_v4 heltec_v4_single heltec_v3_single; do
+            pio run -d firmware -e "$env"
+          done
+      - name: Images and manifests
+        run: |
+          for env in heltec_v4 heltec_v4_single heltec_v3_single; do
+            python -I tools/release_manifest.py --env "$env" --build "firmware/.pio/build/$env" --out "rel/$env" --release "$TAG"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: radio-images
+          path: rel/
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write  # push the gh-pages branch
+      actions: write   # run pages.yml so the website carries the new images
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: radio-images
+          path: rel
+      - name: Release to gh-pages
+        run: |
+          ls -lR rel
+          sh tools/ci/ghpages_publish.sh --allow-prune "release $TAG" python -I tools/ghpages.py release --tag "$TAG" --from rel
+      # A push made with GITHUB_TOKEN starts no workflow, so ask for the website deploy here. It runs
+      # on main: the github-pages environment only deploys from main.
+      - name: Deploy the website with the new images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main

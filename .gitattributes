@@ -1,2 +1,3 @@
 site/build.sh text eol=lf
 .github/workflows/*.yml text eol=lf
+tools/ci/*.sh text eol=lf

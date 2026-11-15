@@ -102,6 +102,10 @@ AT&V                     show every setting and the link
 
 Settings, S registers and every AT command are in [`docs/FEATURES.md`](docs/FEATURES.md).
 
+No build tools? The [AXIS installer](https://revjmoney.github.io/axis-bbs/install.html) flashes the
+modem from Chrome or Edge onto a Heltec V4 (only the modem slot on a multimode V4) or a Heltec V3, using the
+images every tagged release publishes (`.github/workflows/release.yml`).
+
 ## Building
 
 | Part | Where | How |
