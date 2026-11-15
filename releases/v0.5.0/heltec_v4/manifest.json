@@ -1,0 +1,22 @@
+{
+ "release": "v0.5.0",
+ "env": "heltec_v4",
+ "chip": "ESP32-S3",
+ "layout": "multimode",
+ "flash_size": 16777216,
+ "slot": "ota_1",
+ "table": "partitions.bin",
+ "app_partition": {
+  "offset": 4849664,
+  "size": 1572864
+ },
+ "images": [
+  {
+   "role": "app",
+   "file": "firmware.bin",
+   "offset": 4849664,
+   "size": 1102576,
+   "sha256": "4d6eb426ab5f305c2bba8701d5f808e996d149671f53bbb451005c214c22353e"
+  }
+ ]
+}

@@ -1,0 +1,42 @@
+{
+ "release": "v0.5.0",
+ "env": "heltec_v4_single",
+ "chip": "ESP32-S3",
+ "layout": "single",
+ "flash_size": 16777216,
+ "table": "partitions.bin",
+ "app_partition": {
+  "offset": 65536,
+  "size": 1572864
+ },
+ "images": [
+  {
+   "role": "bootloader",
+   "file": "bootloader.bin",
+   "offset": 0,
+   "size": 13808,
+   "sha256": "cc0fe134751d056db844bc089f2ae91b9f07db41426f401a2bc02f12edd14cde"
+  },
+  {
+   "role": "partitions",
+   "file": "partitions.bin",
+   "offset": 32768,
+   "size": 3072,
+   "sha256": "a8909c17b495c5999eed09ee1e32060d38cd799b0dc1b548ac11fe3dd222f7c0"
+  },
+  {
+   "role": "otadata",
+   "file": "ota_data_initial.bin",
+   "offset": 57344,
+   "size": 8192,
+   "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+  },
+  {
+   "role": "app",
+   "file": "firmware.bin",
+   "offset": 65536,
+   "size": 1102576,
+   "sha256": "73929312e1405d4bc1e96568bc9e710828c87ccd82d950b18fb7e5635a3416cb"
+  }
+ ]
+}
