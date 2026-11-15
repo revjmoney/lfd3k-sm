@@ -18,11 +18,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Assemble _site
         run: sh site/build.sh _site
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      # The release images for the AXIS installer live on the gh-pages branch (release.yml puts
+      # them there); the site carries them at releases/. No gh-pages branch yet: no releases/.
+      - name: Release images from gh-pages
+        run: |
+          have=0
+          git ls-remote --exit-code --heads origin gh-pages > /dev/null || have=$?
+          if [ "$have" -eq 2 ]; then echo "no gh-pages branch yet, no release images"; exit 0; fi
+          [ "$have" -eq 0 ] || { echo "cannot reach origin" >&2; exit 1; }
+          git fetch -q --no-tags --depth=1 origin "+refs/heads/gh-pages:refs/ghpages/store"
+          if [ -z "$(git ls-tree refs/ghpages/store -- releases)" ]; then echo "gh-pages has no releases/"; exit 0; fi
+          git archive refs/ghpages/store releases | tar -xf - -C _site
+          find _site/releases -name manifest.json
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3.0.1
         with:
           path: _site
 
@@ -34,4 +46,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4.0.5
