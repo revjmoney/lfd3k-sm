@@ -16,7 +16,7 @@
 //! ATH and ATZ through AtLine are refused while a data or Wi-Fi call is up.
 
 use lfd3k_core::voice::host::{call_state, cobs_decode, cobs_encode, err, msg, SCOPE_MAX};
-use lfd3k_core::voice::{VOICE_GRACE_MS, VOICE_HEARTBEAT_MS};
+use lfd3k_core::voice::{VOICE_GRACE_MS, VOICE_HEARTBEAT_MS, VOICE_HOLD_MS};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 
 // ---- Harness.
@@ -1279,9 +1279,7 @@ fn dead_session_holding_control_times_out() {
     for stale in [false, true] {
         let mut net = held_then_quiet(stale, false);
         let t0 = net.now;
-        let closed = net.run_until(VOICE_HEARTBEAT_MS + 3_000, |n| {
-            !n.m[0].voice_session_open(1)
-        });
+        let closed = net.run_until(VOICE_HOLD_MS + 3_000, |n| !n.m[0].voice_session_open(1));
         assert!(closed, "stale {stale}: the dead session closed");
         assert!(
             net.now - t0 >= VOICE_HEARTBEAT_MS - 1_000,
@@ -1297,7 +1295,14 @@ fn live_session_holding_control_stays_open() {
     // The app keeps its Heartbeat: frames behind the held ControlOut are
     // taken, so the session stays while the link is stuck (until the call
     // itself is lost).
-    let mut net = held_then_quiet(false, true);
-    net.run(VOICE_HEARTBEAT_MS * 2);
-    assert!(net.m[0].voice_session_open(1), "the live app is still open");
+    for stale in [false, true] {
+        // stale: a second ControlOut waits, so the Heartbeats behind it are
+        // not read (the reviewed SF12 case: reveal then Hello at setup).
+        let mut net = held_then_quiet(stale, true);
+        net.run(VOICE_HEARTBEAT_MS * 2);
+        assert!(
+            net.m[0].voice_session_open(1),
+            "stale {stale}: the live app is still open"
+        );
+    }
 }

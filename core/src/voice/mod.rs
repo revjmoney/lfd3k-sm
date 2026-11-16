@@ -16,7 +16,7 @@ pub mod sched;
 pub use call::VoiceCallInfo;
 pub use dir::{VoiceDir, VoiceEntry, VOICE_DIR_MAX};
 pub use frames::{decode_voice, encode_voice, VSub, VoiceItems, VOICE_DISC_FRAME, VOICE_DISC_MAX};
-pub use host::{VHP_FRAME_MAX, VHP_SESSIONS, VHP_VERSION, VOICE_HEARTBEAT_MS};
+pub use host::{VHP_FRAME_MAX, VHP_SESSIONS, VHP_VERSION, VOICE_HEARTBEAT_MS, VOICE_HOLD_MS};
 pub use names::{valid_label, Name16, LABEL_MAX};
 pub use plan::{duplex_fits, encoded_bytes, talk_plan, CodecId, TalkMode, TalkPlan, SEAL_OVERHEAD};
 pub use regs::{VoiceReg, VOICE_GRACE_MS, VOICE_REGS};

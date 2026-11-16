@@ -454,7 +454,11 @@ pub fn spawn(
             let mut w = Worker::new(o, Backend::Real(link), id, tx, snap, ctx, 0);
             w.link_desc = link_desc;
             w.locked = locked;
-            if w.o.cap_tier.is_some() {
+            if w.o.cap_tier.is_some() && locked {
+                w.send(Ev::Note(
+                    "--cap-tier: settings are locked over Wi-Fi; the cap is not set".into(),
+                ));
+            } else if w.o.cap_tier.is_some() {
                 // Read S21 first (to put it back), then the cap; both go
                 // ahead of the window's first AT&V.
                 w.at.wait
@@ -1465,10 +1469,13 @@ fn is_reset_line(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case("ATZ")
 }
 
-/// An AT line that sets S21 (`ATS21=<n>`, any case and spaces).
+/// An AT line that sets S21 (`ATS21=<n>`, `ATS021=<n>`, any case), as the
+/// modem's own parser reads it.
 fn is_s21_set_line(line: &str) -> bool {
-    let l: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-    l.to_ascii_uppercase().starts_with("ATS21=")
+    matches!(
+        lfd3k_core::at::parse_line(line.trim()),
+        Ok(lfd3k_core::AtCmd::SetReg(21, _))
+    )
 }
 
 /// The next AtLine to send, decided now with `--cap-tier`'s state as it is
@@ -1712,7 +1719,7 @@ mod tests {
 
     #[test]
     fn cap_tier_s21_edit_ends_the_cap() {
-        let mut w = q(&[(4, "ATS21=2"), (5, "ats21 = 6"), (6, "ATS21?")]);
+        let mut w = q(&[(4, "ATS21=2"), (5, "ats021=6"), (6, "ATS21?")]);
         let got = drain(&mut w, |_| Some((1, 3)));
         assert_eq!(got[0], (4, "ATS21=2".to_string(), Some(true)));
         assert_eq!(got[1].2, Some(true));

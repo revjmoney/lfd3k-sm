@@ -80,6 +80,12 @@ pub const VHP_FRAME_MAX: usize = 260;
 pub const VHP_WIRE_MAX: usize = VHP_FRAME_MAX + VHP_FRAME_MAX / 254 + 2;
 /// A session with no frame for this long is closed.
 pub const VOICE_HEARTBEAT_MS: u32 = 5_000;
+/// A session holding ControlOut bytes the call's stream has not taken is
+/// closed after this long with no frame taken and no held byte moving. Not
+/// `VOICE_HEARTBEAT_MS`: frames behind a second ControlOut wait unread
+/// (its Heartbeats too), and on push to talk tiers held bytes move only
+/// once a listen period (4 s at SF12) when no slot is lost.
+pub const VOICE_HOLD_MS: u32 = 30_000;
 /// Most text bytes in one AtReply frame.
 pub const VHP_AT_CHUNK: usize = 240;
 /// Most bytes in one ControlIn frame.
@@ -1092,7 +1098,7 @@ impl Modem {
     /// The session's heartbeat clock restarts whenever the link takes held
     /// bytes (and when the call went), so a live app waiting on a slow
     /// link is not closed; one whose bytes stopped moving and that sends
-    /// no new frame is, after `VOICE_HEARTBEAT_MS`.
+    /// no new frame is, after `VOICE_HOLD_MS`.
     fn vhp_flush_hold(&mut self, i: usize, now: u32) -> bool {
         let owner = self.vhp.owner == Some(i as u8);
         let up = owner && self.link.is_connected() && self.link.voice().is_some();
@@ -1341,9 +1347,15 @@ impl Modem {
         for i in 0..VHP_SESSIONS {
             let late = self.vhp.s.get(i).is_some_and(|s| {
                 let d = now.wrapping_sub(s.last_ms);
-                // A held ControlOut does not keep a session open: its clock
-                // restarts only when a frame is taken or held bytes move.
-                s.open && (VOICE_HEARTBEAT_MS..u32::MAX / 2).contains(&d)
+                // A held ControlOut does not keep a session open for good:
+                // its clock restarts only when a frame is taken or held
+                // bytes move, and it gets `VOICE_HOLD_MS`.
+                let limit = if s.hold.is_some() {
+                    VOICE_HOLD_MS
+                } else {
+                    VOICE_HEARTBEAT_MS
+                };
+                s.open && (limit..u32::MAX / 2).contains(&d)
             });
             if late {
                 self.vhp_close(i as u8, false, now);
