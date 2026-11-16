@@ -87,7 +87,7 @@ static void wake(void)
     }
 }
 
-/* ---- listener task ---- */
+/* Listener task. */
 
 /* Address and mask of a Wi-Fi interface, both 0 while it is down. */
 static void net_of(const char *ifkey, uint32_t *ip, uint32_t *mask)
@@ -283,7 +283,7 @@ void voice_link_start(void)
     xTaskCreatePinnedToCore(voice_task, "voice", TASK_STACK, NULL, 6, NULL, 0);
 }
 
-/* ---- modem task pump ---- */
+/* Modem task pump. */
 
 /* Socket bytes into the core; what it does not take stays for the next pump. */
 static void feed(int i, uint8_t session, uint32_t now_ms)
