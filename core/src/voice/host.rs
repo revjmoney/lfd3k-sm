@@ -234,6 +234,9 @@ pub mod err {
     pub const BUSY: u8 = 5;
     /// The AT command is not allowed through AtLine.
     pub const AT_REFUSED: u8 = 6;
+    /// The AT line would change the modem, and this session may only read
+    /// (sessions 1 to 3 on Wi-Fi: settings are locked over Wi-Fi).
+    pub const AT_LOCKED: u8 = 7;
 }
 
 /// CallState `state` byte.
@@ -264,6 +267,35 @@ pub fn at_refused(cmd: &AtCmd<'_>) -> bool {
             | AtCmd::Dial(_)
             | AtCmd::DialVoice(..)
             | AtCmd::FrameBuffer
+    )
+}
+
+/// The AT commands a read-only session (sessions 1 to 3 unless
+/// `Modem::voice_grant_settings`, so every TCP app on Wi-Fi) may run
+/// through AtLine: the ones that change nothing on the modem. AT+SCAN
+/// transmits but changes nothing. Everything else (setters, S register
+/// writes, AT&W, ATZ, ATE, ATV, ATH, directory pins and deletes) is
+/// `err::AT_LOCKED` there. The apps use this too, to grey out what they
+/// cannot change.
+pub fn at_read_only(cmd: &AtCmd<'_>) -> bool {
+    matches!(
+        cmd,
+        AtCmd::Attention
+            | AtCmd::Info
+            | AtCmd::ShowConfig
+            | AtCmd::GetReg(_)
+            | AtCmd::WapQuery
+            | AtCmd::WstaQuery
+            | AtCmd::WifiQuery
+            | AtCmd::FwdList
+            | AtCmd::PubQuery
+            | AtCmd::FoundQuery
+            | AtCmd::SimNetQuery
+            | AtCmd::BeaconQuery
+            | AtCmd::Scan
+            | AtCmd::DirList
+            | AtCmd::NameQuery
+            | AtCmd::ModeQuery
     )
 }
 
@@ -414,6 +446,9 @@ impl W<'_> {
 /// and what waits to be said.
 pub(crate) struct Session {
     pub(crate) open: bool,
+    /// May change the modem through AtLine (session 0 always; sessions 1
+    /// to 3 only after `voice_grant_settings`).
+    full: bool,
     last_ms: u32,
     /// Drop one LF if it is the very first byte (the LF after the CR of
     /// the `AT+VOICE` line).
@@ -451,6 +486,7 @@ impl Session {
     const fn new() -> Self {
         Session {
             open: false,
+            full: false,
             last_ms: 0,
             skip_lf: false,
             rx: [0; VHP_FRAME_MAX],
@@ -476,6 +512,7 @@ impl Session {
     /// may have held an AT line with a password).
     fn reset(&mut self) {
         self.open = false;
+        self.full = false;
         self.last_ms = 0;
         self.skip_lf = false;
         self.rx.fill(0);
@@ -812,6 +849,29 @@ impl Modem {
         true
     }
 
+    /// Let open session `session` (1 to 3) change the modem through
+    /// AtLine, as session 0 can. Only for an app the owner trusts like the
+    /// USB cable (the PC app's own built-in modem); the firmware never
+    /// calls it, so nobody changes settings over Wi-Fi. Closing the session
+    /// takes it away. False when the session is not open.
+    pub fn voice_grant_settings(&mut self, session: u8) -> bool {
+        match self.vhp.s.get_mut(usize::from(session)) {
+            Some(s) if s.open && session != 0 => {
+                s.full = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether session `session` may change the modem through AtLine.
+    pub(crate) fn vhp_full(&self, session: u8) -> bool {
+        self.vhp
+            .s
+            .get(usize::from(session))
+            .is_some_and(|s| s.open && s.full)
+    }
+
     /// One channel sample for the Scope frames, taken by the platform every
     /// 50 ms: the RSSI it reads (dBm, kept as -128 to 127; GetRssiInst on
     /// the SX1262, `SimNetRadio::rx_rssi` on SimNet) and whether it was
@@ -913,6 +973,7 @@ impl Modem {
         if let Some(s) = self.vhp.s.first_mut() {
             s.reset();
             s.open = true;
+            s.full = true;
             s.last_ms = now;
             s.skip_lf = true;
         }
@@ -989,8 +1050,10 @@ impl Modem {
     /// bytes between frames, or one whole frame from `rest`, decoded from
     /// the slice (the session's decoder buffer holds the held bytes). The
     /// bytes taken, or None to take nothing more now: no whole frame yet,
-    /// or a ControlOut, which waits (the stream keeps its order). Offered bytes keep the
-    /// session alive.
+    /// or a ControlOut, which waits (the stream keeps its order). Only
+    /// bytes taken keep the session alive: the same waiting bytes offered
+    /// again (a platform that keeps what was not taken) do not, so an app
+    /// that died behind a held ControlOut still times out.
     fn vhp_held_frame<R: Radio>(
         &mut self,
         i: usize,
@@ -1001,13 +1064,14 @@ impl Modem {
         if rest.is_empty() {
             return None;
         }
-        self.voice_session_seen(i as u8, now);
         if let Some(s) = self.vhp.s.get_mut(i) {
-            s.last_ms = now;
             s.skip_lf = false;
         }
         let zeros = rest.iter().take_while(|&&b| b == 0).count();
         if zeros > 0 {
+            if let Some(s) = self.vhp.s.get_mut(i) {
+                s.last_ms = now;
+            }
             return Some(zeros);
         }
         let z = rest.iter().position(|&b| b == 0)?;
@@ -1024,9 +1088,11 @@ impl Modem {
         Some(z + 1)
     }
 
-    /// Push held ControlOut bytes. True when nothing is held any more
-    /// (the session's heartbeat clock restarts then: it never runs out
-    /// while the session only waits).
+    /// Push held ControlOut bytes. True when nothing is held any more.
+    /// The session's heartbeat clock restarts whenever the link takes held
+    /// bytes (and when the call went), so a live app waiting on a slow
+    /// link is not closed; one whose bytes stopped moving and that sends
+    /// no new frame is, after `VOICE_HEARTBEAT_MS`.
     fn vhp_flush_hold(&mut self, i: usize, now: u32) -> bool {
         let owner = self.vhp.owner == Some(i as u8);
         let up = owner && self.link.is_connected() && self.link.voice().is_some();
@@ -1046,6 +1112,9 @@ impl Modem {
         let k = self
             .link
             .push_data(s.rx.get(usize::from(a)..usize::from(b)).unwrap_or(&[]));
+        if k > 0 {
+            s.last_ms = now;
+        }
         let a = a.saturating_add(k as u16);
         if a >= b {
             s.hold = None;
@@ -1272,7 +1341,9 @@ impl Modem {
         for i in 0..VHP_SESSIONS {
             let late = self.vhp.s.get(i).is_some_and(|s| {
                 let d = now.wrapping_sub(s.last_ms);
-                s.open && s.hold.is_none() && (VOICE_HEARTBEAT_MS..u32::MAX / 2).contains(&d)
+                // A held ControlOut does not keep a session open: its clock
+                // restarts only when a frame is taken or held bytes move.
+                s.open && (VOICE_HEARTBEAT_MS..u32::MAX / 2).contains(&d)
             });
             if late {
                 self.vhp_close(i as u8, false, now);

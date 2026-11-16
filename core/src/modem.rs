@@ -2903,6 +2903,13 @@ impl Modem {
                 return Err(host::err::AT_REFUSED);
             }
         }
+        // Settings are locked over Wi-Fi: a read-only session runs only the
+        // lines that change nothing (a line that does not parse too: it
+        // would only print ERROR).
+        if !self.vhp_full(session) && !matches!(parsed, Some(Ok(ref c)) if host::at_read_only(c)) {
+            buf.fill(0);
+            return Err(host::err::AT_LOCKED);
+        }
         self.vhp.cap.start(session);
         self.vhp.cap.on = true;
         match parsed {

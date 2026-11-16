@@ -1271,6 +1271,7 @@ impl Engine {
                     err::REFUSED => "refused",
                     err::BUSY => "busy",
                     err::AT_REFUSED => "not allowed from the app",
+                    err::AT_LOCKED => "locked over Wi-Fi (plug in by USB to change settings)",
                     _ => "error",
                 };
                 self.event(UiEvent::Error(format!("modem: message 0x{ty:02X} {why}")));

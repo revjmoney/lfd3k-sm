@@ -162,6 +162,9 @@ impl Multi {
         if !ss.open[s] {
             if let Some(md) = self.modems.get_mut(m) {
                 md.voice_open(session, now);
+                // The simulated apps are local, like the USB cable: full
+                // control (the firmware's TCP sessions never get it).
+                md.voice_grant_settings(session);
             }
             ss.open[s] = true;
         }

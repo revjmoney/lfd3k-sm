@@ -62,6 +62,8 @@ struct Net {
     sent: Vec<Vec<(u8, u8)>>,
     /// Sessions that send a Heartbeat every second (the apps are alive).
     keep: Vec<(usize, u8)>,
+    /// The air is cut: no frame reaches anyone.
+    cut: bool,
 }
 
 fn cfg(name: &str, cap: Option<Tier>) -> Config {
@@ -92,6 +94,7 @@ impl Net {
             pending: (0..n).map(|_| Default::default()).collect(),
             sent: vec![Vec::new(); n],
             keep: Vec::new(),
+            cut: false,
         };
         net.run(10);
         net
@@ -154,7 +157,8 @@ impl Net {
             .into_iter()
             .partition(|f| f.end_us <= now_us);
         self.air = rest;
-        for f in due {
+        let cut = self.cut;
+        for f in due.into_iter().filter(|_| !cut) {
             for &k in &f.to {
                 if self.r[k].listen == Some(f.tier) && k != f.from {
                     let info = RxInfo {
@@ -216,7 +220,15 @@ impl Net {
         String::from_utf8_lossy(&std::mem::take(&mut self.host[i])).into_owned()
     }
 
+    /// Open session `s` as a local app with full control (as the PC
+    /// app's built-in modem does).
     fn open(&mut self, i: usize, s: u8) {
+        self.open_wifi(i, s);
+        assert!(self.m[i].voice_grant_settings(s), "grant session {s}");
+    }
+
+    /// Open session `s` read-only, as the firmware opens a TCP app.
+    fn open_wifi(&mut self, i: usize, s: u8) {
         let now = self.now;
         assert!(self.m[i].voice_open(s, now), "open session {s}");
     }
@@ -1112,4 +1124,180 @@ fn boot_to_menu() -> Net {
     net.m[0].load_settings(s);
     net.host_text(0);
     net
+}
+
+// ---- Voice part 2 fixes (docs/superpowers/plans/2026-11-15-lfd3k-sm-voice-2-fixes.md).
+
+#[test]
+fn wifi_session_cannot_change_settings() {
+    // Rev's ruling 2026-11-15: nobody changes modem settings over Wi-Fi.
+    let mut net = Net::one("ALPHA");
+    net.open_wifi(0, 2);
+    net.send(0, 2, &[msg::HELLO, 1]);
+    net.read(0, 2);
+    let s30 = at_line(&mut net, 0, 2, "ATS30?").unwrap();
+    for line in [
+        "ATS30=5",
+        "ats21=4",
+        " AT S30 = 5",
+        "AT&W",
+        "ATZ",
+        "ATE0",
+        "ATV0",
+        "ATH",
+        "AT+WSTA=HOME,secretpass",
+        "AT+WSTA=0",
+        "AT+WAP=0",
+        "AT+FWD=BBS,bbs.example.com,23,T",
+        "AT+FWD=BBS",
+        "AT+PUB=AXIS",
+        "AT+BEACON=HIDDEN",
+        "AT+NAME=EVIL",
+        "AT+DIR=+V:REV",
+        "AT+DIR=-V:REV",
+        "AT+DIR=+BRAVO",
+        "AT+DIR=-BRAVO",
+        "AT+DIR=0",
+        "not an AT line",
+    ] {
+        assert_eq!(
+            at_line(&mut net, 0, 2, line),
+            Err((msg::AT_LINE, err::AT_LOCKED)),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        at_line(&mut net, 0, 2, "ATS30?").unwrap(),
+        s30,
+        "S30 unchanged"
+    );
+    // Lines that only read still work.
+    for line in [
+        "AT",
+        "ATI",
+        "AT&V",
+        "ATS21?",
+        "AT+WAP?",
+        "AT+WSTA?",
+        "AT+WIFI?",
+        "AT+FWD?",
+        "AT+PUB?",
+        "AT+FOUND?",
+        "AT+SIMNET?",
+        "AT+BEACON?",
+        "AT+NAME?",
+        "AT+MODE?",
+        "AT+DIR?",
+    ] {
+        let r = at_line(&mut net, 0, 2, line);
+        assert!(r.is_ok(), "{line}: {r:?}");
+    }
+    // Lines that take the host link keep their own error.
+    assert_eq!(
+        at_line(&mut net, 0, 2, "ATDT BRAVO"),
+        Err((msg::AT_LINE, err::AT_REFUSED))
+    );
+    // A scan transmits but changes nothing: it starts (its answers come
+    // later, so only its first reply is checked here).
+    let mut f = vec![msg::AT_LINE];
+    f.extend_from_slice(b"AT+SCAN");
+    net.send(0, 2, &f);
+    net.run(20);
+    assert!(errors(&net.read(0, 2)).is_empty(), "a scan reads only");
+    net.run(10_000);
+    net.read(0, 2);
+}
+
+#[test]
+fn granted_and_host_sessions_keep_full_control() {
+    let mut net = Net::one("ALPHA");
+    // A granted session (the PC app's own modem) changes settings.
+    net.open(0, 1);
+    assert!(at_line(&mut net, 0, 1, "ATS30=5").unwrap().contains("OK"));
+    assert!(at_line(&mut net, 0, 1, "ATS30?").unwrap().contains("005"));
+    // Closed and opened again: read-only until granted again.
+    let now = net.now;
+    net.m[0].voice_close(1, now);
+    assert!(
+        !net.m[0].voice_grant_settings(1),
+        "no grant on a closed session"
+    );
+    net.open_wifi(0, 1);
+    assert_eq!(
+        at_line(&mut net, 0, 1, "ATS30=6"),
+        Err((msg::AT_LINE, err::AT_LOCKED))
+    );
+    // Session 0 (USB, after AT+VOICE) always has full control.
+    assert!(!net.m[0].voice_grant_settings(0));
+    net.type_in(0, "ATE0\r");
+    net.host_text(0);
+    net.type_in(0, "AT+VOICE\r\n");
+    let t = net.host_text(0);
+    assert!(t.contains("OK"), "AT+VOICE: {t:?}");
+    net.send(0, 0, &[msg::HELLO, 1]);
+    net.read(0, 0);
+    let mut f = vec![msg::AT_LINE];
+    f.extend_from_slice(b"ATS30=7");
+    net.send(0, 0, &f);
+    net.run(20);
+    let got = net.read(0, 0);
+    assert!(errors(&got).is_empty(), "{:?}", errors(&got));
+    assert!(
+        got.iter().any(|f| f[0] == msg::AT_REPLY),
+        "session 0 ran the line"
+    );
+    assert!(at_line(&mut net, 0, 1, "ATS30?").unwrap().contains("007"));
+}
+
+/// REV (ALPHA session 1) on a connected SF9 call holds a ControlOut the
+/// link cannot take (the air is cut), then the app goes quiet. `stale`:
+/// the platform keeps offering a second ControlOut it could not hand over.
+fn held_then_quiet(stale: bool, alive: bool) -> Net {
+    let mut net = connected_pair(Some(Tier::Sf9));
+    voice_ready(&mut net);
+    net.cut = true;
+    let enc = |f: &[u8]| {
+        let mut w = [0u8; 300];
+        let n = cobs_encode(f, &mut w).unwrap();
+        w[..n].to_vec()
+    };
+    let mut big = vec![msg::CONTROL_OUT];
+    big.extend(std::iter::repeat_n(0x5A, 259));
+    net.pending[0][1].extend_from_slice(&enc(&big));
+    if stale {
+        net.pending[0][1].extend_from_slice(&enc(&[msg::CONTROL_OUT, 1]));
+    }
+    if !alive {
+        net.quiet(0, 1);
+    }
+    net.step();
+    net
+}
+
+#[test]
+fn dead_session_holding_control_times_out() {
+    for stale in [false, true] {
+        let mut net = held_then_quiet(stale, false);
+        let t0 = net.now;
+        let closed = net.run_until(VOICE_HEARTBEAT_MS + 3_000, |n| {
+            !n.m[0].voice_session_open(1)
+        });
+        assert!(closed, "stale {stale}: the dead session closed");
+        assert!(
+            net.now - t0 >= VOICE_HEARTBEAT_MS - 1_000,
+            "not before the heartbeat"
+        );
+        let gone = net.run_until(15_000, |n| n.m[0].voice_call().is_none());
+        assert!(gone, "stale {stale}: its call was hung up");
+    }
+}
+
+#[test]
+fn live_session_holding_control_stays_open() {
+    // The app keeps its Heartbeat: frames behind the held ControlOut are
+    // taken, so the session stays while the link is stuck (until the call
+    // itself is lost).
+    let mut net = held_then_quiet(false, true);
+    net.run(VOICE_HEARTBEAT_MS * 2);
+    assert!(net.m[0].voice_session_open(1), "the live app is still open");
 }
