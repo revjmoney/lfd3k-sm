@@ -421,3 +421,115 @@ fn leave_frame() -> Vec<u8> {
     let n = cobs_encode(&[msg::LEAVE], &mut b).unwrap_or(0);
     b.get(..n).unwrap_or(&[]).to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn parse_modem_spec_cases() {
+        assert_eq!(parse_modem_spec("sim"), Ok(ModemSpec::Sim));
+        assert_eq!(
+            parse_modem_spec("COM11"),
+            Ok(ModemSpec::Serial("COM11".into()))
+        );
+        assert_eq!(
+            parse_modem_spec("/dev/ttyUSB0"),
+            Ok(ModemSpec::Serial("/dev/ttyUSB0".into()))
+        );
+        assert_eq!(
+            parse_modem_spec("tcp:10.1.2.3"),
+            Ok(ModemSpec::Tcp("10.1.2.3".into(), VOICE_PORT))
+        );
+        assert_eq!(
+            parse_modem_spec("tcp:host:4300"),
+            Ok(ModemSpec::Tcp("host".into(), 4300))
+        );
+        assert_eq!(parse_modem_spec("find"), Ok(ModemSpec::Find(None)));
+        assert_eq!(
+            parse_modem_spec("find:AXISMODEM-E4B0"),
+            Ok(ModemSpec::Find(Some("AXISMODEM-E4B0".into())))
+        );
+        assert!(parse_modem_spec("").is_err());
+        assert!(parse_modem_spec("tcp:").is_err());
+    }
+
+    /// A frame as the modem sends it.
+    fn ack_frame() -> Vec<u8> {
+        let mut b = [0u8; 40];
+        let n = cobs_encode(&[msg::HELLO_ACK, 1, 3, b'R', b'E', b'V'], &mut b).unwrap();
+        b[..n].to_vec()
+    }
+
+    #[test]
+    fn handshake_skips_echo() {
+        let frame = ack_frame();
+        let mut reply = b"AT+VOICE\r\r\nOK\r\n".to_vec();
+        let ok_len = reply.len();
+        // Without the frame yet the answer is already complete.
+        assert_eq!(voice_handshake(&reply), HandshakeStep::Ok(ok_len));
+        reply.extend_from_slice(&frame);
+        match voice_handshake(&reply) {
+            HandshakeStep::Ok(n) => {
+                assert_eq!(n, ok_len);
+                assert_eq!(&reply[n..], &frame[..]);
+            }
+            other => panic!("want Ok, got {other:?}"),
+        }
+        // Not complete yet: only the echo, or an OK whose LF has not come.
+        assert_eq!(voice_handshake(b"AT+VOICE\r\r\n"), HandshakeStep::Need);
+        assert_eq!(voice_handshake(b"AT+VOICE\r\r\nOK\r"), HandshakeStep::Need);
+    }
+
+    #[test]
+    fn handshake_error() {
+        assert!(matches!(
+            voice_handshake(b"ERROR\r\n"),
+            HandshakeStep::Error(_)
+        ));
+        assert!(matches!(
+            voice_handshake(b"AT+VOICE\r\r\nERROR\r\n"),
+            HandshakeStep::Error(_)
+        ));
+    }
+
+    #[test]
+    fn tcp_link_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let frame = ack_frame();
+        let reply = frame.clone();
+        let srv = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let mut b = [0u8; 64];
+            // Read one frame (it ends with a zero), answer, keep it open
+            // until the client has read.
+            while !got.ends_with(&[0]) {
+                let n = s.read(&mut b).unwrap();
+                assert!(n > 0, "the client closed early");
+                got.extend_from_slice(&b[..n]);
+            }
+            s.write_all(&reply).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            got
+        });
+        let mut link = TcpLink::connect(addr, 2_000).unwrap();
+        let mut hello = [0u8; 8];
+        let n = cobs_encode(&[msg::HELLO, 1], &mut hello).unwrap();
+        link.send(&hello[..n]).unwrap();
+        let mut rx = Vec::new();
+        let mut buf = [0u8; 64];
+        let until = Instant::now() + Duration::from_secs(3);
+        while rx.len() < frame.len() && Instant::now() < until {
+            let n = link.recv(&mut buf).unwrap();
+            rx.extend_from_slice(&buf[..n]);
+            if n == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(rx, frame, "the whole HelloAck frame came in");
+        assert_eq!(srv.join().unwrap(), hello[..n].to_vec());
+    }
+}

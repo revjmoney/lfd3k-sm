@@ -103,3 +103,21 @@ pub fn find_modem(station: Option<&str>, timeout_ms: u32) -> Result<(String, Soc
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_port_from_txt_cases() {
+        assert_eq!(voice_port_from_txt(&[("voice", "4220")]), Some(4220));
+        assert_eq!(
+            voice_port_from_txt(&[("name", "REV"), ("VOICE", " 4220 ")]),
+            Some(4220)
+        );
+        assert_eq!(voice_port_from_txt(&[("name", "REV"), ("ver", "1")]), None);
+        assert_eq!(voice_port_from_txt(&[]), None);
+        assert_eq!(voice_port_from_txt(&[("voice", "abc")]), None);
+        assert_eq!(voice_port_from_txt(&[("voice", "0")]), None);
+    }
+}

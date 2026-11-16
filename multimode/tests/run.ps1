@@ -7,6 +7,7 @@
 # test_picker       picker menu state machine (picker_menu.c)
 # test_modem_side   the real firmware/src/mode_switch.c and settings_store.c on a fake
 #                   ESP-IDF layer, with choose.c and picker_menu.c in the same binary
+# test_voice_peer   the real firmware/src/voice_peer.c (who may open a TCP voice session)
 # guards            the #error guards in mode_switch.c must fire for each forbidden
 #                   sdkconfig option (the compile is expected to fail)
 [CmdletBinding()]
@@ -38,6 +39,7 @@ function Build-And-Run($name, $sources, $extra) {
 
 Build-And-Run 'test_choose' @("$here\test_choose.c", "$mm\bootloader\choose.c") @()
 Build-And-Run 'test_picker' @("$here\test_picker.c", "$mm\picker\src\picker_menu.c") @()
+Build-And-Run 'test_voice_peer' @("$here\test_voice_peer.c", "$root\firmware\src\voice_peer.c") @("-I$root\firmware\src")
 Build-And-Run 'test_modem_side' @("$here\test_modem_side.c", "$here\fake\fake_esp.c", "$mm\bootloader\choose.c",
     "$mm\picker\src\picker_menu.c", "$root\firmware\src\mode_switch.c", "$root\firmware\src\settings_store.c") $fake
 
