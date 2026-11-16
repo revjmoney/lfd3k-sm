@@ -33,7 +33,7 @@ lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 | `--name`, `--label` | Your voice name (a person, like REV) and this device's label (like PC). Used the first time only, to make this device's keys; after that change them in Settings, Voice and keys. Default REV and PC |
 | `--bind`, `--peer` | Built-in modem only. This app's UDP address and the other app's (both `addr:port`). Defaults 127.0.0.1:4211 and 127.0.0.1:4210 |
 | `--snr <dB>` | Built-in modem only. What the other modem hears from ours (default 8). Lower is slower: the tier, codec and talk mode follow it |
-| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away. On a real modem the app reads S21 first and puts the old value back when you close it (it never saves with AT&W). SAVE in Settings saves your other changes with the old S21, so the cap is never kept |
+| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away. On a real modem the app reads S21 first and puts the old value back when you close it (it never saves with AT&W). On a real modem, SAVE in Settings saves your other changes with the old S21, so the cap is not kept |
 | `--data <dir>` | Where this device keeps its keys, checked contacts and the modem's saved settings. Default `%APPDATA%\lfd3k-voice-pc\<NAME>-<LABEL>` |
 | `--station <NAME>` | Built-in modem only. Its station name. Default `PCMODEM-<port>`. A real modem has its own name (AT+NAME) |
 | `--auto-answer` | Test helper: the app picks up by itself and talks anyway (the two words still show). The modem's S0 still never answers voice; this is the app's choice |

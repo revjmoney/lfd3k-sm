@@ -361,6 +361,8 @@ struct Worker {
     link_desc: String,
     /// `--cap-tier` on a real modem: S21 as it was, put back on Quit.
     cap_old: Option<u16>,
+    /// The window's ATZ sent while the cap is on: its OK ends the cap.
+    cap_reset_tag: Option<u32>,
     /// When the line putting S21 back went to the modem (Quit).
     restore_sent: Option<u32>,
     /// A real modem: when bytes last came from it, and whether it has sent
@@ -529,6 +531,7 @@ impl Worker {
             clock: Instant::now(),
             link_desc: String::new(),
             cap_old: None,
+            cap_reset_tag: None,
             restore_sent: None,
             rx_at: now,
             scope_seen: false,
@@ -945,21 +948,18 @@ impl Worker {
             }
             Cmd::LinkJoin(code) => e.join_link(&code),
             Cmd::CancelLink => e.cancel_link(),
-            Cmd::At { tag, line } => match self.cap_old {
-                // The cap is never saved: S21 goes back to the old value
-                // for the AT&W, then the cap again.
-                Some(old) if is_save_line(&line) => {
-                    let cap = self.o.cap_tier.map_or(0, |t| t.index());
-                    self.at
-                        .wait
-                        .push_back((TAG_CAP_UNSET, Zeroizing::new(format!("ATS21={old}"))));
-                    self.at.wait.push_back((tag, line));
-                    self.at
-                        .wait
-                        .push_back((TAG_CAP_SET, Zeroizing::new(format!("ATS21={cap}"))));
+            Cmd::At { tag, line } => {
+                let cap = match (self.cap_old, self.o.cap_tier) {
+                    (Some(old), Some(t)) => Some((old, t.index())),
+                    _ => None,
+                };
+                // ATZ loads the saved S21: once it answers OK the cap is
+                // gone (nothing to put back or keep out of a save).
+                if cap.is_some() && is_reset_line(&line) {
+                    self.cap_reset_tag = Some(tag);
                 }
-                _ => self.at.wait.push_back((tag, line)),
-            },
+                queue_window_line(&mut self.at.wait, tag, line, cap);
+            }
             Cmd::RefreshDir => e.refresh_directory(),
             Cmd::RemoveMyDevice(d) => {
                 e.remove_my_device(d);
@@ -1347,18 +1347,15 @@ impl Worker {
                 if !ok {
                     // The AT&W right behind it would save the cap: it is
                     // not sent, and the window hears the save failed.
-                    if let Some(&(t, _)) = self.at.wait.front() {
-                        if t < TAG_CAP_READ {
-                            self.at.wait.pop_front();
-                            self.at_done(
-                                t,
-                                format!(
-                                    "not saved: S21 could not be put back before AT&W ({})",
-                                    text.trim()
-                                ),
-                                false,
-                            );
-                        }
+                    if let Some(t) = take_save_behind(&mut self.at.wait) {
+                        self.at_done(
+                            t,
+                            format!(
+                                "not saved: S21 could not be put back before AT&W ({})",
+                                text.trim()
+                            ),
+                            false,
+                        );
                     }
                 }
             }
@@ -1377,7 +1374,15 @@ impl Worker {
                     self.send(Ev::Note(format!("could not put S21 back: {}", text.trim())));
                 }
             }
-            _ => self.send(Ev::At { tag, text, ok }),
+            _ => {
+                if self.cap_reset_tag == Some(tag) {
+                    self.cap_reset_tag = None;
+                    if ok {
+                        self.cap_old = None;
+                    }
+                }
+                self.send(Ev::At { tag, text, ok })
+            }
         }
     }
 
@@ -1430,6 +1435,43 @@ impl Worker {
 /// An AT line that saves the profile (`AT&W`, any case and spaces).
 fn is_save_line(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case("AT&W")
+}
+
+/// An AT line that loads the saved profile (`ATZ`, DISCARD).
+fn is_reset_line(line: &str) -> bool {
+    line.trim().eq_ignore_ascii_case("ATZ")
+}
+
+/// A window line into the AtLine queue. With `--cap-tier` holding S21 on a
+/// real modem (`cap`: the old S21 and the cap), an AT&W goes out between
+/// `ATS21=<old>` and `ATS21=<cap>`, so the saved profile keeps the old S21.
+fn queue_window_line(
+    wait: &mut VecDeque<(u32, Zeroizing<String>)>,
+    tag: u32,
+    line: Zeroizing<String>,
+    cap: Option<(u16, u8)>,
+) {
+    match cap {
+        Some((old, cap)) if is_save_line(&line) => {
+            wait.push_back((TAG_CAP_UNSET, Zeroizing::new(format!("ATS21={old}"))));
+            wait.push_back((tag, line));
+            wait.push_back((TAG_CAP_SET, Zeroizing::new(format!("ATS21={cap}"))));
+        }
+        _ => wait.push_back((tag, line)),
+    }
+}
+
+/// After a failed `ATS21=<old>`: the window's AT&W right behind it, taken
+/// out of the queue (its tag), so the cap is not saved. The thread's own
+/// lines (the Quit restore) stay.
+fn take_save_behind(wait: &mut VecDeque<(u32, Zeroizing<String>)>) -> Option<u32> {
+    match wait.front() {
+        Some(&(t, _)) if t < TAG_CAP_READ => {
+            wait.pop_front();
+            Some(t)
+        }
+        _ => None,
+    }
 }
 
 /// S21 from AT&V's S register line (`S21=007`).
@@ -1559,6 +1601,48 @@ fn before(until: Option<u32>, now: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(w: &VecDeque<(u32, Zeroizing<String>)>) -> Vec<(u32, String)> {
+        w.iter().map(|(t, l)| (*t, l.to_string())).collect()
+    }
+
+    #[test]
+    fn cap_tier_save_keeps_the_old_s21() {
+        let mut w = VecDeque::new();
+        queue_window_line(&mut w, 7, Zeroizing::new(" at&w ".into()), Some((0, 4)));
+        assert_eq!(
+            lines(&w),
+            vec![
+                (TAG_CAP_UNSET, "ATS21=0".to_string()),
+                (7, " at&w ".to_string()),
+                (TAG_CAP_SET, "ATS21=4".to_string()),
+            ]
+        );
+        // Other lines, or no cap: just the line.
+        let mut w = VecDeque::new();
+        queue_window_line(&mut w, 8, Zeroizing::new("ATS30=2".into()), Some((0, 4)));
+        queue_window_line(&mut w, 9, Zeroizing::new("AT&W".into()), None);
+        assert_eq!(
+            lines(&w),
+            vec![(8, "ATS30=2".to_string()), (9, "AT&W".to_string())]
+        );
+    }
+
+    #[test]
+    fn cap_tier_failed_unset_drops_only_the_window_save() {
+        let mut w = VecDeque::new();
+        queue_window_line(&mut w, 7, Zeroizing::new("AT&W".into()), Some((2, 5)));
+        // ATS21=<old> went out and failed: the AT&W behind it is taken.
+        w.pop_front();
+        assert_eq!(take_save_behind(&mut w), Some(7));
+        assert_eq!(lines(&w), vec![(TAG_CAP_SET, "ATS21=5".to_string())]);
+        // Quit cleared the queue and put the restore first: it stays.
+        let mut w = VecDeque::new();
+        w.push_back((TAG_CAP_RESTORE, Zeroizing::new("ATS21=2".to_string())));
+        assert_eq!(take_save_behind(&mut w), None);
+        assert_eq!(w.len(), 1);
+        assert!(take_save_behind(&mut VecDeque::new()).is_none());
+    }
 
     #[test]
     fn regression_link_ended_fires_once_on_the_falling_edge() {
