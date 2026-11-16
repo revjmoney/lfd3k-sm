@@ -242,6 +242,8 @@ fn button_font(r: Rect) -> FontId {
 
 /// A button exactly filling `r` (the only widgets with a radius: 5 px).
 fn button(ui: &mut Ui, r: Rect, text: &str, k: Kind, enabled: bool) -> egui::Response {
+    // A disabled area (Settings while locked over Wi-Fi) greys its buttons.
+    let enabled = enabled && ui.is_enabled();
     let (fill, fg, stroke) = match k {
         Kind::Primary => (ACCENT, BG, Stroke::new(1.0, ACCENT)),
         Kind::Plain => (SURFACE2, TEXT, Stroke::new(1.0, RULE_WARM)),
@@ -264,6 +266,21 @@ fn button(ui: &mut Ui, r: Rect, text: &str, k: Kind, enabled: bool) -> egui::Res
         ui.add_enabled(enabled, b)
     })
     .inner
+}
+
+/// The banner when a line is held back because settings are locked.
+const LOCKED_TEXT: &str = "SETTINGS ARE LOCKED OVER WI-FI: PLUG THE MODEM IN BY USB TO CHANGE THEM";
+/// The note on the Settings screen while locked.
+const LOCKED_NOTE: &str =
+    "Settings are locked over Wi-Fi. Plug the modem in by USB to change them.";
+
+/// Whether the window may send `line`: anything with full control; on a
+/// modem over Wi-Fi (`locked`) only the lines the modem runs there, the
+/// same rule it uses (`at_read_only`).
+pub(crate) fn line_allowed(locked: bool, line: &str) -> bool {
+    !locked
+        || lfd3k_core::at::parse_line(line.trim())
+            .is_ok_and(|c| lfd3k_core::voice::host::at_read_only(&c))
 }
 
 pub(crate) fn text(ui: &Ui, pos: Pos2, a: Align2, s: &str, f: FontId, c: Color32) -> Rect {
@@ -735,6 +752,10 @@ impl App {
     }
 
     fn at(&mut self, tag: u32, line: &str) {
+        if !line_allowed(self.s.locked, line) {
+            self.banner(LOCKED_TEXT, true);
+            return;
+        }
         self.at_open += 1;
         self.cmd(Cmd::At {
             tag,
@@ -756,6 +777,10 @@ impl App {
     }
 
     fn unsaved(&self) -> bool {
+        if self.s.locked {
+            // Nothing can be saved over Wi-Fi (and nothing was changed).
+            return false;
+        }
         // `--cap-tier` on a real modem holds S21 for this run only (SAVE
         // stores the old value), so S21 is not a change to save.
         let cap = self.s.cap_active;
@@ -1983,7 +2008,7 @@ impl App {
                 rect(bx + 72.0, y + 6.0, 84.0, bh),
                 pl,
                 if d.pinned { Kind::On } else { Kind::Plain },
-                !line.is_empty(),
+                !line.is_empty() && !self.s.locked,
             )
             .clicked()
             {
@@ -1995,7 +2020,7 @@ impl App {
                     rect(bx + 164.0, y + 6.0, 80.0, bh),
                     "DELETE",
                     Kind::Plain,
-                    true,
+                    !self.s.locked,
                 )
                 .clicked()
             {
@@ -2223,7 +2248,7 @@ impl App {
             rect(x, py + 120.0, w, 36.0),
             "PIN",
             Kind::Primary,
-            !n.is_empty(),
+            !n.is_empty() && !self.s.locked,
         )
         .clicked()
         {
@@ -2240,7 +2265,7 @@ impl App {
             rect(x, right.bottom() - 40.0, w, 34.0),
             "CLEAR UNPINNED (AT+DIR=0)",
             Kind::Plain,
-            true,
+            !self.s.locked,
         )
         .clicked()
         {
@@ -2281,24 +2306,40 @@ impl App {
                 self.tab = *t;
             }
         }
+        let locked = self.s.locked;
         text_wrap(
             ui,
-            rect(nav.left() + 18.0, nav.bottom() - 104.0, nav.width() - 36.0, 96.0),
-            "Every change is one AT line, the same the AT+MENU sends, and is live at once. SAVE (the bar on top) keeps it after a restart.",
+            rect(
+                nav.left() + 18.0,
+                nav.bottom() - 104.0,
+                nav.width() - 36.0,
+                96.0,
+            ),
+            if locked {
+                LOCKED_NOTE
+            } else {
+                "Every change is one AT line, the same the AT+MENU sends, and is live at once. SAVE (the bar on top) keeps it after a restart."
+            },
             sans(12.5),
-            DIM,
+            if locked { WARN } else { DIM },
         );
         let body = Rect::from_min_max(Pos2::new(nav.right() + 20.0, r.top()), r.max);
         panel(ui, body);
         let inner = body.shrink2(Vec2::new(24.0, 14.0));
-        match self.tab {
-            Tab::Radio => self.tab_radio(ui, inner),
-            Tab::Privacy => self.tab_privacy(ui, inner),
-            Tab::Wifi => self.tab_wifi(ui, inner),
-            Tab::Forwards => self.tab_forwards(ui, inner),
-            Tab::Voice => self.tab_voice(ui, inner),
-            Tab::About => self.tab_about(ui, inner),
-        }
+        ui.scope(|ui| {
+            if locked {
+                // Read only: every control greyed out (and `at` refuses).
+                ui.disable();
+            }
+            match self.tab {
+                Tab::Radio => self.tab_radio(ui, inner),
+                Tab::Privacy => self.tab_privacy(ui, inner),
+                Tab::Wifi => self.tab_wifi(ui, inner),
+                Tab::Forwards => self.tab_forwards(ui, inner),
+                Tab::Voice => self.tab_voice(ui, inner),
+                Tab::About => self.tab_about(ui, inner),
+            }
+        });
     }
 
     /// One register row: name, note, value and - / + (and a typed value).
@@ -2640,7 +2681,7 @@ impl App {
                 rect(x + w * 0.6 - 110.0, ry + 4.0, 100.0, 32.0),
                 if voice { "UNPIN" } else { "DELETE" },
                 Kind::Plain,
-                true,
+                !self.s.locked,
             )
             .clicked()
             {
@@ -2730,7 +2771,7 @@ impl App {
             rect(ax, y + 160.0, aw, 40.0),
             "PIN",
             Kind::Primary,
-            !n.is_empty(),
+            !n.is_empty() && !self.s.locked,
         )
         .clicked()
         {
@@ -4125,6 +4166,24 @@ fn link_code_stays(shown: bool, sig: Option<LinkSig>, snapshot_linking: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_over_wifi_sends_only_reading_lines() {
+        for l in [
+            "AT&W",
+            "ATZ",
+            "ATS30=5",
+            "AT+DIR=+V:REV",
+            "AT+DIR=0",
+            "AT+WSTA=A,B",
+        ] {
+            assert!(!line_allowed(true, l), "{l}");
+            assert!(line_allowed(false, l), "{l} with full control");
+        }
+        for l in ["AT&V", "AT+FWD?", "AT+WAP?", "AT+SCAN", "AT+DIR?", "ATS21?"] {
+            assert!(line_allowed(true, l), "{l}");
+        }
+    }
 
     #[test]
     fn regression_link_code_stays_until_an_explicit_end() {

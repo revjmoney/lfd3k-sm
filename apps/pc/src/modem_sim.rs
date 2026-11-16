@@ -201,6 +201,10 @@ pub struct Snap {
     /// `--cap-tier` holds a real modem's S21 for this run: S21 is left out
     /// of what Save and Discard compare (SAVE stores the old S21).
     pub cap_active: bool,
+    /// The modem is on Wi-Fi (`tcp:` or `find`): it runs only the AT lines
+    /// that change nothing (`lfd3k_core::voice::host::at_read_only`), so
+    /// the window greys out Settings and the directory edits.
+    pub locked: bool,
     /// Longest gap between two passes of the modem loop (ms), and passes.
     pub max_gap_ms: u32,
     pub passes: u64,
@@ -233,6 +237,7 @@ impl Default for Snap {
             udp_peer: String::new(),
             link: String::new(),
             cap_active: false,
+            locked: false,
             max_gap_ms: 0,
             passes: 0,
             ring_s: 0.0,
@@ -361,8 +366,14 @@ struct Worker {
     link_desc: String,
     /// `--cap-tier` on a real modem: S21 as it was, put back on Quit.
     cap_old: Option<u16>,
-    /// The window's ATZ sent while the cap is on: its OK ends the cap.
-    cap_reset_tag: Option<u32>,
+    /// The window's ATZ, or its own `ATS21=`, sent while the cap is on:
+    /// its OK ends the cap (true: say so in a note).
+    cap_end_tag: Option<(u32, bool)>,
+    /// A real modem on Wi-Fi: its settings are locked (see `Snap::locked`).
+    locked: bool,
+    /// `ATS21=<old>` went out for the window AT&W at the front of the
+    /// queue: that AT&W goes as it is (see `take_next`).
+    save_armed: bool,
     /// When the line putting S21 back went to the modem (Quit).
     restore_sent: Option<u32>,
     /// A real modem: when bytes last came from it, and whether it has sent
@@ -439,8 +450,10 @@ pub fn spawn(
         .name("modem".into())
         .spawn(move || {
             let link_desc = link.describe();
+            let locked = matches!(link, ModemLink::Tcp(_));
             let mut w = Worker::new(o, Backend::Real(link), id, tx, snap, ctx, 0);
             w.link_desc = link_desc;
+            w.locked = locked;
             if w.o.cap_tier.is_some() {
                 // Read S21 first (to put it back), then the cap; both go
                 // ahead of the window's first AT&V.
@@ -499,6 +512,8 @@ fn spawn_sim(
                 while modem.host_output(&mut b) > 0 {}
             }
             modem.voice_open(SESSION, now);
+            // The app's own modem is local, like a USB cable: full control.
+            modem.voice_grant_settings(SESSION);
             let be = Backend::Sim {
                 modem: Box::new(modem),
                 radio: Box::new(radio),
@@ -531,7 +546,9 @@ impl Worker {
             clock: Instant::now(),
             link_desc: String::new(),
             cap_old: None,
-            cap_reset_tag: None,
+            cap_end_tag: None,
+            locked: false,
+            save_armed: false,
             restore_sent: None,
             rx_at: now,
             scope_seen: false,
@@ -948,18 +965,9 @@ impl Worker {
             }
             Cmd::LinkJoin(code) => e.join_link(&code),
             Cmd::CancelLink => e.cancel_link(),
-            Cmd::At { tag, line } => {
-                let cap = match (self.cap_old, self.o.cap_tier) {
-                    (Some(old), Some(t)) => Some((old, t.index())),
-                    _ => None,
-                };
-                // ATZ loads the saved S21: once it answers OK the cap is
-                // gone (nothing to put back or keep out of a save).
-                if cap.is_some() && is_reset_line(&line) {
-                    self.cap_reset_tag = Some(tag);
-                }
-                queue_window_line(&mut self.at.wait, tag, line, cap);
-            }
+            // What the cap does to a line is decided when it is sent
+            // (`at_next`): the S21 read may still be on its way now.
+            Cmd::At { tag, line } => self.at.wait.push_back((tag, line)),
             Cmd::RefreshDir => e.refresh_directory(),
             Cmd::RemoveMyDevice(d) => {
                 e.remove_my_device(d);
@@ -1022,6 +1030,7 @@ impl Worker {
                 modem.voice_close(SESSION, now);
                 self.vin.clear();
                 modem.voice_open(SESSION, now);
+                modem.voice_grant_settings(SESSION);
             }
         } else {
             // A real modem: no Leave (it would end the session; USB goes
@@ -1304,9 +1313,17 @@ impl Worker {
             }
             return;
         }
-        let Some((tag, line)) = self.at.wait.pop_front() else {
+        let cap = match (self.cap_old, self.o.cap_tier) {
+            (Some(old), Some(t)) => Some((old, t.index())),
+            _ => None,
+        };
+        let Some((tag, line, ends)) = take_next(&mut self.at.wait, cap, &mut self.save_armed)
+        else {
             return;
         };
+        if let Some(note) = ends {
+            self.cap_end_tag = Some((tag, note));
+        }
         if matches!(self.be, Backend::Gone) {
             self.at_done(tag, "no modem (MODEM LOST)".into(), false);
         } else if self.engine.at_line(&line) {
@@ -1345,6 +1362,7 @@ impl Worker {
             }
             TAG_CAP_UNSET => {
                 if !ok {
+                    self.save_armed = false;
                     // The AT&W right behind it would save the cap: it is
                     // not sent, and the window hears the save failed.
                     if let Some(t) = take_save_behind(&mut self.at.wait) {
@@ -1375,10 +1393,14 @@ impl Worker {
                 }
             }
             _ => {
-                if self.cap_reset_tag == Some(tag) {
-                    self.cap_reset_tag = None;
-                    if ok {
-                        self.cap_old = None;
+                if let Some((t, note)) = self.cap_end_tag {
+                    if t == tag {
+                        self.cap_end_tag = None;
+                        if ok && self.cap_old.take().is_some() && note {
+                            self.send(Ev::Note(
+                                "tier cap ended: S21 set in Settings (kept after Quit)".into(),
+                            ));
+                        }
                     }
                 }
                 self.send(Ev::At { tag, text, ok })
@@ -1421,6 +1443,7 @@ impl Worker {
             udp_peer: self.o.peer.to_string(),
             link: self.link_desc.clone(),
             cap_active: self.cap_old.is_some(),
+            locked: self.locked,
             max_gap_ms: self.max_gap,
             passes: self.passes,
             ring_s: self.ring_total as f32 / 16_000.0,
@@ -1442,22 +1465,41 @@ fn is_reset_line(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case("ATZ")
 }
 
-/// A window line into the AtLine queue. With `--cap-tier` holding S21 on a
-/// real modem (`cap`: the old S21 and the cap), an AT&W goes out between
-/// `ATS21=<old>` and `ATS21=<cap>`, so the saved profile keeps the old S21.
-fn queue_window_line(
+/// An AT line that sets S21 (`ATS21=<n>`, any case and spaces).
+fn is_s21_set_line(line: &str) -> bool {
+    let l: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    l.to_ascii_uppercase().starts_with("ATS21=")
+}
+
+/// The next AtLine to send, decided now with `--cap-tier`'s state as it is
+/// at send time (`cap`: the old S21 and the cap, while the cap holds a
+/// real modem's S21). A window AT&W goes out between `ATS21=<old>` and
+/// `ATS21=<cap>` (the old one is sent now, the AT&W and the cap stay at
+/// the front, `armed` set so it is not wrapped again), so the saved profile
+/// keeps the old S21. The third value is
+/// set when the line ends the cap once it answers OK: a window ATZ (false,
+/// it loads the saved S21) or a window `ATS21=` (true: the user's tier
+/// wins, with a note).
+fn take_next(
     wait: &mut VecDeque<(u32, Zeroizing<String>)>,
-    tag: u32,
-    line: Zeroizing<String>,
     cap: Option<(u16, u8)>,
-) {
+    armed: &mut bool,
+) -> Option<(u32, Zeroizing<String>, Option<bool>)> {
+    let (tag, line) = wait.pop_front()?;
+    let window = tag < TAG_CAP_READ;
+    if window && is_save_line(&line) && core::mem::take(armed) {
+        return Some((tag, line, None));
+    }
     match cap {
-        Some((old, cap)) if is_save_line(&line) => {
-            wait.push_back((TAG_CAP_UNSET, Zeroizing::new(format!("ATS21={old}"))));
-            wait.push_back((tag, line));
-            wait.push_back((TAG_CAP_SET, Zeroizing::new(format!("ATS21={cap}"))));
+        Some((old, cap)) if window && is_save_line(&line) => {
+            wait.push_front((TAG_CAP_SET, Zeroizing::new(format!("ATS21={cap}"))));
+            wait.push_front((tag, line));
+            *armed = true;
+            Some((TAG_CAP_UNSET, Zeroizing::new(format!("ATS21={old}")), None))
         }
-        _ => wait.push_back((tag, line)),
+        Some(_) if window && is_reset_line(&line) => Some((tag, line, Some(false))),
+        Some(_) if window && is_s21_set_line(&line) => Some((tag, line, Some(true))),
+        _ => Some((tag, line, None)),
     }
 }
 
@@ -1606,34 +1648,87 @@ mod tests {
         w.iter().map(|(t, l)| (*t, l.to_string())).collect()
     }
 
+    /// Every line `take_next` sends from `w` with the cap as `cap(i)` at
+    /// the i-th send: (tag, line, ends the cap).
+    fn drain(
+        w: &mut VecDeque<(u32, Zeroizing<String>)>,
+        cap: impl Fn(usize) -> Option<(u16, u8)>,
+    ) -> Vec<(u32, String, Option<bool>)> {
+        let mut armed = false;
+        let mut out = Vec::new();
+        while let Some((t, l, e)) = take_next(w, cap(out.len()), &mut armed) {
+            out.push((t, l.to_string(), e));
+            assert!(out.len() < 20, "take_next loops");
+        }
+        out
+    }
+
+    fn q(items: &[(u32, &str)]) -> VecDeque<(u32, Zeroizing<String>)> {
+        items
+            .iter()
+            .map(|&(t, l)| (t, Zeroizing::new(l.to_string())))
+            .collect()
+    }
+
     #[test]
     fn cap_tier_save_keeps_the_old_s21() {
-        let mut w = VecDeque::new();
-        queue_window_line(&mut w, 7, Zeroizing::new(" at&w ".into()), Some((0, 4)));
+        let mut w = q(&[(7, " at&w ")]);
         assert_eq!(
-            lines(&w),
+            drain(&mut w, |_| Some((0, 4))),
             vec![
-                (TAG_CAP_UNSET, "ATS21=0".to_string()),
-                (7, " at&w ".to_string()),
-                (TAG_CAP_SET, "ATS21=4".to_string()),
+                (TAG_CAP_UNSET, "ATS21=0".to_string(), None),
+                (7, " at&w ".to_string(), None),
+                (TAG_CAP_SET, "ATS21=4".to_string(), None),
             ]
         );
         // Other lines, or no cap: just the line.
-        let mut w = VecDeque::new();
-        queue_window_line(&mut w, 8, Zeroizing::new("ATS30=2".into()), Some((0, 4)));
-        queue_window_line(&mut w, 9, Zeroizing::new("AT&W".into()), None);
+        let mut w = q(&[(8, "ATS30=2"), (9, "AT&W")]);
         assert_eq!(
-            lines(&w),
-            vec![(8, "ATS30=2".to_string()), (9, "AT&W".to_string())]
+            drain(&mut w, |_| None),
+            vec![
+                (8, "ATS30=2".to_string(), None),
+                (9, "AT&W".to_string(), None)
+            ]
         );
     }
 
     #[test]
+    fn cap_tier_decided_when_sent_not_when_queued() {
+        // The window's AT&W and ATZ were queued before the S21 read
+        // answered (no cap then); by the time each is sent the cap holds.
+        let mut w = q(&[(TAG_CAP_READ, "AT&V"), (5, "AT&W"), (6, "ATZ")]);
+        let got = drain(&mut w, |i| (i > 0).then_some((1, 3)));
+        assert_eq!(
+            got,
+            vec![
+                (TAG_CAP_READ, "AT&V".to_string(), None),
+                (TAG_CAP_UNSET, "ATS21=1".to_string(), None),
+                (5, "AT&W".to_string(), None),
+                (TAG_CAP_SET, "ATS21=3".to_string(), None),
+                (6, "ATZ".to_string(), Some(false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn cap_tier_s21_edit_ends_the_cap() {
+        let mut w = q(&[(4, "ATS21=2"), (5, "ats21 = 6"), (6, "ATS21?")]);
+        let got = drain(&mut w, |_| Some((1, 3)));
+        assert_eq!(got[0], (4, "ATS21=2".to_string(), Some(true)));
+        assert_eq!(got[1].2, Some(true));
+        assert_eq!(got[2].2, None, "a query does not end the cap");
+        // Without a cap nothing ends.
+        let mut w = q(&[(4, "ATS21=2")]);
+        assert_eq!(drain(&mut w, |_| None)[0].2, None);
+    }
+
+    #[test]
     fn cap_tier_failed_unset_drops_only_the_window_save() {
-        let mut w = VecDeque::new();
-        queue_window_line(&mut w, 7, Zeroizing::new("AT&W".into()), Some((2, 5)));
+        let mut w = q(&[(7, "AT&W")]);
+        let mut armed = false;
+        let first = take_next(&mut w, Some((2, 5)), &mut armed).unwrap();
+        assert_eq!(first.0, TAG_CAP_UNSET);
         // ATS21=<old> went out and failed: the AT&W behind it is taken.
-        w.pop_front();
         assert_eq!(take_save_behind(&mut w), Some(7));
         assert_eq!(lines(&w), vec![(TAG_CAP_SET, "ATS21=5".to_string())]);
         // Quit cleared the queue and put the restore first: it stays.
