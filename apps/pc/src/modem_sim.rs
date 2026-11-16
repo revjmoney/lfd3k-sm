@@ -88,6 +88,15 @@ const FIND_MS: u32 = 5_000;
 const RESTORE_MS: u32 = 2_000;
 /// The most link reads in one pass (the rest wait for the next pass).
 const RECV_PASSES: usize = 64;
+/// A real modem that sends nothing for this long is lost. Once it has sent
+/// a Scope frame (every 250 ms on every open session, session 0 too, while
+/// the firmware feeds channel samples: `lfd3k_poll` does every 50 ms when
+/// the radio answers), 3 s of silence means it is gone (a reset, a crash, a
+/// session it closed). Before that (a modem whose radio failed sends no
+/// Scope), the engine's DirList every 15 s while idle is the frame that
+/// always gets an answer (DirEnd), so 20 s.
+const SILENT_SCOPE_MS: u32 = 3_000;
+const SILENT_MS: u32 = 20_000;
 /// AtLine tags the thread keeps for itself (the window's are small).
 const TAG_CAP_READ: u32 = 0xFFFF_0001;
 const TAG_CAP_SET: u32 = 0xFFFF_0002;
@@ -346,6 +355,10 @@ struct Worker {
     cap_old: Option<u16>,
     /// When the line putting S21 back went to the modem (Quit).
     restore_sent: Option<u32>,
+    /// A real modem: when bytes last came from it, and whether it has sent
+    /// a Scope frame (then silence is judged sooner).
+    rx_at: u32,
+    scope_seen: bool,
     engine: Engine,
     vin: VecDeque<u8>,
     at: AtQueue,
@@ -509,6 +522,8 @@ impl Worker {
             link_desc: String::new(),
             cap_old: None,
             restore_sent: None,
+            rx_at: now,
+            scope_seen: false,
             engine,
             vin: VecDeque::new(),
             at: AtQueue {
@@ -816,9 +831,24 @@ impl Worker {
                     }
                     match link.recv(&mut b) {
                         Ok(0) => break,
-                        Ok(n) => self.engine.on_modem_bytes(b.get(..n).unwrap_or(&[])),
+                        Ok(n) => {
+                            self.rx_at = now;
+                            self.engine.on_modem_bytes(b.get(..n).unwrap_or(&[]));
+                        }
                         Err(e) => err = Some(e),
                     }
+                }
+                // A modem that reset or dropped the session leaves a USB
+                // port open (and can leave a TCP socket half open): only
+                // its silence shows it.
+                let window = if self.scope_seen {
+                    SILENT_SCOPE_MS
+                } else {
+                    SILENT_MS
+                };
+                let silent = now.wrapping_sub(self.rx_at);
+                if err.is_none() && silent < u32::MAX / 2 && silent > window {
+                    err = Some(format!("no frames from the modem for {} s", window / 1000));
                 }
             }
             Backend::Gone => {
@@ -1010,6 +1040,18 @@ impl Worker {
         }
         while let Some(ev) = self.engine.poll_event() {
             match ev {
+                UiEvent::Scope {
+                    t_ms,
+                    step_ms,
+                    samples,
+                } => {
+                    self.scope_seen = true;
+                    self.send(Ev::Ui(UiEvent::Scope {
+                        t_ms,
+                        step_ms,
+                        samples,
+                    }));
+                }
                 UiEvent::Air(a) => {
                     if let Some(duck) = self.chirp_for(&a, st, now) {
                         self.chirps.start(&a, if duck { DUCK } else { 1.0 });

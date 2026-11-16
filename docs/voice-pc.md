@@ -90,7 +90,7 @@ Good to know:
 - On Windows the app keeps the DTR and RTS lines low, so the board should not restart when the app opens the port (not yet checked on the bench). On Linux it leaves them as Linux sets them.
 - `--bind`, `--peer`, `--snr` and `--station` are for the built-in modem only; with a real modem they are an error. The station name shown is the real modem's.
 - The header shows the link, for example `USB COM11` or `TCP 192.168.4.1:4220`.
-- If the cable comes out or Wi-Fi drops, the app shows **MODEM LOST** with the reason and goes back to the CALLS screen. Close it and start it again to reconnect.
+- If the cable comes out, Wi-Fi drops, or the modem restarts or goes quiet (nothing from it for 3 s, or 20 s if its radio is not working), the app shows **MODEM LOST** with the reason and goes back to the CALLS screen. Close it and start it again to reconnect.
 - Closing the app ends its session cleanly; on USB the modem goes back to AT commands.
 
 ## Calling by name
