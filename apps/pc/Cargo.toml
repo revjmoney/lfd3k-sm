@@ -5,7 +5,7 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Rev. J. Money <https://jmscnc.com>"]
 publish = false
-description = "LFD3K-SM voice calls on the PC: the voice app with an embedded modem on SimNet UDP"
+description = "LFD3K-SM voice calls on the PC: the voice app with an embedded modem on SimNet UDP, or a real modem over USB or TCP"
 
 [[bin]]
 name = "lfd3k-voice-pc"
@@ -21,6 +21,11 @@ eframe = { version = "0.37", default-features = false, features = ["glow", "wayl
 # The Simian logo (PNG decode only).
 png = "0.18"
 zeroize = "1"
+# A real modem over USB (MPL-2.0). Default features off: no libudev on Linux
+# (only port listing needs it; the app opens the port it is given).
+serialport = { version = "4.10", default-features = false }
+# Find a modem on the network by its `_lfd3k._tcp` mDNS service (MIT OR Apache-2.0).
+mdns-sd = { version = "0.21", default-features = false }
 
 # Audio in and out (Apache-2.0). Windows only: on other systems the app runs
 # without sound devices (WAV play and record still work), so a Linux build

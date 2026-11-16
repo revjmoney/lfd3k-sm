@@ -232,6 +232,37 @@ eframe has default features off (`glow`, `wayland`, `x11` on); egui's own fonts 
 | xml-rs | 0.8.29 | MIT | both | Via eframe, egui, winit or cpal |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | both | Via eframe, egui, winit or cpal |
 
+### Real modems: serialport and mdns-sd (PC voice app only)
+
+`--modem` drives a real modem over USB (serialport) or finds one on the network (mdns-sd). serialport has default features off (no libudev on Linux: the app opens the port it is given and never lists ports); mdns-sd has default features off (no async, no logging). Every crate the two bring in is below, also when it is listed above for another reason. Licenses from `cargo metadata`; the trees from `cargo tree -p serialport -e normal` and `cargo tree -p mdns-sd -e normal`, on Windows and with `--target x86_64-unknown-linux-gnu`. All are compatible with the app's GPL-3.0-or-later.
+
+| Crate | Version | License | Where | Why |
+|-------|---------|---------|-------|-----|
+| serialport | 4.10.1 | MPL-2.0 (used unmodified, as a separate crate) | both | The USB serial port of a V4 or V3 modem (`--modem COM11`, `--modem /dev/ttyUSB0`) |
+| mdns-sd | 0.21.7 | MIT OR Apache-2.0 | both | `--modem find`: browse `_lfd3k._tcp` |
+| nix | 0.26.4 | MIT | linux | Via serialport (termios) |
+| bitflags | 1.3.2 | MIT/Apache-2.0 | linux | Via nix |
+| bitflags | 2.13.2 | MIT OR Apache-2.0 | linux | Via serialport; also above |
+| unescaper | 0.1.10 | MIT OR GPL-3.0-only (used under MIT) | linux | Via serialport (Linux port names) |
+| thiserror, thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | linux | Via unescaper; also above |
+| proc-macro2, quote, unicode-ident, syn | 1.0.107, 1.0.47, 1.0.27, 3.0.10 | MIT OR Apache-2.0 (unicode-ident also Unicode-3.0) | linux | Via thiserror-impl, build time only; also above |
+| cfg-if | 1.0.5 | MIT OR Apache-2.0 | both | Via serialport; also above |
+| scopeguard | 1.2.0 | MIT OR Apache-2.0 | both | Via serialport and lock_api; also above |
+| windows-sys | 0.52.0 | MIT OR Apache-2.0 | win | Via serialport (COM ports) |
+| windows-targets, windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | win | Via windows-sys 0.52; also above |
+| fastrand | 2.5.0 | Apache-2.0 OR MIT | both | Via mdns-sd |
+| flume | 0.12.0 | Apache-2.0/MIT | both | Via mdns-sd (channels) |
+| spin | 0.9.9 | MIT | both | Via flume |
+| lock_api | 0.4.14 | MIT OR Apache-2.0 | both | Via spin; also above |
+| if-addrs | 0.15.0 | MIT OR BSD-3-Clause | both | Via mdns-sd (network interfaces) |
+| mio | 1.2.4 | MIT | both | Via mdns-sd (sockets); also above |
+| log | 0.4.35 | MIT OR Apache-2.0 | both | Via mio; also above |
+| socket2 | 0.6.5 | MIT OR Apache-2.0 | both | Via mdns-sd |
+| socket-pktinfo | 0.4.2 | MIT | both | Via mdns-sd |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | win | Via if-addrs, mio and socket2; also above |
+| windows-link | 0.2.1 | MIT OR Apache-2.0 | win | Via windows-sys 0.61; also above |
+| libc | 0.2.191 | MIT OR Apache-2.0 | linux | Via nix, if-addrs, mio and socket2; also above |
+
 Fonts bundled in `apps/pc/assets/fonts/` (built into the app with `include_bytes!`), downloaded from the official google/fonts GitHub repository on 2026-11-12:
 
 | Font | File | License | Used in |

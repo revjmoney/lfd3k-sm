@@ -2,7 +2,7 @@
 
 **Your own encrypted radio (cell) phone network!! Call anyone with a modem. No carrier. No tower. No one listening.**
 
-`lfd3k-voice-pc` is the PC voice app of the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM. It calls people by name, like a phone. In this first part it carries its own modem inside: a real LFD3K-SM core on a simulated radio over UDP (SimNet, the same as `lfd3k-pcmodem`), so two copies of the app call each other with no radio at all, on one PC or on two. The phone app and the USB link to a real modem come later.
+`lfd3k-voice-pc` is the PC voice app of the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM. It calls people by name, like a phone. In this first part it carries its own modem inside: a real LFD3K-SM core on a simulated radio over UDP (SimNet, the same as `lfd3k-pcmodem`), so two copies of the app call each other with no radio at all, on one PC or on two. It can also drive a real modem over USB or Wi-Fi (see "With a real modem" below). The phone app comes later.
 
 Everything in a call is scrambled by the FLOWTRON SCRAMBLER (end to end, keys made fresh for every call). Ham mode does not exist yet, so the scrambler is always on.
 
@@ -21,6 +21,7 @@ The program is `target\release\lfd3k-voice-pc.exe`. Use the release build for ca
 
 ```
 lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
+    [--modem sim|COM11|/dev/ttyUSB0|tcp:<host>[:<port>]|find[:<station>]]
     [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
     [--auto-answer] [--play <wav>] [--record <wav>]
     [--script <file> --shots <dir> [--script-unsafe]] [--trace <dir>]
@@ -28,12 +29,13 @@ lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 
 | Option | Meaning |
 |---|---|
+| `--modem <where>` | Which modem the app uses. `sim` (the default) is the built-in one on SimNet. `COM11` or `/dev/ttyUSB0` is a real modem on USB. `tcp:192.168.4.1` is a real modem on Wi-Fi (port 4220 unless you add `:<port>`). `find` looks for a modem on the network, `find:<station>` for the one with that station name. See "With a real modem" |
 | `--name`, `--label` | Your voice name (a person, like REV) and this device's label (like PC). Used the first time only, to make this device's keys; after that change them in Settings, Voice and keys. Default REV and PC |
-| `--bind`, `--peer` | This app's UDP address and the other app's (both `addr:port`). Defaults 127.0.0.1:4211 and 127.0.0.1:4210 |
-| `--snr <dB>` | What the other modem hears from ours (default 8). Lower is slower: the tier, codec and talk mode follow it |
-| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away |
+| `--bind`, `--peer` | Built-in modem only. This app's UDP address and the other app's (both `addr:port`). Defaults 127.0.0.1:4211 and 127.0.0.1:4210 |
+| `--snr <dB>` | Built-in modem only. What the other modem hears from ours (default 8). Lower is slower: the tier, codec and talk mode follow it |
+| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away. On a real modem the app reads S21 first and puts the old value back when you close it (it never saves with AT&W) |
 | `--data <dir>` | Where this device keeps its keys, checked contacts and the modem's saved settings. Default `%APPDATA%\lfd3k-voice-pc\<NAME>-<LABEL>` |
-| `--station <NAME>` | The built-in modem's station name. Default `PCMODEM-<port>` |
+| `--station <NAME>` | Built-in modem only. Its station name. Default `PCMODEM-<port>`. A real modem has its own name (AT+NAME) |
 | `--auto-answer` | Test helper: the app picks up by itself and talks anyway (the two words still show). The modem's S0 still never answers voice; this is the app's choice |
 | `--play <wav>` | Test helper: the WAV is the mic (looped while we may talk). The real mic is not opened |
 | `--record <wav>` | Test helper: what the app hears goes into this WAV (written at the end of each call). The speakers are not used |
@@ -58,6 +60,38 @@ target\release\lfd3k-voice-pc.exe --name REV --label PC --bind 127.0.0.1:4211 --
 ```
 
 The ANN copy uses no sound devices (`--play` replaces its mic, `--record` its speakers), so your mic never hears it and nothing feeds back. **Use a headset in CALL mode**: the PC app has no echo canceller in this part.
+
+## With a real modem
+
+Plug in a V4 or V3 modem, or put one on your Wi-Fi, and point the app at it with `--modem`. Everything else works the same: calls, the scope, Settings (they change the real modem).
+
+On USB (Windows, find the COM port in Device Manager):
+
+```powershell
+target\release\lfd3k-voice-pc.exe --name REV --label PC --modem COM11
+```
+
+On Linux it is `--modem /dev/ttyUSB0` (the V3) or `/dev/ttyACM0` (the V4).
+
+On Wi-Fi, by address or by looking it up:
+
+```powershell
+target\release\lfd3k-voice-pc.exe --name REV --label PC --modem tcp:192.168.4.1
+target\release\lfd3k-voice-pc.exe --name REV --label PC --modem find
+target\release\lfd3k-voice-pc.exe --name REV --label PC --modem find:SHOP
+```
+
+`find` looks for 5 seconds and takes the first modem that takes voice apps (its firmware has the TCP voice port), or the one with that station name.
+
+Good to know:
+
+- **Use a headset.** The app has no echo canceller, so speakers feed your own voice back into the call.
+- **One app per modem session.** On USB one app has the modem; close the terminal program first (the port can only be open once). On Wi-Fi up to 3 apps can use one modem at a time.
+- On Windows the app keeps the DTR and RTS lines low, so the board should not restart when the app opens the port (not yet checked on the bench). On Linux it leaves them as Linux sets them.
+- `--bind`, `--peer`, `--snr` and `--station` are for the built-in modem only; with `--modem` they are an error. The station name shown is the real modem's.
+- The header shows the link, for example `USB COM11` or `TCP 192.168.4.1:4220`.
+- If the cable comes out or Wi-Fi drops, the app shows **MODEM LOST** with the reason and goes back to the CALLS screen. Close it and start it again to reconnect.
+- Closing the app ends its session cleanly; on USB the modem goes back to AT commands.
 
 ## Calling by name
 

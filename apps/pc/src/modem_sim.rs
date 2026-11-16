@@ -26,13 +26,21 @@
 //! no Wi-Fi password is ever written: the copy on disk carries a fixed
 //! placeholder hotspot password and no client network. Files here are
 //! written owner only on Unix (the user profile's ACL on Windows).
+//!
+//! With `--modem` naming a real modem the thread's modem side is a
+//! [`ModemLink`] (USB or TCP) instead ([`Backend::Real`]): the engine's
+//! bytes go to the link and the link's to the engine every pass; the real
+//! modem makes its own scope and keeps its own settings. A link error
+//! tells the window `MODEM LOST` and the thread goes on without a modem
+//! until the app is closed. `--cap-tier` there reads S21 (AT&V), sets it
+//! (ATS21) and puts the old value back on Quit (never AT&W).
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lfd3k_core::voice::{Floor, TalkMode};
 use lfd3k_core::{Config, Modem, ResultCode, Settings, SimNetRadio, Tier, BLOB_LEN, DIR_BLOB_LEN};
@@ -41,6 +49,7 @@ use lfd3k_voice::{CallStats, ContactView, Engine, Identity, Trust, TrustStore, U
 use zeroize::Zeroizing;
 
 use crate::audio::{self, Queue};
+use crate::link::{ModemLink, ModemSpec};
 use crate::monitor::Chirps;
 
 /// The voice host protocol session the app uses (1 to 3 are the platform's).
@@ -72,6 +81,16 @@ const END_TYPES: [u8; 2] = [3, 10];
 const DUCK: f32 = 0.25;
 /// CallState `state` while the link resyncs.
 const STATE_RESYNC: u8 = 5;
+/// `--modem find` looks this long; a TCP connect waits as long.
+const FIND_MS: u32 = 5_000;
+/// On Quit, wait this long at most for the old S21 to go back.
+const RESTORE_MS: u32 = 2_000;
+/// The most link reads in one pass (the rest wait for the next pass).
+const RECV_PASSES: usize = 64;
+/// AtLine tags the thread keeps for itself (the window's are small).
+const TAG_CAP_READ: u32 = 0xFFFF_0001;
+const TAG_CAP_SET: u32 = 0xFFFF_0002;
+const TAG_CAP_RESTORE: u32 = 0xFFFF_0003;
 
 /// What the window asks of the modem thread.
 pub enum Cmd {
@@ -132,6 +151,8 @@ pub enum Ev {
     },
     /// Something for the status line.
     Note(String),
+    /// The real modem's link failed (the reason): no modem from now on.
+    Lost(String),
     /// The thread has stopped (after Quit).
     Stopped,
 }
@@ -160,6 +181,9 @@ pub struct Snap {
     pub rec_s: f32,
     pub bind: String,
     pub udp_peer: String,
+    /// A real modem's link (`USB COM11`, `TCP 192.168.4.1:4220`, or
+    /// `MODEM LOST`); empty with the simulated modem.
+    pub link: String,
     /// Longest gap between two passes of the modem loop (ms), and passes.
     pub max_gap_ms: u32,
     pub passes: u64,
@@ -190,6 +214,7 @@ impl Default for Snap {
             rec_s: 0.0,
             bind: String::new(),
             udp_peer: String::new(),
+            link: String::new(),
             max_gap_ms: 0,
             passes: 0,
             ring_s: 0.0,
@@ -200,6 +225,9 @@ impl Default for Snap {
 
 /// Start-up options for the thread.
 pub struct Opts {
+    /// `--modem`: the simulated modem (with `bind`, `peer`, `station`,
+    /// `snr_db`) or a real one.
+    pub modem: ModemSpec,
     pub bind: String,
     pub peer: SocketAddr,
     pub station: String,
@@ -293,10 +321,28 @@ enum AutoPtt {
     Listen(u32),
 }
 
+/// The modem side of the thread.
+enum Backend {
+    /// The app's own modem on SimNet over UDP.
+    Sim {
+        modem: Box<Modem>,
+        radio: Box<SimNetRadio<UdpPort>>,
+    },
+    /// A real modem over USB or TCP.
+    Real(ModemLink),
+    /// The real modem's link is lost or closed: no modem.
+    Gone,
+}
+
 struct Worker {
     o: Opts,
-    modem: Modem,
-    radio: SimNetRadio<UdpPort>,
+    be: Backend,
+    /// The clock with a real modem (the simulated radio has its own).
+    clock: Instant,
+    /// For the status line: the real modem's link.
+    link_desc: String,
+    /// `--cap-tier` on a real modem: S21 as it was, put back on Quit.
+    cap_old: Option<u16>,
     engine: Engine,
     vin: VecDeque<u8>,
     at: AtQueue,
@@ -355,6 +401,40 @@ pub fn spawn(
     snap: Arc<Mutex<Snap>>,
     ctx: eframe::egui::Context,
 ) -> Result<std::thread::JoinHandle<()>, String> {
+    if o.modem == ModemSpec::Sim {
+        return spawn_sim(o, cmd, tx, snap, ctx);
+    }
+    let id = Identity::load(&identity_path(&o.data))
+        .map_err(|e| format!("identity {}: {e}", identity_path(&o.data).display()))?;
+    // Opened last: the modem drops a session after 5 s without a frame,
+    // and the engine's Hello goes out on the thread's first pass.
+    let link = ModemLink::open(&o.modem, FIND_MS)?;
+    std::thread::Builder::new()
+        .name("modem".into())
+        .spawn(move || {
+            let link_desc = link.describe();
+            let mut w = Worker::new(o, Backend::Real(link), id, tx, snap, ctx, 0);
+            w.link_desc = link_desc;
+            if w.o.cap_tier.is_some() {
+                // Read S21 first (to put it back), then the cap; both go
+                // ahead of the window's first AT&V.
+                w.at.wait
+                    .push_back((TAG_CAP_READ, Zeroizing::new("AT&V".to_string())));
+            }
+            w.start_trace(0);
+            w.run(cmd);
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The simulated modem (no `--modem`, or `--modem sim`): today's thread.
+fn spawn_sim(
+    o: Opts,
+    cmd: Receiver<Cmd>,
+    tx: Sender<Ev>,
+    snap: Arc<Mutex<Snap>>,
+    ctx: eframe::egui::Context,
+) -> Result<std::thread::JoinHandle<()>, String> {
     let cfg =
         Config::new(&o.station).ok_or("station name: 1 to 16 printable characters, no colon")?;
     let port =
@@ -393,100 +473,155 @@ pub fn spawn(
                 while modem.host_output(&mut b) > 0 {}
             }
             modem.voice_open(SESSION, now);
-            let trust_path = TrustStore::path_next_to(&identity_path(&o.data));
-            let removed = load_removed(&o.data);
-            let mut engine = Engine::new(id, trust_path);
-            for d in &removed {
-                engine.remove_my_device(*d);
-            }
-            let mut w = Worker {
-                modem,
-                radio,
-                engine,
-                vin: VecDeque::new(),
-                at: AtQueue {
-                    wait: VecDeque::new(),
-                    cur: None,
-                },
-                tx,
-                snap,
-                ctx,
-                removed,
-                play_pos: 0,
-                played: 0,
-                rec: Vec::new(),
-                spk_made: 0,
-                t0: now,
-                auto_ptt: AutoPtt::Idle,
-                snap_due: 0,
-                was_linking: false,
-                ring_until: None,
-                ring_pos: 0,
-                ring_total: 0,
-                max_gap: 0,
-                passes: 0,
-                scope_due: now,
-                chirps: Chirps::default(),
-                last_state: 0,
-                sound_until: None,
-                retrain_until: None,
-                rec_tail: None,
-                chirp_total: 0,
-                seg: None,
-                seg_used: false,
-                seg_new: false,
-                rec_on: false,
-                tr: None,
-                o,
+            let be = Backend::Sim {
+                modem: Box::new(modem),
+                radio: Box::new(radio),
             };
-            if let Some(d) = w.o.trace.clone() {
-                match crate::trace::Trace::open(&d, now) {
-                    Ok(t) => w.tr = Some(t),
-                    Err(e) => w.send(Ev::Note(format!("{}: {e}", d.display()))),
-                }
-            }
+            let mut w = Worker::new(o, be, id, tx, snap, ctx, now);
+            w.start_trace(now);
             w.run(cmd);
         })
         .map_err(|e| e.to_string())
 }
 
 impl Worker {
+    fn new(
+        o: Opts,
+        be: Backend,
+        id: Identity,
+        tx: Sender<Ev>,
+        snap: Arc<Mutex<Snap>>,
+        ctx: eframe::egui::Context,
+        now: u32,
+    ) -> Worker {
+        let trust_path = TrustStore::path_next_to(&identity_path(&o.data));
+        let removed = load_removed(&o.data);
+        let mut engine = Engine::new(id, trust_path);
+        for d in &removed {
+            engine.remove_my_device(*d);
+        }
+        Worker {
+            be,
+            clock: Instant::now(),
+            link_desc: String::new(),
+            cap_old: None,
+            engine,
+            vin: VecDeque::new(),
+            at: AtQueue {
+                wait: VecDeque::new(),
+                cur: None,
+            },
+            tx,
+            snap,
+            ctx,
+            removed,
+            play_pos: 0,
+            played: 0,
+            rec: Vec::new(),
+            spk_made: 0,
+            t0: now,
+            auto_ptt: AutoPtt::Idle,
+            snap_due: 0,
+            was_linking: false,
+            ring_until: None,
+            ring_pos: 0,
+            ring_total: 0,
+            max_gap: 0,
+            passes: 0,
+            scope_due: now,
+            chirps: Chirps::default(),
+            last_state: 0,
+            sound_until: None,
+            retrain_until: None,
+            rec_tail: None,
+            chirp_total: 0,
+            seg: None,
+            seg_used: false,
+            seg_new: false,
+            rec_on: false,
+            tr: None,
+            o,
+        }
+    }
+
+    /// `--trace <dir>`: open the trace.
+    fn start_trace(&mut self, now: u32) {
+        if let Some(d) = self.o.trace.clone() {
+            match crate::trace::Trace::open(&d, now) {
+                Ok(t) => self.tr = Some(t),
+                Err(e) => self.send(Ev::Note(format!("{}: {e}", d.display()))),
+            }
+        }
+    }
+
     fn send(&self, e: Ev) {
         let _ = self.tx.send(e);
         self.ctx.request_repaint();
+    }
+
+    /// The thread's clock (ms, any start, it may wrap): the simulated
+    /// radio's, or our own with a real modem.
+    fn now(&self) -> u32 {
+        match &self.be {
+            Backend::Sim { radio, .. } => radio.port().now_ms(),
+            _ => self.clock.elapsed().as_millis() as u32,
+        }
+    }
+
+    /// The modem's call state: the simulated modem's own, or the last
+    /// CallState a real modem sent.
+    fn call_state(&self) -> u8 {
+        match &self.be {
+            Backend::Sim { modem, .. } => modem.call_state(),
+            _ => self.engine.stats().state,
+        }
     }
 
     fn run(&mut self, cmd: Receiver<Cmd>) {
         let mut buf = [0u8; 1024];
         let mut frame = [0u8; 255];
         let mut quit_at: Option<u32> = None;
-        let mut last = self.radio.port().now_ms();
+        // A real modem's old S21 is going back (Quit with --cap-tier).
+        let mut restoring: Option<u32> = None;
+        let mut last = self.now();
         loop {
-            let now = self.radio.port().now_ms();
+            let now = self.now();
             self.max_gap = self.max_gap.max(now.wrapping_sub(last));
             self.passes += 1;
             last = now;
-            while let Some(n) = self.radio.port().recv(&mut buf) {
-                self.radio.on_datagram(buf.get(..n).unwrap_or(&[]));
-            }
-            while let Some((n, info)) = self.radio.service(&mut frame) {
-                self.modem
-                    .radio_rx(frame.get(..n).unwrap_or(&[]), info, &mut self.radio, now);
+            if let Backend::Sim { modem, radio } = &mut self.be {
+                while let Some(n) = radio.port().recv(&mut buf) {
+                    radio.on_datagram(buf.get(..n).unwrap_or(&[]));
+                }
+                while let Some((n, info)) = radio.service(&mut frame) {
+                    modem.radio_rx(frame.get(..n).unwrap_or(&[]), info, &mut **radio, now);
+                }
             }
             self.scope_sample(now);
-            if quit_at.is_none() {
+            if quit_at.is_none() && restoring.is_none() {
                 while let Ok(c) = cmd.try_recv() {
                     if matches!(c, Cmd::Quit) {
-                        self.engine.leave();
-                        quit_at = Some(now);
+                        if self.start_quit(now) {
+                            restoring = Some(now);
+                        } else {
+                            quit_at = Some(now);
+                        }
                         break;
                     }
                     self.on_cmd(c, now);
                 }
             }
+            if restoring.is_some_and(|r| self.cap_old.is_none() || now.wrapping_sub(r) > RESTORE_MS)
+            {
+                restoring = None;
+                self.close_link();
+                quit_at = Some(now);
+            }
             self.engine.tick(now);
             self.pump_engine(now);
-            self.modem.tick(&mut self.radio, now);
+            if let Backend::Sim { modem, radio } = &mut self.be {
+                modem.tick(&mut **radio, now);
+            }
             self.platform(now);
             if quit_at.is_none() {
                 self.events(now);
@@ -507,9 +642,81 @@ impl Worker {
         }
     }
 
+    /// Quit: the simulated modem gets the engine's Leave (as before); a
+    /// real one first gets its old S21 back when `--cap-tier` changed it
+    /// (true: wait for that), then one Leave as the link closes.
+    fn start_quit(&mut self, now: u32) -> bool {
+        match &self.be {
+            Backend::Sim { .. } => {
+                self.engine.leave();
+                false
+            }
+            Backend::Real(_) => match self.cap_old {
+                Some(v) => {
+                    // The window's lines still waiting are dropped: it is
+                    // closing.
+                    self.at.wait.clear();
+                    self.at
+                        .wait
+                        .push_back((TAG_CAP_RESTORE, Zeroizing::new(format!("ATS21={v}"))));
+                    self.at_next(now);
+                    true
+                }
+                None => {
+                    self.close_link();
+                    false
+                }
+            },
+            Backend::Gone => false,
+        }
+    }
+
+    /// Send what the engine has left, then Leave and close a real link.
+    fn close_link(&mut self) {
+        if !matches!(self.be, Backend::Real(_)) {
+            return;
+        }
+        let now = self.now();
+        self.pump_engine(now);
+        if let Backend::Real(l) = std::mem::replace(&mut self.be, Backend::Gone) {
+            l.close();
+        }
+    }
+
+    /// The real modem's link failed: no modem from now on. The call and
+    /// the session are gone, so the engine starts fresh; AtLines fail.
+    fn lost(&mut self, why: String) {
+        self.be = Backend::Gone;
+        self.cap_old = None;
+        self.link_desc = "MODEM LOST".into();
+        let path = identity_path(&self.o.data);
+        if let Ok(id) = Identity::load(&path) {
+            self.engine = Engine::new(id, TrustStore::path_next_to(&path));
+            for d in &self.removed {
+                self.engine.remove_my_device(*d);
+            }
+        }
+        let _ = self.engine.take_modem_bytes();
+        // The window's AtLines fail; the thread's own (--cap-tier) just go.
+        let cur = self.at.cur.take().map(|(tag, _, _)| tag);
+        let waiting: Vec<u32> = self.at.wait.drain(..).map(|(tag, _)| tag).collect();
+        for tag in cur.into_iter().chain(waiting) {
+            if tag < TAG_CAP_READ {
+                self.at_done(tag, "MODEM LOST".into(), false);
+            }
+        }
+        self.ring_until = None;
+        self.auto_ptt = AutoPtt::Idle;
+        self.chirps.stop();
+        self.send(Ev::Lost(why));
+    }
+
     /// Every 50 ms: the simulated channel's RSSI (0 dBm and flagged while
-    /// we transmit) into the modem's scope.
+    /// we transmit) into the modem's scope. A real modem makes its own.
     fn scope_sample(&mut self, now: u32) {
+        let Backend::Sim { modem, radio } = &mut self.be else {
+            return;
+        };
         if now.wrapping_sub(self.scope_due) >= u32::MAX / 2 {
             return;
         }
@@ -518,9 +725,9 @@ impl Worker {
         if now.wrapping_sub(self.scope_due) < u32::MAX / 2 {
             self.scope_due = now.wrapping_add(SCOPE_MS);
         }
-        let tx = self.radio.transmitting();
-        let rssi = if tx { 0 } else { self.radio.rx_rssi() };
-        self.modem.scope_sample(rssi, tx, now);
+        let tx = radio.transmitting();
+        let rssi = if tx { 0 } else { radio.rx_rssi() };
+        modem.scope_sample(rssi, tx, now);
         if let Some(t) = &mut self.tr {
             t.scope(rssi, tx);
         }
@@ -529,7 +736,7 @@ impl Worker {
     /// A call is being set up: the modem dialing, ringing or training, or
     /// the link resyncing.
     fn setting_up(&self) -> bool {
-        matches!(self.modem.call_state(), 1..=3)
+        matches!(self.call_state(), 1..=3)
             || self.engine.in_call() && self.engine.stats().state == STATE_RESYNC
     }
 
@@ -563,59 +770,96 @@ impl Worker {
 
     /// Engine bytes to the modem's session, the modem's back to the engine.
     fn pump_engine(&mut self, now: u32) {
-        self.vin.extend(self.engine.take_modem_bytes());
-        if !self.vin.is_empty() {
-            let (a, _) = self.vin.as_slices();
-            let chunk: Vec<u8> = a.to_vec();
-            let k = self
-                .modem
-                .voice_input(SESSION, &chunk, &mut self.radio, now)
-                .min(chunk.len());
-            self.vin.drain(..k);
-        }
-        let mut b = [0u8; 512];
-        loop {
-            let n = self.modem.voice_output(SESSION, &mut b);
-            if n == 0 {
-                break;
+        let mut err = None;
+        match &mut self.be {
+            Backend::Sim { modem, radio } => {
+                self.vin.extend(self.engine.take_modem_bytes());
+                if !self.vin.is_empty() {
+                    let (a, _) = self.vin.as_slices();
+                    let chunk: Vec<u8> = a.to_vec();
+                    let k = modem
+                        .voice_input(SESSION, &chunk, &mut **radio, now)
+                        .min(chunk.len());
+                    self.vin.drain(..k);
+                }
+                let mut b = [0u8; 512];
+                loop {
+                    let n = modem.voice_output(SESSION, &mut b);
+                    if n == 0 {
+                        break;
+                    }
+                    self.engine.on_modem_bytes(b.get(..n).unwrap_or(&[]));
+                }
             }
-            self.engine.on_modem_bytes(b.get(..n).unwrap_or(&[]));
+            Backend::Real(link) => {
+                let out = self.engine.take_modem_bytes();
+                if !out.is_empty() {
+                    if let Err(e) = link.send(&out) {
+                        err = Some(e);
+                    }
+                }
+                let mut b = [0u8; 512];
+                for _ in 0..RECV_PASSES {
+                    if err.is_some() {
+                        break;
+                    }
+                    match link.recv(&mut b) {
+                        Ok(0) => break,
+                        Ok(n) => self.engine.on_modem_bytes(b.get(..n).unwrap_or(&[])),
+                        Err(e) => err = Some(e),
+                    }
+                }
+            }
+            Backend::Gone => {
+                let _ = self.engine.take_modem_bytes();
+            }
+        }
+        if let Some(e) = err {
+            self.lost(e);
         }
     }
 
-    /// What the firmware would do for the modem: save blobs, refuse Wi-Fi
-    /// dials (the PC modem has no Wi-Fi), drop the terminal's output.
+    /// What the firmware would do for the simulated modem: save blobs,
+    /// refuse Wi-Fi dials (the PC modem has no Wi-Fi), drop the terminal's
+    /// output. A real modem does all this itself.
     fn platform(&mut self, now: u32) {
-        if self.modem.take_save_request() {
+        let Backend::Sim { modem, .. } = &mut self.be else {
+            return;
+        };
+        let mut notes = Vec::new();
+        if modem.take_save_request() {
             let mut b = [0u8; BLOB_LEN];
-            let n = scrubbed(self.modem.saved_settings())
+            let n = scrubbed(modem.saved_settings())
                 .to_blob(&mut b)
                 .min(BLOB_LEN);
             if let Err(e) = write_file(
                 &self.o.data.join("modem-settings.bin"),
                 b.get(..n).unwrap_or(&[]),
             ) {
-                self.send(Ev::Note(format!("could not save the modem settings: {e}")));
+                notes.push(format!("could not save the modem settings: {e}"));
             }
             zeroize::Zeroize::zeroize(&mut b);
         }
-        if self.modem.take_dir_save() {
+        if modem.take_dir_save() {
             let mut b = [0u8; DIR_BLOB_LEN];
-            let n = self.modem.directory().to_blob(&mut b).min(DIR_BLOB_LEN);
+            let n = modem.directory().to_blob(&mut b).min(DIR_BLOB_LEN);
             if let Err(e) = write_file(
                 &self.o.data.join("modem-dir.bin"),
                 b.get(..n).unwrap_or(&[]),
             ) {
-                self.send(Ev::Note(format!("could not save the directory: {e}")));
+                notes.push(format!("could not save the directory: {e}"));
             }
         }
-        if self.modem.take_wire_request().is_some() {
-            self.modem.wire_failed(now);
+        if modem.take_wire_request().is_some() {
+            modem.wire_failed(now);
         }
-        let _ = self.modem.take_wire_close();
-        let _ = self.modem.take_wifi_changed();
+        let _ = modem.take_wire_close();
+        let _ = modem.take_wifi_changed();
         let mut b = [0u8; 256];
-        while self.modem.host_output(&mut b) > 0 {}
+        while modem.host_output(&mut b) > 0 {}
+        for n in notes {
+            self.send(Ev::Note(n));
+        }
     }
 
     fn on_cmd(&mut self, c: Cmd, now: u32) {
@@ -708,11 +952,20 @@ impl Worker {
             self.send(Ev::Note(format!("could not save the identity: {e}")));
             return;
         }
-        self.engine.leave();
-        self.pump_engine(now);
-        self.modem.voice_close(SESSION, now);
-        self.vin.clear();
-        self.modem.voice_open(SESSION, now);
+        if matches!(self.be, Backend::Sim { .. }) {
+            self.engine.leave();
+            self.pump_engine(now);
+            if let Backend::Sim { modem, .. } = &mut self.be {
+                modem.voice_close(SESSION, now);
+                self.vin.clear();
+                modem.voice_open(SESSION, now);
+            }
+        } else {
+            // A real modem: no Leave (it would end the session; USB goes
+            // back to AT text and TCP closes). The new engine's Hello and
+            // Register on the same session replace the old registration.
+            self.pump_engine(now);
+        }
         self.engine = Engine::new(id, TrustStore::path_next_to(&path));
         for d in &self.removed {
             self.engine.remove_my_device(*d);
@@ -723,9 +976,9 @@ impl Worker {
     fn events(&mut self, now: u32) {
         // A call or attempt that just ended: its Hangup frames sound (NO
         // CARRIER). One that just connected: the setup sounds stop.
-        let st = self.modem.call_state();
-        if let Some(t) = &mut self.tr {
-            t.tick(&self.modem, now);
+        let st = self.call_state();
+        if let (Some(t), Backend::Sim { modem, .. }) = (&mut self.tr, &self.be) {
+            t.tick(modem, now);
         }
         if self.last_state != 0 && st == 0 {
             self.sound_until = Some(now.wrapping_add(SOUND_AFTER_MS));
@@ -762,7 +1015,7 @@ impl Worker {
                     if last {
                         if let Some((tag, acc, _)) = self.at.cur.take() {
                             let ok = acc.lines().any(|l| l.trim() == "OK");
-                            self.send(Ev::At { tag, text: acc, ok });
+                            self.at_done(tag, acc, ok);
                         }
                     }
                 }
@@ -770,11 +1023,7 @@ impl Worker {
                     if e.starts_with("modem: message 0x0F") && self.at.cur.is_some() =>
                 {
                     if let Some((tag, _, _)) = self.at.cur.take() {
-                        self.send(Ev::At {
-                            tag,
-                            text: e,
-                            ok: false,
-                        });
+                        self.at_done(tag, e, false);
                     }
                 }
                 UiEvent::LinkCode(c) => {
@@ -976,30 +1225,60 @@ impl Worker {
             if now.wrapping_sub(*t) > AT_TIMEOUT_MS {
                 let tag = *tag;
                 self.at.cur = None;
-                self.send(Ev::At {
-                    tag,
-                    text: "no answer from the modem".into(),
-                    ok: false,
-                });
+                self.at_done(tag, "no answer from the modem".into(), false);
             }
             return;
         }
         let Some((tag, line)) = self.at.wait.pop_front() else {
             return;
         };
-        if self.engine.at_line(&line) {
+        if matches!(self.be, Backend::Gone) {
+            self.at_done(tag, "no modem (MODEM LOST)".into(), false);
+        } else if self.engine.at_line(&line) {
             if let Some(t) = &mut self.tr {
                 t.host(now, '>', &crate::ui::mask_line(&line));
             }
             self.at.cur = Some((tag, String::new(), now));
         } else {
-            self.send(Ev::At {
-                tag,
-                text: "line too long".into(),
-                ok: false,
-            });
+            self.at_done(tag, "line too long".into(), false);
         }
         drop(line);
+    }
+
+    /// An AtLine's whole answer: to the window, or (the thread's own
+    /// tags) to `--cap-tier` on a real modem.
+    fn at_done(&mut self, tag: u32, text: String, ok: bool) {
+        match tag {
+            TAG_CAP_READ => {
+                let old = if ok { parse_s21(&text) } else { None };
+                if old.is_none() {
+                    self.send(Ev::Note(
+                        "--cap-tier: could not read S21 (AT&V); it is not put back on exit".into(),
+                    ));
+                }
+                self.cap_old = old;
+                if let Some(t) = self.o.cap_tier {
+                    let line = format!("ATS21={}", t.index());
+                    self.at.wait.push_front((TAG_CAP_SET, Zeroizing::new(line)));
+                }
+            }
+            TAG_CAP_SET => {
+                if !ok {
+                    self.cap_old = None;
+                    self.send(Ev::Note(format!(
+                        "--cap-tier: the modem refused S21: {}",
+                        text.trim()
+                    )));
+                }
+            }
+            TAG_CAP_RESTORE => {
+                self.cap_old = None;
+                if !ok {
+                    self.send(Ev::Note(format!("could not put S21 back: {}", text.trim())));
+                }
+            }
+            _ => self.send(Ev::At { tag, text, ok }),
+        }
     }
 
     fn write_rec(&mut self) {
@@ -1030,11 +1309,12 @@ impl Worker {
             contacts: e.contacts(),
             removed_mine: self.removed.clone(),
             linking: e.linking(),
-            call_state: self.modem.call_state(),
+            call_state: self.call_state(),
             play_s: self.played as f32 / 16_000.0,
             rec_s: self.rec.len() as f32 / 16_000.0,
             bind: self.o.bind.clone(),
             udp_peer: self.o.peer.to_string(),
+            link: self.link_desc.clone(),
             max_gap_ms: self.max_gap,
             passes: self.passes,
             ring_s: self.ring_total as f32 / 16_000.0,
@@ -1044,6 +1324,17 @@ impl Worker {
             *g = s;
         }
     }
+}
+
+/// S21 from AT&V's S register line (`S21=007`).
+fn parse_s21(text: &str) -> Option<u16> {
+    let at = text.find("S21=")?;
+    let digits: String = text
+        .get(at + 4..)?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// The engine's linking went from on to off since the last pass (a code

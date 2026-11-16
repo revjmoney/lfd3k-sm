@@ -784,6 +784,16 @@ impl App {
                 }
                 Ev::At { tag, text, ok } => self.on_at(tag, text, ok),
                 Ev::Note(n) => self.note = n,
+                Ev::Lost(why) => {
+                    // The real modem is gone: back to the start screen,
+                    // no call, no ring, and say so.
+                    let t = format!("MODEM LOST: {why}");
+                    self.end_call(&t, true);
+                    self.link_code = None;
+                    self.screen = Screen::Calls;
+                    self.banner(t.clone(), true);
+                    self.note = t;
+                }
                 Ev::LinkEnded => {
                     if !link_code_stays(true, Some(LinkSig::Ended), self.s.linking) {
                         self.link_code = None;
@@ -1096,10 +1106,17 @@ impl App {
             heavy(17.0),
             TEXT,
         );
-        let who = format!(
-            "VOICE  {}/{}   VIA {}   {} TO {}",
-            self.s.name, self.s.label, self.s.station, self.s.bind, self.s.udp_peer
-        );
+        let who = if self.s.link.is_empty() {
+            format!(
+                "VOICE  {}/{}   VIA {}   {} TO {}",
+                self.s.name, self.s.label, self.s.station, self.s.bind, self.s.udp_peer
+            )
+        } else {
+            format!(
+                "VOICE  {}/{}   VIA {}   {}",
+                self.s.name, self.s.label, self.s.station, self.s.link
+            )
+        };
         text(
             ui,
             Pos2::new(x, r.top() + 38.0),

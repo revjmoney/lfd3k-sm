@@ -1,12 +1,15 @@
 //! `lfd3k-voice-pc`: voice calls by name on the PC, for the LRA FLOWTRON
 //! DATAMASTER 3000 SERIAL MODEM - LFD3K-SM.
 //!
-//! The app runs its own modem (a real `Modem` on SimNet over UDP, like
-//! `lfd3k-pcmodem`), so two copies on one PC, or on two PCs, call each
-//! other with no radio. See `docs/voice-pc.md`.
+//! By default the app runs its own modem (a real `Modem` on SimNet over
+//! UDP, like `lfd3k-pcmodem`), so two copies on one PC, or on two PCs,
+//! call each other with no radio. `--modem` drives a real modem instead:
+//! a serial port (`COM11`, `/dev/ttyUSB0`), `tcp:HOST[:PORT]`, or `find`
+//! (mDNS). See `docs/voice-pc.md`.
 //!
 //! ```text
 //! lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
+//!     [--modem sim|COM11|/dev/ttyUSB0|tcp:HOST[:PORT]|find[:STATION]]
 //!     [--snr <dB>] [--cap-tier SF9] [--data <dir>] [--station <NAME>]
 //!     [--auto-answer] [--play <wav>] [--record <wav>]
 //!     [--script <file> --shots <dir> [--script-unsafe]] [--trace <dir>]
@@ -16,6 +19,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod find;
+mod link;
 mod modem_sim;
 mod monitor;
 mod trace;
@@ -31,6 +36,8 @@ use lfd3k_core::Tier;
 use lfd3k_voice::Identity;
 
 pub struct Args {
+    /// `--modem`: the simulated modem (default) or a real one.
+    pub modem: link::ModemSpec,
     pub name: String,
     pub label: String,
     pub bind: String,
@@ -51,8 +58,9 @@ pub struct Args {
 }
 
 fn usage() -> String {
-    "usage: lfd3k-voice-pc --name <NAME> --label <LABEL> [--bind <addr:port>] [--peer <addr:port>] \
-     [--snr <dB>] [--cap-tier <SF5..SF12>] [--data <dir>] [--station <NAME>] [--auto-answer] \
+    "usage: lfd3k-voice-pc --name <NAME> --label <LABEL> \
+     [--modem sim|COM11|/dev/ttyUSB0|tcp:HOST[:PORT]|find[:STATION]] \
+     [--bind <addr:port>] [--peer <addr:port>] [--snr <dB>] [--cap-tier <SF5..SF12>] [--data <dir>] [--station <NAME>] [--auto-answer] \
      [--play <wav>] [--record <wav>] [--script <file> --shots <dir> [--script-unsafe]] [--trace <dir>]"
         .to_string()
 }
@@ -70,6 +78,7 @@ fn parse_args() -> Result<Args, String> {
     let mut bind = "127.0.0.1:4211".to_string();
     let mut peer = "127.0.0.1:4210".to_string();
     let mut a = Args {
+        modem: link::ModemSpec::Sim,
         name: String::new(),
         label: String::new(),
         bind: String::new(),
@@ -88,6 +97,8 @@ fn parse_args() -> Result<Args, String> {
     };
     let mut data = None;
     let mut station = None;
+    // The simulated modem's options given on the command line.
+    let mut sim_only: Vec<&str> = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || {
@@ -95,11 +106,21 @@ fn parse_args() -> Result<Args, String> {
                 .ok_or_else(|| format!("{k} needs a value\n{}", usage()))
         };
         match k.as_str() {
+            "--modem" => a.modem = link::parse_modem_spec(&v()?)?,
             "--name" => name = v()?,
             "--label" => label = v()?,
-            "--bind" => bind = v()?,
-            "--peer" => peer = v()?,
-            "--snr" => a.snr_db = v()?.parse().map_err(|e| format!("--snr: {e}"))?,
+            "--bind" => {
+                bind = v()?;
+                sim_only.push("--bind");
+            }
+            "--peer" => {
+                peer = v()?;
+                sim_only.push("--peer");
+            }
+            "--snr" => {
+                a.snr_db = v()?.parse().map_err(|e| format!("--snr: {e}"))?;
+                sim_only.push("--snr");
+            }
             "--cap-tier" => {
                 let t = v()?;
                 a.cap_tier = Some(
@@ -107,7 +128,10 @@ fn parse_args() -> Result<Args, String> {
                 );
             }
             "--data" => data = Some(PathBuf::from(v()?)),
-            "--station" => station = Some(v()?),
+            "--station" => {
+                station = Some(v()?);
+                sim_only.push("--station");
+            }
             "--auto-answer" => a.auto_answer = true,
             "--play" => a.play = Some(PathBuf::from(v()?)),
             "--record" => a.record = Some(PathBuf::from(v()?)),
@@ -117,6 +141,13 @@ fn parse_args() -> Result<Args, String> {
             "--trace" => a.trace = Some(PathBuf::from(v()?)),
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown option {k}\n{}", usage())),
+        }
+    }
+    if a.modem != link::ModemSpec::Sim {
+        if let Some(o) = sim_only.first() {
+            return Err(format!(
+                "{o} is for the simulated modem only; with a real modem (--modem) the station name comes from the modem"
+            ));
         }
     }
     a.peer = peer
@@ -245,6 +276,7 @@ fn main() -> ExitCode {
         Box::new(move |cc| {
             ui::setup(&cc.egui_ctx);
             let o = modem_sim::Opts {
+                modem: a.modem.clone(),
                 bind: a.bind.clone(),
                 peer: a.peer,
                 station: a.station.clone(),
