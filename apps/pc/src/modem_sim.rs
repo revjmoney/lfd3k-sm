@@ -83,7 +83,8 @@ const DUCK: f32 = 0.25;
 const STATE_RESYNC: u8 = 5;
 /// `--modem find` looks this long; a TCP connect waits as long.
 const FIND_MS: u32 = 5_000;
-/// On Quit, wait this long at most for the old S21 to go back.
+/// On Quit, wait this long at most for the answer to the line putting the
+/// old S21 back (counted from when it is sent).
 const RESTORE_MS: u32 = 2_000;
 /// The most link reads in one pass (the rest wait for the next pass).
 const RECV_PASSES: usize = 64;
@@ -343,6 +344,8 @@ struct Worker {
     link_desc: String,
     /// `--cap-tier` on a real modem: S21 as it was, put back on Quit.
     cap_old: Option<u16>,
+    /// When the line putting S21 back went to the modem (Quit).
+    restore_sent: Option<u32>,
     engine: Engine,
     vin: VecDeque<u8>,
     at: AtQueue,
@@ -505,6 +508,7 @@ impl Worker {
             clock: Instant::now(),
             link_desc: String::new(),
             cap_old: None,
+            restore_sent: None,
             engine,
             vin: VecDeque::new(),
             at: AtQueue {
@@ -611,8 +615,15 @@ impl Worker {
                     self.on_cmd(c, now);
                 }
             }
-            if restoring.is_some_and(|r| self.cap_old.is_none() || now.wrapping_sub(r) > RESTORE_MS)
-            {
+            // Done when the old S21 is back, or its line got no answer in
+            // time once sent (a window line in flight goes first; that
+            // one gives up after AT_TIMEOUT_MS at most).
+            let restore_late = self
+                .restore_sent
+                .is_some_and(|t| now.wrapping_sub(t) > RESTORE_MS);
+            let quit_late =
+                restoring.is_some_and(|r| now.wrapping_sub(r) > AT_TIMEOUT_MS + RESTORE_MS);
+            if restoring.is_some() && (self.cap_old.is_none() || restore_late || quit_late) {
                 restoring = None;
                 self.close_link();
                 quit_at = Some(now);
@@ -1239,6 +1250,9 @@ impl Worker {
                 t.host(now, '>', &crate::ui::mask_line(&line));
             }
             self.at.cur = Some((tag, String::new(), now));
+            if tag == TAG_CAP_RESTORE {
+                self.restore_sent = Some(now);
+            }
         } else {
             self.at_done(tag, "line too long".into(), false);
         }

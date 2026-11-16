@@ -234,7 +234,7 @@ eframe has default features off (`glow`, `wayland`, `x11` on); egui's own fonts 
 
 ### Real modems: serialport and mdns-sd (PC voice app only)
 
-`--modem` drives a real modem over USB (serialport) or finds one on the network (mdns-sd). serialport has default features off (no libudev on Linux: the app opens the port it is given and never lists ports); mdns-sd has default features off (no async, no logging). Every crate the two bring in is below, also when it is listed above for another reason. Licenses from `cargo metadata`; the trees from `cargo tree -p serialport -e normal` and `cargo tree -p mdns-sd -e normal`, on Windows and with `--target x86_64-unknown-linux-gnu`. All are compatible with the app's GPL-3.0-or-later.
+`--modem` drives a real modem over USB (serialport) or finds one on the network (mdns-sd). serialport has default features off (no libudev on Linux: the app opens the port it is given and never lists ports); mdns-sd has default features off (no async, no logging). Every crate the two build on Windows or Linux is below, also when it is listed above for another reason. Cargo.lock also lists crates serialport names for macOS only (io-kit-sys, mach2, core-foundation, core-foundation-sys); they are not built for this app and are not listed. Licenses from `cargo metadata`; the trees from `cargo tree -p serialport -e normal` and `cargo tree -p mdns-sd -e normal`, on Windows and with `--target x86_64-unknown-linux-gnu`. All are compatible with the app's GPL-3.0-or-later.
 
 | Crate | Version | License | Where | Why |
 |-------|---------|---------|-------|-----|
