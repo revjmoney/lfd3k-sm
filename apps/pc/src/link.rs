@@ -25,8 +25,18 @@ use lfd3k_core::voice::host::{cobs_encode, msg};
 pub const VOICE_PORT: u16 = 4220;
 /// The serial speed of both boards (8N1).
 const BAUD: u32 = 115_200;
-/// `AT+VOICE` must answer OK within this.
-const HANDSHAKE_MS: u64 = 3_000;
+/// `AT+VOICE` must answer OK within this (both tries).
+const HANDSHAKE_MS: u64 = 9_000;
+/// No OK by now: `AT+VOICE` once more. An app that quit or crashed less
+/// than 5 s ago leaves session 0 in framed mode, which takes the first
+/// `AT+VOICE` as frame bytes; that session has timed out by now (5 s
+/// with no frame).
+const HANDSHAKE_RESEND_MS: u64 = 5_500;
+/// The command that puts the host stream into framed mode.
+const VOICE_CMD: &[u8] = b"AT+VOICE\r";
+/// The message when the modem closes the connection: it was full or does
+/// not take this PC.
+const CLOSED_HINT: &str = "the modem closed the connection (3 voice apps already connected, or this PC is not on the modem's network?)";
 /// A TCP connect gives up after this.
 const CONNECT_MS: u64 = 5_000;
 /// A serial write gives up after this (the link is then lost).
@@ -169,6 +179,97 @@ pub fn voice_handshake(reply: &[u8]) -> HandshakeStep {
     HandshakeStep::Need
 }
 
+/// What the `AT+VOICE` wait needs from the port and the clock (a fake in
+/// the tests).
+trait HandshakeIo {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<()>;
+    /// What has come in now, without waiting (0 when nothing).
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    /// Drop what came in and was not read yet.
+    fn clear_input(&mut self);
+    /// Time since the wait started.
+    fn elapsed(&self) -> Duration;
+    /// Nothing came in: wait a moment.
+    fn idle(&mut self);
+}
+
+/// Send `AT+VOICE` and wait for its OK, sending it once more after
+/// [`HANDSHAKE_RESEND_MS`]. Returns the frame bytes that came in with the
+/// OK.
+fn voice_wait(io: &mut dyn HandshakeIo) -> Result<Vec<u8>, String> {
+    io.write(VOICE_CMD).map_err(|e| e.to_string())?;
+    let mut resent = false;
+    let mut reply: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = io.read(&mut buf).map_err(|e| e.to_string())?;
+        reply.extend_from_slice(buf.get(..n).unwrap_or(&[]));
+        match voice_handshake(&reply) {
+            HandshakeStep::Ok(used) => return Ok(reply.get(used..).unwrap_or(&[]).to_vec()),
+            HandshakeStep::Error(e) => return Err(e),
+            HandshakeStep::Need => {}
+        }
+        let t = io.elapsed();
+        if t >= Duration::from_millis(HANDSHAKE_MS) {
+            return Err(
+                "no OK to AT+VOICE within 9 s. If the app just quit or crashed, the \
+                 modem may still be in voice mode: wait 5 s and try again. Otherwise, is it \
+                 an LFD3K-SM modem in command mode?"
+                    .into(),
+            );
+        }
+        if !resent && t >= Duration::from_millis(HANDSHAKE_RESEND_MS) {
+            // What came so far (an old session's frames) is not the answer.
+            io.clear_input();
+            reply.clear();
+            io.write(VOICE_CMD).map_err(|e| e.to_string())?;
+            resent = true;
+            continue;
+        }
+        if n == 0 {
+            io.idle();
+        }
+    }
+}
+
+/// The serial port and the real clock for [`voice_wait`].
+struct SerialWait<'a> {
+    port: &'a mut dyn serialport::SerialPort,
+    start: Instant,
+}
+
+impl HandshakeIo for SerialWait<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<()> {
+        self.port.write_all(b)?;
+        self.port.flush()
+    }
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        serial_read(self.port, buf)
+    }
+    fn clear_input(&mut self) {
+        let _ = self.port.clear(serialport::ClearBuffer::Input);
+    }
+    fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+    fn idle(&mut self) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The address to connect to: the first IPv4 one (the firmware listens on
+/// IPv4 only), else the first.
+fn pick_addr(addrs: impl IntoIterator<Item = SocketAddr>) -> Option<SocketAddr> {
+    let mut first = None;
+    for a in addrs {
+        if a.is_ipv4() {
+            return Some(a);
+        }
+        first.get_or_insert(a);
+    }
+    first
+}
+
 /// A modem on a serial port, in framed mode.
 pub struct SerialLink {
     port: Box<dyn serialport::SerialPort>,
@@ -235,10 +336,18 @@ impl TcpLink {
         }
         loop {
             match self.s.read(buf) {
-                Ok(0) => return Err(format!("{}: the modem closed the connection", self.addr)),
+                Ok(0) => return Err(format!("{}: {CLOSED_HINT}", self.addr)),
                 Ok(n) => return Ok(n),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(0),
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return Err(format!("{}: {CLOSED_HINT}", self.addr))
+                }
                 Err(e) => return Err(format!("{}: {e}", self.addr)),
             }
         }
@@ -259,7 +368,7 @@ impl TcpLink {
 
 impl SerialLink {
     /// Open `name` at 115200 8N1 with the board safe line handling, send
-    /// `AT+VOICE`, and wait for its OK.
+    /// `AT+VOICE`, and wait for its OK (once more after 5.5 s, 9 s in all).
     pub fn open(name: &str) -> Result<SerialLink, String> {
         let b = serialport::new(name, BAUD)
             .data_bits(serialport::DataBits::Eight)
@@ -276,36 +385,16 @@ impl SerialLink {
         let _ = port.clear(serialport::ClearBuffer::Input);
         // AT+VOICE is the first thing the modem gets, in one write: with
         // boot to menu (S32) any other first byte opens the menu.
-        port.write_all(b"AT+VOICE\r")
-            .and_then(|()| port.flush())
-            .map_err(|e| format!("{name}: {e}"))?;
-        let start = Instant::now();
-        let mut reply: Vec<u8> = Vec::new();
-        let mut buf = [0u8; 256];
-        loop {
-            let n = serial_read(&mut *port, &mut buf).map_err(|e| format!("{name}: {e}"))?;
-            reply.extend_from_slice(buf.get(..n).unwrap_or(&[]));
-            match voice_handshake(&reply) {
-                HandshakeStep::Ok(used) => {
-                    let early = reply.get(used..).unwrap_or(&[]).to_vec();
-                    return Ok(SerialLink {
-                        port,
-                        name: name.to_string(),
-                        early,
-                    });
-                }
-                HandshakeStep::Error(e) => return Err(format!("{name}: {e}")),
-                HandshakeStep::Need => {}
-            }
-            if start.elapsed() >= Duration::from_millis(HANDSHAKE_MS) {
-                return Err(format!(
-                    "{name}: no OK to AT+VOICE within 3 s (is it an LFD3K-SM modem in command mode?)"
-                ));
-            }
-            if n == 0 {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        let early = voice_wait(&mut SerialWait {
+            port: &mut *port,
+            start: Instant::now(),
+        })
+        .map_err(|e| format!("{name}: {e}"))?;
+        Ok(SerialLink {
+            port,
+            name: name.to_string(),
+            early,
+        })
     }
 
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -350,18 +439,17 @@ pub enum ModemLink {
 
 impl ModemLink {
     /// Open the link `spec` names. `timeout_ms` is how long `find` looks
-    /// and a TCP connect waits; a serial `AT+VOICE` gets 3 s. `Sim` is not
+    /// and a TCP connect waits; a serial `AT+VOICE` gets 9 s. `Sim` is not
     /// a link (an error).
     pub fn open(spec: &ModemSpec, timeout_ms: u32) -> Result<ModemLink, String> {
         match spec {
             ModemSpec::Sim => Err("the simulated modem has no link".into()),
             ModemSpec::Serial(name) => SerialLink::open(name).map(ModemLink::Serial),
             ModemSpec::Tcp(host, port) => {
-                let addr = (host.as_str(), *port)
+                let addrs = (host.as_str(), *port)
                     .to_socket_addrs()
-                    .map_err(|e| format!("{host}: {e}"))?
-                    .next()
-                    .ok_or_else(|| format!("{host}: no address"))?;
+                    .map_err(|e| format!("{host}: {e}"))?;
+                let addr = pick_addr(addrs).ok_or_else(|| format!("{host}: no address"))?;
                 TcpLink::connect(addr, timeout_ms.min(CONNECT_MS as u32)).map(ModemLink::Tcp)
             }
             ModemSpec::Find(station) => {
@@ -492,6 +580,102 @@ mod tests {
             voice_handshake(b"AT+VOICE\r\r\nERROR\r\n"),
             HandshakeStep::Error(_)
         ));
+    }
+
+    /// A modem on a fake port with a fake clock (5 ms per idle wait): it
+    /// answers each `AT+VOICE` written at or after `answers_from` ms, with
+    /// `extra` behind the OK; before that it says nothing.
+    struct FakeModem {
+        t_ms: u64,
+        answers_from: Option<u64>,
+        extra: Vec<u8>,
+        writes: Vec<u64>,
+        inbox: Vec<u8>,
+    }
+
+    impl FakeModem {
+        fn new(answers_from: Option<u64>) -> FakeModem {
+            FakeModem {
+                t_ms: 0,
+                answers_from,
+                extra: Vec::new(),
+                writes: Vec::new(),
+                inbox: Vec::new(),
+            }
+        }
+    }
+
+    impl HandshakeIo for FakeModem {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<()> {
+            assert_eq!(b, VOICE_CMD);
+            self.writes.push(self.t_ms);
+            if self.answers_from.is_some_and(|a| self.t_ms >= a) {
+                self.inbox.extend_from_slice(b"AT+VOICE\r\r\nOK\r\n");
+                self.inbox.extend_from_slice(&self.extra);
+            }
+            Ok(())
+        }
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inbox.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.inbox[..n]);
+            self.inbox.drain(..n);
+            Ok(n)
+        }
+        fn clear_input(&mut self) {
+            self.inbox.clear();
+        }
+        fn elapsed(&self) -> Duration {
+            Duration::from_millis(self.t_ms)
+        }
+        fn idle(&mut self) {
+            self.t_ms += 5;
+        }
+    }
+
+    #[test]
+    fn voice_wait_ok_first_try() {
+        let mut m = FakeModem::new(Some(0));
+        m.extra = ack_frame();
+        assert_eq!(voice_wait(&mut m), Ok(ack_frame()));
+        assert_eq!(m.writes, vec![0], "one AT+VOICE");
+    }
+
+    #[test]
+    fn voice_wait_sends_again_after_an_old_session_times_out() {
+        // The old session 0 takes AT+VOICE as frame bytes until it times
+        // out 5 s after the crash; the second AT+VOICE gets the OK.
+        let mut m = FakeModem::new(Some(5_000));
+        assert_eq!(voice_wait(&mut m), Ok(Vec::new()));
+        assert_eq!(m.writes.len(), 2, "exactly two AT+VOICE");
+        assert_eq!(m.writes[0], 0);
+        assert!(m.writes[1] >= HANDSHAKE_RESEND_MS, "{:?}", m.writes);
+        assert!(m.writes[1] < HANDSHAKE_RESEND_MS + 50, "{:?}", m.writes);
+    }
+
+    #[test]
+    fn voice_wait_gives_up_with_the_hint() {
+        let mut m = FakeModem::new(None);
+        let e = voice_wait(&mut m).unwrap_err();
+        assert!(e.contains("wait 5 s and try again"), "{e}");
+        assert!(e.contains("LFD3K-SM"), "{e}");
+        assert_eq!(m.writes.len(), 2);
+        assert!(
+            m.t_ms >= HANDSHAKE_MS && m.t_ms < HANDSHAKE_MS + 50,
+            "{}",
+            m.t_ms
+        );
+    }
+
+    #[test]
+    fn pick_addr_prefers_ipv4() {
+        let v6: SocketAddr = "[fe80::1]:4220".parse().unwrap();
+        let v6b: SocketAddr = "[::1]:4220".parse().unwrap();
+        let v4: SocketAddr = "192.168.4.1:4220".parse().unwrap();
+        let v4b: SocketAddr = "10.0.0.2:4220".parse().unwrap();
+        assert_eq!(pick_addr([v6, v4, v4b]), Some(v4));
+        assert_eq!(pick_addr([v4b, v6]), Some(v4b));
+        assert_eq!(pick_addr([v6, v6b]), Some(v6));
+        assert_eq!(pick_addr(Vec::<SocketAddr>::new()), None);
     }
 
     #[test]

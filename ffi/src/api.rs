@@ -482,7 +482,8 @@ pub extern "C" fn lfd3k_voice_open(session: u8, now_ms: u32) -> bool {
 }
 
 /// App bytes into voice session `session`. Returns the bytes taken (offer
-/// the rest again later); 0 before init or when the session is not open.
+/// the rest again later); 0 before init. When the session is not open (or
+/// the number is not a session) all `len` bytes are taken and dropped.
 ///
 /// # Safety
 /// `buf` must be null or valid for reads of `len` bytes.

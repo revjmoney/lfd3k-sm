@@ -513,6 +513,27 @@ impl ModemView {
     }
 }
 
+/// A settings fingerprint with the `S21=` value masked (AT&V's S register
+/// line), for comparing while `--cap-tier` holds S21.
+fn without_s21(fp: &str) -> String {
+    fp.lines()
+        .map(|l| {
+            if l.trim_start().starts_with("S00") {
+                l.split(' ')
+                    .map(|w| if w.starts_with("S21=") { "S21=" } else { w })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
 /// The call as the window shows it.
 #[derive(Default)]
 struct CallView {
@@ -735,11 +756,18 @@ impl App {
     }
 
     fn unsaved(&self) -> bool {
+        // `--cap-tier` on a real modem holds S21 for this run only (SAVE
+        // stores the old value), so S21 is not a change to save.
+        let cap = self.s.cap_active;
         self.pw_dirty
-            || self
-                .baseline
-                .as_ref()
-                .is_some_and(|b| *b != self.m.fingerprint())
+            || self.baseline.as_ref().is_some_and(|b| {
+                let now = self.m.fingerprint();
+                if cap {
+                    without_s21(b) != without_s21(&now)
+                } else {
+                    *b != now
+                }
+            })
     }
 
     fn banner(&mut self, t: impl Into<String>, warn: bool) {
@@ -4127,5 +4155,21 @@ mod tests {
             shown = link_code_stays(shown, None, false);
         }
         assert!(shown);
+    }
+
+    #[test]
+    fn cap_tier_s21_is_not_a_change() {
+        let saved = "E1 V1 NAME A
+S00=000 S21=000 S30=2
+TX POWER S30=2 dBm";
+        let capped = "E1 V1 NAME A
+S00=000 S21=004 S30=2
+TX POWER S30=2 dBm";
+        let other = "E1 V1 NAME A
+S00=000 S21=004 S30=5
+TX POWER S30=5 dBm";
+        assert_eq!(without_s21(saved), without_s21(capped));
+        assert_ne!(without_s21(saved), without_s21(other));
+        assert_ne!(saved, capped);
     }
 }

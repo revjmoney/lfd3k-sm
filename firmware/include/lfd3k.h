@@ -56,7 +56,7 @@ size_t   lfd3k_host_out(uint8_t *buf, size_t len);
 /* Voice host protocol sessions 1 to 3 (TCP voice apps); session 0 is the
  * host stream after AT+VOICE. All return 0/false before init. */
 bool     lfd3k_voice_open(uint8_t session, uint32_t now_ms);   /* 1..3 */
-size_t   lfd3k_voice_in(uint8_t session, const uint8_t *buf, size_t len, uint32_t now_ms); /* bytes taken */
+size_t   lfd3k_voice_in(uint8_t session, const uint8_t *buf, size_t len, uint32_t now_ms); /* bytes taken; a closed session takes and drops all */
 size_t   lfd3k_voice_out(uint8_t session, uint8_t *buf, size_t cap);                       /* bytes written */
 void     lfd3k_voice_close(uint8_t session, uint32_t now_ms);
 bool     lfd3k_voice_alive(uint8_t session); /* false once the core closed it (timeout or Leave) */

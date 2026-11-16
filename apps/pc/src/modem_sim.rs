@@ -33,7 +33,9 @@
 //! modem makes its own scope and keeps its own settings. A link error
 //! tells the window `MODEM LOST` and the thread goes on without a modem
 //! until the app is closed. `--cap-tier` there reads S21 (AT&V), sets it
-//! (ATS21) and puts the old value back on Quit (never AT&W).
+//! (ATS21) and puts the old value back on Quit (never AT&W). While the cap
+//! is set, an AT&W is sent as `ATS21=<old>`, `AT&W`, `ATS21=<cap>`, so the
+//! saved profile keeps the old S21.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -101,6 +103,8 @@ const SILENT_MS: u32 = 20_000;
 const TAG_CAP_READ: u32 = 0xFFFF_0001;
 const TAG_CAP_SET: u32 = 0xFFFF_0002;
 const TAG_CAP_RESTORE: u32 = 0xFFFF_0003;
+/// The old S21 put back for a moment so an AT&W does not save the cap.
+const TAG_CAP_UNSET: u32 = 0xFFFF_0004;
 
 /// What the window asks of the modem thread.
 pub enum Cmd {
@@ -194,6 +198,9 @@ pub struct Snap {
     /// A real modem's link (`USB COM11`, `TCP 192.168.4.1:4220`, or
     /// `MODEM LOST`); empty with the simulated modem.
     pub link: String,
+    /// `--cap-tier` holds a real modem's S21 for this run: S21 is left out
+    /// of what Save and Discard compare (SAVE stores the old S21).
+    pub cap_active: bool,
     /// Longest gap between two passes of the modem loop (ms), and passes.
     pub max_gap_ms: u32,
     pub passes: u64,
@@ -225,6 +232,7 @@ impl Default for Snap {
             bind: String::new(),
             udp_peer: String::new(),
             link: String::new(),
+            cap_active: false,
             max_gap_ms: 0,
             passes: 0,
             ring_s: 0.0,
@@ -937,7 +945,21 @@ impl Worker {
             }
             Cmd::LinkJoin(code) => e.join_link(&code),
             Cmd::CancelLink => e.cancel_link(),
-            Cmd::At { tag, line } => self.at.wait.push_back((tag, line)),
+            Cmd::At { tag, line } => match self.cap_old {
+                // The cap is never saved: S21 goes back to the old value
+                // for the AT&W, then the cap again.
+                Some(old) if is_save_line(&line) => {
+                    let cap = self.o.cap_tier.map_or(0, |t| t.index());
+                    self.at
+                        .wait
+                        .push_back((TAG_CAP_UNSET, Zeroizing::new(format!("ATS21={old}"))));
+                    self.at.wait.push_back((tag, line));
+                    self.at
+                        .wait
+                        .push_back((TAG_CAP_SET, Zeroizing::new(format!("ATS21={cap}"))));
+                }
+                _ => self.at.wait.push_back((tag, line)),
+            },
             Cmd::RefreshDir => e.refresh_directory(),
             Cmd::RemoveMyDevice(d) => {
                 e.remove_my_device(d);
@@ -1307,15 +1329,37 @@ impl Worker {
         match tag {
             TAG_CAP_READ => {
                 let old = if ok { parse_s21(&text) } else { None };
-                if old.is_none() {
-                    self.send(Ev::Note(
-                        "--cap-tier: could not read S21 (AT&V); it is not put back on exit".into(),
-                    ));
-                }
                 self.cap_old = old;
-                if let Some(t) = self.o.cap_tier {
-                    let line = format!("ATS21={}", t.index());
-                    self.at.wait.push_front((TAG_CAP_SET, Zeroizing::new(line)));
+                match (old, self.o.cap_tier) {
+                    // Without the old value the cap could not be put back
+                    // (or kept out of a save), so it is not set.
+                    (None, _) => self.send(Ev::Note(
+                        "--cap-tier: could not read S21 (AT&V); the cap is not set".into(),
+                    )),
+                    (Some(_), Some(t)) => {
+                        let line = format!("ATS21={}", t.index());
+                        self.at.wait.push_front((TAG_CAP_SET, Zeroizing::new(line)));
+                    }
+                    (Some(_), None) => {}
+                }
+            }
+            TAG_CAP_UNSET => {
+                if !ok {
+                    // The AT&W right behind it would save the cap: it is
+                    // not sent, and the window hears the save failed.
+                    if let Some(&(t, _)) = self.at.wait.front() {
+                        if t < TAG_CAP_READ {
+                            self.at.wait.pop_front();
+                            self.at_done(
+                                t,
+                                format!(
+                                    "not saved: S21 could not be put back before AT&W ({})",
+                                    text.trim()
+                                ),
+                                false,
+                            );
+                        }
+                    }
                 }
             }
             TAG_CAP_SET => {
@@ -1371,6 +1415,7 @@ impl Worker {
             bind: self.o.bind.clone(),
             udp_peer: self.o.peer.to_string(),
             link: self.link_desc.clone(),
+            cap_active: self.cap_old.is_some(),
             max_gap_ms: self.max_gap,
             passes: self.passes,
             ring_s: self.ring_total as f32 / 16_000.0,
@@ -1380,6 +1425,11 @@ impl Worker {
             *g = s;
         }
     }
+}
+
+/// An AT line that saves the profile (`AT&W`, any case and spaces).
+fn is_save_line(line: &str) -> bool {
+    line.trim().eq_ignore_ascii_case("AT&W")
 }
 
 /// S21 from AT&V's S register line (`S21=007`).

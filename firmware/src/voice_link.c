@@ -17,7 +17,8 @@ static const char *TAG = "voice";
 #define VBUF_BYTES   1536   /* each stream buffer, each way */
 #define IO_CHUNK     512    /* listener's socket reads */
 #define TXB_BYTES    256    /* per slot: taken from tx, not yet sent */
-#define RX_PEND      256    /* per slot: from rx, not yet taken by the core */
+#define RX_PEND      272    /* per slot: from rx, not yet taken by the core (a whole
+                             * COBS frame: VHP_FRAME_MAX 260 decoded, 264 on the wire) */
 #define OUT_CHUNK    256    /* pump's lfd3k_voice_out chunk */
 #define SELECT_US    10000  /* listener wakes at least every 10 ms */
 #define TASK_STACK   4096
@@ -152,6 +153,11 @@ static void accept_one(int lfd)
     socklen_t sl = sizeof(sa);
     int fd = accept(lfd, (struct sockaddr *)&sa, &sl);
     if (fd < 0) {
+        /* Not just "nothing waiting": select would wake at once on every
+         * pass, so give core 0 (IDLE0, the task watchdog) a moment. */
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
         return;
     }
     char ip[16];

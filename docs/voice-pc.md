@@ -33,7 +33,7 @@ lfd3k-voice-pc --name REV --label PC --bind 127.0.0.1:4211 --peer 127.0.0.1:4210
 | `--name`, `--label` | Your voice name (a person, like REV) and this device's label (like PC). Used the first time only, to make this device's keys; after that change them in Settings, Voice and keys. Default REV and PC |
 | `--bind`, `--peer` | Built-in modem only. This app's UDP address and the other app's (both `addr:port`). Defaults 127.0.0.1:4211 and 127.0.0.1:4210 |
 | `--snr <dB>` | Built-in modem only. What the other modem hears from ours (default 8). Lower is slower: the tier, codec and talk mode follow it |
-| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away. On a real modem the app reads S21 first and puts the old value back when you close it (it never saves with AT&W) |
+| `--cap-tier SF9` | Caps our modem's tier (S21) for this run, to try a slow tier. ATZ (DISCARD) takes it away. On a real modem the app reads S21 first and puts the old value back when you close it (it never saves with AT&W). SAVE in Settings saves your other changes with the old S21, so the cap is never kept |
 | `--data <dir>` | Where this device keeps its keys, checked contacts and the modem's saved settings. Default `%APPDATA%\lfd3k-voice-pc\<NAME>-<LABEL>` |
 | `--station <NAME>` | Built-in modem only. Its station name. Default `PCMODEM-<port>`. A real modem has its own name (AT+NAME) |
 | `--auto-answer` | Test helper: the app picks up by itself and talks anyway (the two words still show). The modem's S0 still never answers voice; this is the app's choice |
@@ -78,20 +78,22 @@ On Wi-Fi, by address or by looking it up:
 ```powershell
 target\release\lfd3k-voice-pc.exe --name REV --label PC --modem tcp:192.168.4.1
 target\release\lfd3k-voice-pc.exe --name REV --label PC --modem find
-target\release\lfd3k-voice-pc.exe --name REV --label PC --modem find:SHOP
+target\release\lfd3k-voice-pc.exe --name REV --label PC --modem find:AXISMODEM-E4B0
 ```
 
-`find` looks for 5 seconds and takes the first modem that takes voice apps (its firmware has the TCP voice port), or the one with that station name.
+`find` looks for 5 seconds and takes the first modem that takes voice apps (its firmware has the TCP voice port), or the one with that station name (the modem's AT+NAME, not a voice name).
 
 Good to know:
 
 - **Use a headset.** The app has no echo canceller, so speakers feed your own voice back into the call.
+- **Anyone on the modem's Wi-Fi can run it.** Anyone on the modem's hotspot, or on the same home network as the modem, can connect to port 4220 and change any modem setting: Wi-Fi and hotspot, forwards, TX power, saved settings, dialing. Not just register a name. Only let people you trust on those networks.
 - **One app per modem session.** On USB one app has the modem; close the terminal program first (the port can only be open once). On Wi-Fi up to 3 apps can use one modem at a time.
 - On Windows the app keeps the DTR and RTS lines low, so the board should not restart when the app opens the port (not yet checked on the bench). On Linux it leaves them as Linux sets them.
 - `--bind`, `--peer`, `--snr` and `--station` are for the built-in modem only; with a real modem they are an error. The station name shown is the real modem's.
 - The header shows the link, for example `USB COM11` or `TCP 192.168.4.1:4220`.
 - If the cable comes out, Wi-Fi drops, or the modem restarts or goes quiet (nothing from it for 3 s, or 20 s if its radio is not working), the app shows **MODEM LOST** with the reason and goes back to the CALLS screen. Close it and start it again to reconnect.
 - Closing the app ends its session cleanly; on USB the modem goes back to AT commands.
+- If the app crashed or was killed on USB, the modem stays in voice mode for 5 s. Starting the app again right away still works: it waits and asks again (up to 9 s).
 
 ## Calling by name
 
