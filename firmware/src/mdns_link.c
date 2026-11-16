@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "mdns.h"
+#include "voice_link.h"
 
 static const char *TAG = "mdns";
 
@@ -17,6 +18,9 @@ static const char *TAG = "mdns";
 #define FIRST_BROWSE_US (5LL * 1000000)
 #define NAME_CAP      17
 #define VER_CAP       16
+#define STR_(x)       #x
+#define STR(x)        STR_(x)
+#define VOICE_TXT     STR(VOICE_PORT) /* TXT voice=4220: the TCP voice port */
 
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -68,11 +72,12 @@ static bool apply_name(const char *name, const char *ver)
     mdns_hostname_set(host);
     mdns_instance_name_set(name);
     if (!s_service) {
-        mdns_txt_item_t txt[2] = {
+        mdns_txt_item_t txt[3] = {
             {"name", name},
             {"ver", ver},
+            {"voice", VOICE_TXT},
         };
-        esp_err_t e = mdns_service_add(name, SERVICE, PROTO, SERVICE_PORT, txt, 2);
+        esp_err_t e = mdns_service_add(name, SERVICE, PROTO, SERVICE_PORT, txt, 3);
         if (e != ESP_OK) {
             /* One warning per back off step, never per loop turn. */
             ESP_LOGW(TAG, "service add failed: %s, retry in %u s", esp_err_to_name(e),
@@ -84,6 +89,7 @@ static bool apply_name(const char *name, const char *ver)
         mdns_service_instance_name_set(SERVICE, PROTO, name);
         mdns_service_txt_item_set(SERVICE, PROTO, "name", name);
         mdns_service_txt_item_set(SERVICE, PROTO, "ver", ver);
+        mdns_service_txt_item_set(SERVICE, PROTO, "voice", VOICE_TXT);
     }
     strlcpy(s_name, name, sizeof(s_name));
     ESP_LOGI(TAG, "advertising %s.%s.%s", name, SERVICE, PROTO);

@@ -23,6 +23,7 @@
 #include "tcp_link.h"
 #include "udp_link.h"
 #include "usb_link.h"
+#include "voice_link.h"
 #include "wifi_link.h"
 #include "wire_pump.h"
 
@@ -431,6 +432,7 @@ static void modem_task(void *arg)
         wifi_link_apply(&wc);
         memset(&wc, 0, sizeof(wc));
     }
+    voice_link_start(); /* TCP voice sessions 1 to 3 on port 4220; wakes this task */
 
     setenv("TZ", LOCAL_TZ, 1);
     tzset();
@@ -467,6 +469,7 @@ static void modem_task(void *arg)
         simnet_step();
         simnet_in(now_ms);
         lfd3k_poll(now_ms);
+        voice_link_pump(now_ms); /* every lfd3k_voice_* call stays on this task */
         simnet_step();
         wire_pump(now_ms);
 

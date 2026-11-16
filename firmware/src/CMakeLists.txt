@@ -15,7 +15,7 @@ else()
     set(LFD3K_LINK_REQ esp_driver_usb_serial_jtag)
 endif()
 
-idf_component_register(SRCS "main.c" "hal_radio.c" "${LFD3K_LINK_SRC}" "panel.c" "panel_render.c" "idle_show.c" "ssd1306.c" "settings_store.c" "wifi_link.c" "mdns_link.c" "tcp_link.c" "wire_pump.c" "udp_link.c" "mode_switch.c"
+idf_component_register(SRCS "main.c" "hal_radio.c" "${LFD3K_LINK_SRC}" "panel.c" "panel_render.c" "idle_show.c" "ssd1306.c" "settings_store.c" "wifi_link.c" "mdns_link.c" "tcp_link.c" "wire_pump.c" "udp_link.c" "mode_switch.c" "voice_link.c" "voice_peer.c"
                             "${LFMP_BOOT_DIR}/choose.c"
                             "${LFMP_PICKER_DIR}/picker_draw.c" "${LFMP_PICKER_DIR}/picker_menu.c"
                        INCLUDE_DIRS "." "../include" "${LFMP_BOOT_DIR}" "${LFMP_PICKER_DIR}"
