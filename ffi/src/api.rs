@@ -72,10 +72,11 @@ impl Trace {
     /// Take one sample if 50 ms have passed since the last one. In SimNet
     /// the sample comes from the simulated channel (the RSSI of a frame
     /// being received, else -110 dBm), so the idle scope still moves.
-    fn sample(&mut self, radio: &mut Radios, now_ms: u32) {
+    /// Returns the sample taken as `(dbm, tx)`, if any.
+    fn sample(&mut self, radio: &mut Radios, now_ms: u32) -> Option<(i8, bool)> {
         if let Some(last) = self.last_ms {
             if now_ms.wrapping_sub(last) < TRACE_MS {
-                return;
+                return None;
             }
         }
         let tx = if radio.on_sim() {
@@ -93,9 +94,14 @@ impl Trace {
         if tx {
             self.last_ms = Some(now_ms);
             self.push(0, 1);
+            Some((0, true))
         } else if let Some(r) = rssi {
             self.last_ms = Some(now_ms);
-            self.push(r.clamp(-128, 0) as i8, 0);
+            let dbm = r.clamp(-128, 0) as i8;
+            self.push(dbm, 0);
+            Some((dbm, false))
+        } else {
+            None
         }
     }
 }
@@ -370,7 +376,10 @@ pub extern "C" fn lfd3k_poll(now_ms: u32) {
             d.modem.radio_rx(frame, info, &mut d.radio, now_ms);
         }
         d.modem.tick(&mut d.radio, now_ms);
-        d.trace.sample(&mut d.radio, now_ms);
+        // Each new channel sample also feeds the voice Scope frames.
+        if let Some((dbm, tx)) = d.trace.sample(&mut d.radio, now_ms) {
+            d.modem.scope_sample(i16::from(dbm), tx, now_ms);
+        }
     });
 }
 
@@ -462,6 +471,63 @@ pub unsafe extern "C" fn lfd3k_host_out(buf: *mut u8, len: usize) -> usize {
     // SAFETY: the caller guarantees `buf` is valid for `len` bytes.
     let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
     with_device(|d| d.modem.host_output(out)).unwrap_or(0)
+}
+
+/// Opens voice host protocol session `session` (1 to 3; session 0 is the
+/// host stream after AT+VOICE). Returns false for any other number, when
+/// it is already open, and before init.
+#[no_mangle]
+pub extern "C" fn lfd3k_voice_open(session: u8, now_ms: u32) -> bool {
+    with_device(|d| d.modem.voice_open(session, now_ms)).unwrap_or(false)
+}
+
+/// App bytes into voice session `session`. Returns the bytes taken (offer
+/// the rest again later); 0 before init or when the session is not open.
+///
+/// # Safety
+/// `buf` must be null or valid for reads of `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_voice_in(
+    session: u8,
+    buf: *const u8,
+    len: usize,
+    now_ms: u32,
+) -> usize {
+    if buf.is_null() || len == 0 {
+        return 0;
+    }
+    // SAFETY: the caller guarantees `buf` is valid for `len` bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(buf, len) };
+    with_device(|d| d.modem.voice_input(session, bytes, &mut d.radio, now_ms)).unwrap_or(0)
+}
+
+/// Bytes for the app from voice session `session`. Returns the bytes
+/// written to `buf`; 0 before init or when the session is not open.
+///
+/// # Safety
+/// `buf` must be null or valid for writes of `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lfd3k_voice_out(session: u8, buf: *mut u8, cap: usize) -> usize {
+    if buf.is_null() || cap == 0 {
+        return 0;
+    }
+    // SAFETY: the caller guarantees `buf` is valid for `cap` bytes.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, cap) };
+    with_device(|d| d.modem.voice_output(session, out)).unwrap_or(0)
+}
+
+/// Closes voice session `session` (the socket went away). No effect before
+/// init or when it is not open.
+#[no_mangle]
+pub extern "C" fn lfd3k_voice_close(session: u8, now_ms: u32) {
+    with_device(|d| d.modem.voice_close(session, now_ms));
+}
+
+/// True while voice session `session` is open; false once the core closed
+/// it (heartbeat timeout or the app's Leave), and before init.
+#[no_mangle]
+pub extern "C" fn lfd3k_voice_alive(session: u8) -> bool {
+    with_device(|d| d.modem.voice_session_open(session)).unwrap_or(false)
 }
 
 /// True once after `AT+FB` was entered; the firmware then writes the frame

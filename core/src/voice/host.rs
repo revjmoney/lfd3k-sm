@@ -902,6 +902,12 @@ impl Modem {
         self.vhp_close(session, false, now_ms);
     }
 
+    /// Whether voice session `session` is open (false out of range). The
+    /// platform polls this to learn the core closed it (timeout or Leave).
+    pub fn voice_session_open(&self, session: u8) -> bool {
+        self.vhp.s.get(usize::from(session)).is_some_and(|s| s.open)
+    }
+
     /// `AT+VOICE` was answered OK: the host stream is session 0.
     pub(crate) fn vhp_host_open(&mut self, now: u32) {
         if let Some(s) = self.vhp.s.first_mut() {
