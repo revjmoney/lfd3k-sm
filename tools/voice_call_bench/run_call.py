@@ -5,7 +5,8 @@ py -3.14 run_call.py SF7 [shot_every_s]
 Environment: LFD3K_CALL_WORK (work folder), LFD3K_CALL_SRC (side_a.wav,
 side_b.wav, timeline.csv), LEAD_MS (push to talk: wait this long after TALK
 goes down before speaking, default 0), RUN_SUFFIX (run folder name
-suffix), PORT_ADD (added to the UDP ports).
+suffix), PORT_ADD (added to the UDP ports), MODEM_A and MODEM_B (real
+modems for the two sides, for example COM11 and find:AXISMODEM-E4B0).
 """
 import csv
 import os
@@ -182,8 +183,15 @@ def main():
             f.write("\n".join(script) + "\n")
         args = [
             EXE, "--name", name, "--label", "PC",
+        ]
+        # MODEM_A / MODEM_B: real modems (`--modem COM11`, `--modem find:AXISMODEM-E4B0`)
+        # instead of the two simulated modems on SimNet.
+        real = os.environ.get("MODEM_" + who.upper())
+        args += ["--modem", real] if real else [
             "--bind", f"127.0.0.1:{me}", "--peer", f"127.0.0.1:{peer}",
             "--station", f"{name}MODEM",
+        ]
+        args += [
             "--cap-tier", sf,
             "--data", os.path.join(sd, "data"),
             "--play", os.path.join(CONVO, wav),
