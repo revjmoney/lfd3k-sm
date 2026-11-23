@@ -1,0 +1,92 @@
+# CI: builds and tests the host side of the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM
+# on ubuntu-latest: the Rust workspace (core, sim, ffi, sx1262, voice, apps/pc) with cargo build,
+# test and clippy, plus the stdlib Python tool tests. The ESP32-S3 firmware itself needs espup and
+# PlatformIO and is built by release.yml on tags, not here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace (host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: System packages for the PC voice app (eframe) and libopus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - name: Toolchain
+        run: |
+          rustup show
+          rustup component add clippy
+          cargo --version
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Build (release)
+        run: cargo build --workspace --release --locked
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Clippy (warnings reported, not fatal)
+        run: cargo clippy --workspace --all-targets --locked
+      - name: Python tool tests
+        run: python3 -I -m unittest discover -s tools -p "test_*.py"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: lfd3k-host-linux
+          path: |
+            target/release/lfd3k-sim
+            target/release/lfd3k-pcmodem
+            target/release/lfd3k-voicesim
+            target/release/lfd3k-voice-pc
+            target/release/liblfd3k_ffi.a
+          if-no-files-found: error
+          retention-days: 30
+
+  guard:
+    name: Private data guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Scan tracked files for private data
+        env:
+          ALLOWED_IPS: "192.168.1.20 192.168.1.30 192.168.1.50 192.168.1.57 192.168.1.77 192.168.1.159 192.168.1.164"
+        run: |
+          fail=0
+          ex=(-- . ':(exclude).github/workflows/ci.yml' ':(exclude)*.png')
+          if git grep -n -I -E 'myemail937|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY' "${ex[@]}"; then
+            echo "::error::A private email, GitHub token or private key is in the tree"
+            fail=1
+          fi
+          if git grep -n -I -i -E 'rose[ _-]?engine|guilloch|gen-rose' "${ex[@]}"; then
+            echo "::error::Private stash material is in the tree"
+            fail=1
+          fi
+          found=$(git grep -h -o -I -E '192\.168\.1\.[0-9]{1,3}' "${ex[@]}" | sort -u || true)
+          for ip in $found; do
+            case " $ALLOWED_IPS " in
+              *" $ip "*) ;;
+              *)
+                git grep -n -I -F "$ip" "${ex[@]}" || true
+                echo "::error::Home network address $ip is in the tree"
+                fail=1
+                ;;
+            esac
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "Guard passed: no private data found"
