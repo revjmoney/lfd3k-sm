@@ -3747,6 +3747,7 @@ STBTT_DEF unsigned char *stbtt_GetGlyphBitmapSubpixel(const stbtt_fontinfo *info
    if (yoff  ) *yoff   = iy0;
 
    if (gbm.w && gbm.h) {
+      // codeql[cpp/integer-multiplication-cast-to-long] vendored Dear ImGui, upstream, not our code
       gbm.pixels = (unsigned char *) STBTT_malloc(gbm.w * gbm.h, info->userdata);
       if (gbm.pixels) {
          gbm.stride = gbm.w;
@@ -3830,6 +3831,7 @@ static int stbtt_BakeFontBitmap_internal(unsigned char *data, int offset,  // fo
    f.userdata = NULL;
    if (!stbtt_InitFont(&f, data, offset))
       return -1;
+   // codeql[cpp/integer-multiplication-cast-to-long] vendored Dear ImGui, upstream, not our code
    STBTT_memset(pixels, 0, pw*ph); // background of 0 around pixels
    x=y=1;
    bottom_y = 1;
@@ -3989,6 +3991,7 @@ STBTT_DEF int stbtt_PackBegin(stbtt_pack_context *spc, unsigned char *pixels, in
    stbrp_init_target(context, pw-padding, ph-padding, nodes, num_nodes);
 
    if (pixels)
+      // codeql[cpp/integer-multiplication-cast-to-long] vendored Dear ImGui, upstream, not our code
       STBTT_memset(pixels, 0, pw*ph); // background of 0 around pixels
 
    return 1;
@@ -4616,6 +4619,7 @@ STBTT_DEF unsigned char * stbtt_GetGlyphSDF(const stbtt_fontinfo *info, float sc
       float *precompute;
       stbtt_vertex *verts;
       int num_verts = stbtt_GetGlyphShape(info, glyph, &verts);
+      // codeql[cpp/integer-multiplication-cast-to-long] vendored Dear ImGui, upstream, not our code
       data = (unsigned char *) STBTT_malloc(w * h, info->userdata);
       precompute = (float *) STBTT_malloc(num_verts * sizeof(float), info->userdata);
 

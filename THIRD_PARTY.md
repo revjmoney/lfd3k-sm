@@ -304,7 +304,7 @@ The phone app (`apps/android`) links the same `voice` crate as the PC app, so th
 
 | Piece | Version | License | Why |
 |---|---|---|---|
-| Dear ImGui | 1.91.8 (ocornut/imgui tag v1.91.8), sources under `apps/android/app/src/main/cpp/third_party/imgui/` with `LICENSE.txt` | MIT | The NativeActivity screens (calls, directory, settings). Only the core and the Android and OpenGL ES 3 backends are compiled. |
+| Dear ImGui | 1.91.8 (ocornut/imgui tag v1.91.8), sources under `apps/android/app/src/main/cpp/third_party/imgui/` with `LICENSE.txt` | MIT | The NativeActivity screens (calls, directory, settings). Only the core and the Android and OpenGL ES 3 backends are compiled. Seven CodeQL comments mark upstream multiplications that the scanner flags; the expressions are unchanged. |
 | IBM Plex Mono Regular | already in `apps/pc/assets/fonts/` (see the PC voice app table) | SIL Open Font License 1.1 | The phone UI loads the same file from the APK assets. |
 
 The Java class is this project's own code (GPL-3.0-or-later, the attribution term in `NOTICE.md`). AAudio, EGL, and the NDK are the Android platform, not vendored.

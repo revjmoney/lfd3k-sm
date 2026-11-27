@@ -3058,7 +3058,9 @@ static bool ImFontAtlasBuildWithStbTruetype(ImFontAtlas* atlas)
     // 7. Allocate texture
     atlas->TexHeight = (atlas->Flags & ImFontAtlasFlags_NoPowerOfTwoHeight) ? (atlas->TexHeight + 1) : ImUpperPowerOfTwo(atlas->TexHeight);
     atlas->TexUvScale = ImVec2(1.0f / atlas->TexWidth, 1.0f / atlas->TexHeight);
+    // codeql[cpp/integer-multiplication-cast-to-long] vendored Dear ImGui, upstream, not our code
     atlas->TexPixelsAlpha8 = (unsigned char*)IM_ALLOC(atlas->TexWidth * atlas->TexHeight);
+    // codeql[cpp/integer-multiplication-cast-to-long] vendored Dear ImGui, upstream, not our code
     memset(atlas->TexPixelsAlpha8, 0, atlas->TexWidth * atlas->TexHeight);
     spc.pixels = atlas->TexPixelsAlpha8;
     spc.height = atlas->TexHeight;
