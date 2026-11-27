@@ -39,6 +39,7 @@ fn chan_x4(snr_x4: i16, seed: u64) -> SimChannel {
         profile: SnrProfile::Constant(snr_x4),
         seed,
         drop: None,
+        no_snr_loss: false,
     }
 }
 
@@ -346,6 +347,7 @@ fn lost_answer_still_binds_one() {
         profile: SnrProfile::Constant(40),
         seed: 5,
         drop: Some(drop_answers),
+        no_snr_loss: false,
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", None), cfg("BRAVO", None), cfg("CHARLIE", None)],
@@ -420,6 +422,7 @@ fn late_pickup(delay: u32) -> usize {
         profile: SnrProfile::Constant(40),
         seed: 8,
         drop: Some(drop_answers_and_first_tierset),
+        no_snr_loss: false,
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", None), cfg("BRAVO", None), cfg("CHARLIE", None)],
@@ -471,6 +474,7 @@ fn ringer_stops_on_tierset() {
         profile: SnrProfile::Constant(40),
         seed: 6,
         drop: Some(drop_answers),
+        no_snr_loss: false,
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", None), cfg("BRAVO", None), cfg("CHARLIE", None)],
@@ -959,6 +963,7 @@ fn loss_is_gap_not_stall() {
         profile: SnrProfile::Constant(40),
         seed: 21,
         drop: Some(drop_fifth_of_voice),
+        no_snr_loss: false,
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", Some(Tier::Sf7)), cfg("BRAVO", Some(Tier::Sf7))],
@@ -1463,6 +1468,7 @@ fn regression_lost_listener_frames_at_sf9_no_stepdown() {
         profile: SnrProfile::Constant(SF9_SNR),
         seed: 41,
         drop: Some(drop_listeners),
+        no_snr_loss: false,
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", Some(Tier::Sf9)), cfg("BRAVO", Some(Tier::Sf9))],
@@ -1594,6 +1600,7 @@ fn regression_late_pickup_hearing_hangup_is_elsewhere_not_no_carrier() {
         profile: SnrProfile::Constant(40),
         seed: 18,
         drop: Some(drop_answers_and_tiersets),
+        no_snr_loss: false,
     };
     let mut w = World::with_channel(
         vec![cfg("ALPHA", None), cfg("BRAVO", None), cfg("CHARLIE", None)],
@@ -1653,6 +1660,7 @@ fn regression_pickup_gives_up_at_s7_on_a_busy_channel() {
         profile: SnrProfile::Constant(40),
         seed: 19,
         drop: Some(drop_answers_and_tiersets),
+        no_snr_loss: false,
     };
     let mut charlie = cfg("CHARLIE", None);
     charlie.sregs.set(7, 10);

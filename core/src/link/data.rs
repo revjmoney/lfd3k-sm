@@ -3,7 +3,16 @@
 //! pump, the received voice frames and the voice API.
 
 use super::*;
+use crate::arq::ArqRx;
 use crate::lz;
+
+/// Voice slot frames carry one SACK byte. A voice call keeps the classic
+/// window, so bits above the low byte are clear.
+fn voice_ack(rx: &ArqRx) -> (u8, u8) {
+    let (ack, sack) = rx.ack_state();
+    debug_assert!(sack <= 0x00FF);
+    (ack, sack as u8)
+}
 use crate::voice::frames::VSub;
 use crate::voice::plan::{talk_plan, TalkPlan};
 use crate::voice::sched::{self, Floor, Turn, VF_READY, VF_SLOTS};
@@ -108,8 +117,16 @@ impl Link {
                 self.data_rx = Some(now);
             }
             FrameType::Ack => {
-                if let [sack] = f.payload {
-                    self.tx.on_ack(h.ack, *sack);
+                // One byte is the classic bitmap (high bits clear). Two bytes
+                // are the bulk bitmap, and only a call that agreed CAP_BULK
+                // may send them. Anything else is ignored.
+                let sack = match f.payload {
+                    [b] => Some(u16::from(*b)),
+                    [lo, hi] if self.bulk => Some(u16::from_le_bytes([*lo, *hi])),
+                    _ => None,
+                };
+                if let Some(sack) = sack {
+                    self.tx.on_ack(h.ack, sack);
                 }
             }
             FrameType::Keepalive => {
@@ -163,12 +180,20 @@ impl Link {
                 return;
             }
         }
+        // Latch the burst length at the start of the turn, before a frame
+        // is pulled out of ARQ. More than 4 chunks outstanding is a bulk
+        // transfer. A line of typing is one chunk and stays at 4, and with
+        // nothing else ready the turn still ends after that one frame.
+        if turns && self.burst == 0 {
+            let deep = self.bulk && self.tx.outstanding() > usize::from(BURST_MAX);
+            self.burst_cap = if deep { BURST_BULK } else { BURST_MAX };
+        }
         let mut buf = [0u8; MAX_FRAME];
         let Some((len, tier, end_turn, is_data)) = self.next_frame(&mut buf, now) else {
             self.relisten(radio);
             return;
         };
-        let more = turns && !end_turn && self.burst + 1 < BURST_MAX && self.has_more(now);
+        let more = turns && !end_turn && self.burst + 1 < self.burst_cap && self.has_more(now);
         if more {
             if let Some(b0) = buf.get_mut(1) {
                 *b0 |= FLAG_MORE;
@@ -260,7 +285,9 @@ impl Link {
             self.ack_owed = false;
             self.ka_reply = false;
             let (a, sack) = self.rx.ack_state();
-            let n = mk(FrameType::Ack, 0, 0, a, &[sack], out, self.call_id)?;
+            let raw = sack.to_le_bytes();
+            let p: &[u8] = if self.bulk { &raw } else { &raw[..1] };
+            let n = mk(FrameType::Ack, 0, 0, a, p, out, self.call_id)?;
             return Some((n, t, false, false));
         }
         // Probe the peer: first PING after 2 RTOs (answerer 2.5) of hearing
@@ -416,7 +443,7 @@ impl Link {
             return;
         };
         self.heard(p.snr, info, sregs, now);
-        self.tx.on_ack(h.ack, p.sack);
+        self.tx.on_ack(h.ack, u16::from(p.sack));
         if let Some((seq, d)) = p.chunk {
             self.rx.on_data(seq, d);
             self.ack_owed = true;
@@ -468,7 +495,7 @@ impl Link {
                 let due = self.vs.ready_at.is_none_or(|t| since(now, t) >= every);
                 if due && self.q_len < QLEN {
                     let mut b = [0u8; MAX_FRAME];
-                    let ack = self.rx.ack_state();
+                    let ack = voice_ack(&self.rx);
                     let snr = self.last_snr;
                     let id = self.call_id;
                     if let Some(n) = self.vs.build_listener(id, ack, snr, None, now, &mut b) {
@@ -555,7 +582,7 @@ impl Link {
     /// `listener` comes back true for a Listener frame.
     fn slot_frame(&mut self, out: &mut [u8], now: u32, listener: &mut bool) -> Option<usize> {
         let t = self.tier;
-        let ack = self.rx.ack_state();
+        let ack = voice_ack(&self.rx);
         self.ack_owed = false;
         self.ka_reply = false;
         let rto = rto_ms(t);

@@ -35,7 +35,7 @@ across town on 918.5 MHz.
 - **8 speed tiers, picked live.** SF12 to SF5 at 500 kHz (about 1.2 to 62.5 kbps on the air). The
   modems train on the measured SNR, start at the best tier the link can hold, step down when the
   signal fades, and climb back up when it clears. You see it happen: `RETRAIN`.
-- **Nothing gets lost.** Selective-repeat ARQ (window 8, SACK bitmap), half-duplex burst manners,
+- **Nothing gets lost.** Selective-repeat ARQ (window 8, or 16 during a bulk transfer when both stations agree, SACK bitmap), half-duplex burst manners,
   keepalives, resync to SF12 when the link dies for a moment, `NO CARRIER` only when it is really gone.
 - **LZ compression on the air.** Each frame is squeezed against a preset tuned for ANSI art, CP437
   boxes and blocks, so BBS screens fly.

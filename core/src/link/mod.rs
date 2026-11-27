@@ -21,7 +21,12 @@
 //! too, and then says so with CAP_LZ on its CallAck and as a 4th Train byte;
 //! the caller reads the answer from the Train (the frame it cannot connect
 //! without), so both ends always agree. At CONNECT the call uses LZ when we
-//! offered and the peer said yes. It sits between ARQ
+//! offered and the peer said yes. The same byte carries `CAP_BULK` (bit 1)
+//! on a data call when S31 is 1. Both ends then use a window of 16, and a
+//! turn that already has more than 4 chunks queued sends 8 frames. A short
+//! turn (typing, a line, anything of 4 chunks or fewer) stays at 4 frames
+//! so the other side is not held off. Voice calls do not offer the bit:
+//! their slot frames carry an 8 bit bitmap. It sits between ARQ
 //! and the air: ArqTx keeps chunks plain (sequence numbers, the window and
 //! CHUNK all count host bytes), and a Data frame is compressed when it is
 //! built from a staged chunk, so a resend compresses the same chunk again
@@ -56,11 +61,19 @@ pub const FLAG_MORE: u8 = 1;
 pub const FLAG_PING: u8 = 2;
 
 const PERIOD_MS: u32 = 3000; // CallReq resend and RING cadence
-/// Frames per turn. A full burst of 4 Data frames lasts 4 airtimes, longer
-/// than the 3 airtime RTO, so the first frame of a full burst can be resent
-/// once before its ack lands; staging prefers unsent frames, which keeps that
+/// Frames per turn on a classic call, and on a short turn of a bulk call.
+/// A full burst of 4 Data frames lasts 4 airtimes, longer than the 3 airtime
+/// part of the RTO, so the first frame of a full burst can be resent once
+/// before its ack lands; staging prefers unsent frames, which keeps that
 /// to the tail of a transfer.
 const BURST_MAX: u8 = 4;
+/// Frames per turn when `CAP_BULK` is agreed and more than `BURST_MAX`
+/// chunks are already outstanding at the start of the turn. The turn gap
+/// and the answerer's 100 ms yield stay as they are: a station that hears
+/// the peer takes the turn at once, so those waits are only the silence
+/// timeout. They cover a 10 ms tick and a radio that reports busy after it
+/// has seen a preamble. Shrinking them is unmeasured on hardware.
+const BURST_BULK: u8 = 8;
 const TURN_YIELD_MS: u32 = 100;
 const UP_HOLD_MS: u32 = 10_000;
 const KA_LEN: usize = HEADER_LEN + 2;
@@ -210,6 +223,24 @@ fn lz_wanted(s: &SRegs) -> bool {
     reg(s, REG_LZ, 1) == 1
 }
 
+/// Capability bits this station offers on a data call.
+///
+/// `CAP_BULK` rides in the same byte as `CAP_LZ`. The byte is sent only
+/// when it is non-zero, and it is non-zero only when S31 is 1, so `ATS31=0`
+/// still sends the pre-capability CallReq (no extra byte) that builds older
+/// than r.420 require. Each bit is agreed on its own: an older peer that
+/// offers only `CAP_LZ` keeps compression and stays on the classic window.
+/// Voice calls do not use this function.
+fn offered_caps(s: &SRegs) -> u8 {
+    if !lz_wanted(s) {
+        return 0;
+    }
+    let mut c = 0u8;
+    c |= frame::CAP_LZ;
+    c |= frame::CAP_BULK;
+    c
+}
+
 pub struct Link {
     state: State,
     role: Role,
@@ -255,6 +286,8 @@ pub struct Link {
     turn_start: u32,
     turn_ms: u32,
     burst: u8,
+    /// Frames allowed in the turn that is underway (`BURST_MAX` or `BURST_BULK`).
+    burst_cap: u8,
     ack_owed: bool,
     ka_reply: bool,
     last_snr: i16,
@@ -283,11 +316,19 @@ pub struct Link {
     slot_hangup: Option<u32>,
     /// We offered compression on this call (own S31 at dial or answer).
     lz_mine: bool,
-    /// The peer offered compression (CallReq or CallAck capability byte).
+    /// The peer offered compression (CallReq), or the Train's agreed bit
+    /// (caller). See `lz`.
     lz_peer: bool,
     /// Both offered: Data frames go out compressed when that saves enough.
     /// Kept after the call ends, for AT&V.
     lz: bool,
+    /// We offered `CAP_BULK` on this data call.
+    bulk_mine: bool,
+    /// The peer offered `CAP_BULK`, or the Train's agreed bit (caller).
+    bulk_peer: bool,
+    /// Both offered, and this is not a voice call: window 16, long bursts
+    /// only while more than 4 chunks are outstanding.
+    bulk: bool,
     /// Data payload bytes of this (or the last) call, both directions:
     /// host bytes before compression and bytes on the air.
     lz_raw: u32,
@@ -351,6 +392,7 @@ impl Link {
             turn_start: 0,
             turn_ms: 0,
             burst: 0,
+            burst_cap: BURST_MAX,
             ack_owed: false,
             ka_reply: false,
             last_snr: 0,
@@ -374,6 +416,9 @@ impl Link {
             lz_mine: false,
             lz_peer: false,
             lz: false,
+            bulk_mine: false,
+            bulk_peer: false,
+            bulk: false,
             lz_raw: 0,
             lz_air: 0,
             moved: 0,
@@ -649,6 +694,10 @@ impl Link {
         self.lz_mine = false;
         self.lz_peer = false;
         self.lz = false;
+        self.bulk_mine = false;
+        self.bulk_peer = false;
+        self.bulk = false;
+        self.burst_cap = BURST_MAX;
         self.lz_raw = 0;
         self.lz_air = 0;
         self.staged = None;
@@ -724,8 +773,10 @@ impl Link {
                         _ => return,
                     };
                     // The caller cannot connect without a Train, so its 4th
-                    // byte is the one place the agreed LZ answer is read.
-                    self.lz_peer = frame::parse_train_caps(p) & frame::CAP_LZ != 0;
+                    // byte is the one place the agreed capability answer is read.
+                    let agreed = frame::parse_train_caps(p);
+                    self.lz_peer = agreed & frame::CAP_LZ != 0;
+                    self.bulk_peer = agreed & frame::CAP_BULK != 0;
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
                     self.own_cap = cap_tier(sregs);
                     self.cap = self.own_cap.min(peer_cap);

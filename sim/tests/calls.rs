@@ -160,6 +160,7 @@ fn retrain_down_and_up_keeps_data() {
         profile: SnrProfile::Steps(&STEPS),
         seed: 4,
         drop: None,
+        no_snr_loss: false,
     });
     connect(&mut h, 10_000);
     assert!(h.screen_a().contains(CONNECT_SF5));
@@ -275,6 +276,7 @@ fn link_loss_gives_no_carrier() {
         profile: SnrProfile::Steps(&STEPS),
         seed: 5,
         drop: None,
+        no_snr_loss: false,
     });
     connect(&mut h, 5_000);
     h.send_a_data(b"before the drop");
@@ -471,6 +473,7 @@ fn lost_tierset_ack_resyncs() {
         profile: SnrProfile::Constant(40),
         seed: 9,
         drop: Some(drop_first_tierack),
+        no_snr_loss: false,
     });
     h.type_a("ATDT AXIS\r");
     // Never connected with no traffic for over S22.
@@ -675,6 +678,7 @@ fn capped_call(
             profile: SnrProfile::Constant(48),
             seed,
             drop: Some(hook),
+            no_snr_loss: false,
         },
         a,
         b,
@@ -828,6 +832,7 @@ fn third_caller_gets_busy() {
         profile: SnrProfile::Constant(40),
         seed: 16,
         drop: Some(keep_call_rejects),
+        no_snr_loss: false,
     });
     connect(&mut h, 5_000);
     let live = h.trace().last().map(|e| e.call_id).unwrap();
