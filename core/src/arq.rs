@@ -278,6 +278,12 @@ impl ArqRx {
         true
     }
 
+    /// True when the next in order frame is here (`read` would make progress
+    /// or finish a frame it already started).
+    pub fn has_ready(&self) -> bool {
+        self.has(0)
+    }
+
     /// (cumulative next expected seq, sack bitmap) where bit i means
     /// frame `next + 1 + i` is held.
     pub fn ack_state(&self) -> (u8, u8) {

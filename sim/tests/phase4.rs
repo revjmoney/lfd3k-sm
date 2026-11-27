@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use lfd3k_core::frame::{decode, encode, FrameType, FLAG_LZ};
+use lfd3k_core::frame::{decode, FrameType, FLAG_LZ};
 use lfd3k_core::{Config, Tier};
 use lfd3k_sim::{FakeWire, Harness, Outcome, SimChannel, WireScript};
 
@@ -142,7 +142,9 @@ fn lz_negotiation_both_ways() {
         let lz = a31 == 1 && b31 == 1;
         assert_eq!(h.a.lights(h.now_ms).dc, lz, "{a31}/{b31} CALLER DC");
         assert_eq!(h.b.lights(h.now_ms).dc, lz, "{a31}/{b31} AXIS DC");
-        // Data is the same either way; no frame carries FLAG_LZ unless both agreed.
+        // Two current builds agree on stream LZ, so Data frames are the
+        // compressed byte stream and do not carry FLAG_LZ. Per frame LZ
+        // (FLAG_LZ) remains only for a peer that did not offer the stream bit.
         let data = ansi(900);
         h.send_a_data(&data);
         assert!(h.run_until(60_000, |h| h.received_b().len() >= data.len()));
@@ -151,7 +153,7 @@ fn lz_negotiation_both_ways() {
             .trace()
             .iter()
             .any(|t| t.flags & FLAG_LZ != 0 && t.ftype == Some(FrameType::Data));
-        assert_eq!(any_lz, lz, "{a31}/{b31}");
+        assert!(!any_lz, "{a31}/{b31}: stream mode does not set FLAG_LZ");
         // The radio frames: with LZ the screen takes fewer air bytes.
         let air: usize = h
             .trace()
@@ -181,62 +183,32 @@ fn lz_negotiation_both_ways() {
     }
 }
 
-static CORRUPT_CAP: Mutex<Option<Vec<u8>>> = Mutex::new(None);
-static CORRUPT_DONE: AtomicBool = AtomicBool::new(false);
+static SEEN_DATA: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static DROP_DATA_DONE: AtomicBool = AtomicBool::new(false);
 
-fn corrupt_hook(_t: u32, f: &[u8]) -> bool {
-    if let Ok(fr) = decode(f) {
-        if fr.header.ftype == FrameType::Data
-            && fr.header.flags & FLAG_LZ != 0
-            && !CORRUPT_DONE.swap(true, Ordering::SeqCst)
-        {
-            *CORRUPT_CAP.lock().unwrap() = Some(f.to_vec());
-            return true;
-        }
+/// Record every Data frame. Drop the first one. Later copies are delivered,
+/// so the test can check that a resend is the same bytes.
+fn drop_first_data(_t: u32, f: &[u8]) -> bool {
+    let Ok(fr) = decode(f) else {
+        return false;
+    };
+    if fr.header.ftype != FrameType::Data {
+        return false;
     }
-    false
+    SEEN_DATA.lock().unwrap().push(f.to_vec());
+    !DROP_DATA_DONE.swap(true, Ordering::SeqCst)
 }
 
 #[test]
-fn lz_corrupt_frame_is_resent() {
+fn lz_stream_resend_is_the_same_bytes() {
+    SEEN_DATA.lock().unwrap().clear();
+    DROP_DATA_DONE.store(false, Ordering::SeqCst);
     let mut chan = SimChannel::constant_db(12, 4);
-    chan.drop = Some(corrupt_hook);
+    chan.drop = Some(drop_first_data);
     let mut h = Harness::new(chan);
     connect(&mut h);
     let data = ansi(1_000);
-    h.feed_a(&data[..200]);
-    assert!(h.run_until(20_000, |_| CORRUPT_DONE.load(Ordering::SeqCst)));
-    let good = CORRUPT_CAP
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("captured the first LZ frame");
-    let f = decode(&good).expect("frame");
-    let hdr = f.header;
-    // The same frame as the radio would deliver it, but with a compressed
-    // payload that is not valid: a match 1024 back with nothing there. The
-    // frame itself is well formed, so only the codec can refuse it.
-    let mut bad = [0u8; 255];
-    let n = encode(&hdr, &[0x00, b'x', 0x83, 0xFF, 0x83, 0xFF], &mut bad).expect("encode");
-    let sent_b = h.trace().iter().filter(|t| t.from == 1).count();
-    h.inject_b(&bad[..n], Tier::Sf5);
-    // The truncated copy too: a literal run that claims more than it has.
-    let n2 = encode(&hdr, &[0x7F, b'x'], &mut bad).expect("encode");
-    h.inject_b(&bad[..n2], Tier::Sf5);
-    h.run_ms(20);
-    assert_eq!(
-        h.trace().iter().filter(|t| t.from == 1).count(),
-        sent_b,
-        "a frame that does not decode is not acknowledged"
-    );
-    assert!(
-        h.received_b().is_empty(),
-        "nothing delivered from a bad frame: {:?}",
-        h.received_b()
-    );
-    // The rest of the data goes on, and the lost frame is resent by ARQ and
-    // arrives, intact and in order.
-    h.feed_a(&data[200..]);
+    h.send_a_data(&data);
     let ok = h.run_until(60_000, |h| h.received_b().len() >= data.len());
     assert!(ok, "got {} of {}", h.received_b().len(), data.len());
     assert_eq!(h.received_b(), data);
@@ -245,13 +217,23 @@ fn lz_corrupt_frame_is_resent() {
         "the sender resent: {:?}",
         h.stats().resends
     );
-    // The resend carries the same bytes as the first try: FLAG_LZ again.
-    let lz_data = h
-        .trace()
-        .iter()
-        .filter(|t| t.from == 0 && t.ftype == Some(FrameType::Data) && t.flags & FLAG_LZ != 0)
-        .count();
-    assert!(lz_data >= 2, "{lz_data}");
+    let seen = SEEN_DATA.lock().unwrap().clone();
+    let first = seen.first().expect("a data frame was sent").clone();
+    // MORE can differ: the first try may sit in a burst and the resend may
+    // not. Sequence and payload are what the dictionary depends on.
+    let same = |f: &[u8]| {
+        f.len() == first.len() && f.len() > 5 && f[3] == first[3] && f[5..] == first[5..]
+    };
+    assert!(
+        seen.iter().skip(1).any(|f| same(f)),
+        "the resend was not the same payload ({} data frames seen)",
+        seen.len()
+    );
+    assert!(
+        seen.iter()
+            .all(|f| decode(f).map(|fr| fr.header.flags & FLAG_LZ) == Ok(0)),
+        "stream frames do not carry FLAG_LZ"
+    );
 }
 
 static DROP_ACK_DONE: AtomicBool = AtomicBool::new(false);

@@ -43,6 +43,7 @@ impl Link {
         self.need_listen = true;
         if t != self.tier {
             self.tier = t;
+            self.arm_stream_reset();
             self.emit(Event::Retrain(t));
         }
     }
@@ -94,6 +95,7 @@ impl Link {
             };
             self.last_periodic = now.wrapping_sub(u32::MAX / 2);
             self.clear_pending();
+            self.arm_stream_reset();
             if self.vs.slots {
                 // Our wall clock PINGs were for the old tier.
                 self.q_retain(|f| !is_ping(f));

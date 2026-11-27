@@ -91,6 +91,16 @@ impl Link {
         let h = f.header;
         match h.ftype {
             FrameType::Data => {
+                // Stream mode: the payload is already the compressed byte
+                // stream. It is decoded in order from `read_data`, so a
+                // resent frame is stored as the same bytes and the
+                // dictionary does not move until those bytes are delivered.
+                if self.lz_stream {
+                    self.rx.on_data(h.seq, f.payload);
+                    self.ack_owed = true;
+                    self.data_rx = Some(now);
+                    return;
+                }
                 let mut plain = [0u8; CHUNK];
                 let data = if h.flags & frame::FLAG_LZ != 0 {
                     match lz::decompress(f.payload, &mut plain) {
@@ -214,6 +224,12 @@ impl Link {
         if self.state != State::Connected {
             return false;
         }
+        if self.lz_stream {
+            // The host pushes one byte at a time. Flush the lookahead once
+            // a frame is about to go out, not after every byte.
+            self.enc.flush_tail();
+            self.stream_drain();
+        }
         if self.staged.is_some() {
             return true;
         }
@@ -290,9 +306,16 @@ impl Link {
         if self.stage(now) {
             let (seq, len) = self.staged.take()?;
             self.ka_reply = false;
-            // The staged chunk stays plain; compressing it here each time
-            // it is sent gives the same bytes on every resend.
             let raw = self.staged_buf.get(..len as usize)?;
+            // Stream mode already compressed these bytes in `push_data`.
+            // Sending them again, on a resend, does not touch the dictionary.
+            if self.lz_stream {
+                let n = mk(FrameType::Data, 0, seq, 0, raw, out, self.call_id)?;
+                self.note_stream_tx(raw.len());
+                return Some((n, t, false, true));
+            }
+            // Per frame LZ: the staged chunk stays plain, and compressing
+            // it here each time it is sent gives the same bytes on a resend.
             let mut packed = [0u8; CHUNK];
             let z = if self.lz {
                 lz::compress(raw, &mut packed)
@@ -385,14 +408,120 @@ impl Link {
 
     /// Bytes queued with `push_data`: in small chunks once the app is
     /// ready for voice, so they fit a Listener frame (the tier's chunk
-    /// size at push time).
+    /// size at push time). Stream LZ compresses first, then ARQ frames
+    /// the compressed bytes.
     pub(super) fn arq_push(&mut self, data: &[u8]) -> usize {
+        if self.lz_stream {
+            return self.stream_push(data);
+        }
         if self.voice.on && (self.vs.ready_mine || self.vs.slots) {
             let c = usize::from(sched::slot_layout(self.tier).chunk);
             self.tx.push_max(data, c)
         } else {
             self.tx.push(data)
         }
+    }
+
+    fn stream_push(&mut self, mut data: &[u8]) -> usize {
+        let mut took = 0;
+        while !data.is_empty() {
+            self.stream_drain();
+            let n = self.enc.push(data);
+            if n == 0 {
+                break;
+            }
+            took += n;
+            data = data.get(n..).unwrap_or(&[]);
+        }
+        self.stream_drain();
+        took
+    }
+
+    /// Move compressed bytes from the encoder into ArqTx.
+    pub(super) fn stream_drain(&mut self) {
+        loop {
+            self.enc.pump();
+            let free = self.tx.free();
+            if free == 0 {
+                break;
+            }
+            let mut tmp = [0u8; 128];
+            let want = free.min(tmp.len());
+            let n = self.enc.drain(tmp.get_mut(..want).unwrap_or(&mut []));
+            if n == 0 {
+                break;
+            }
+            let got = tmp.get(..n).unwrap_or(&[]);
+            let took = self.tx.push(got);
+            if took < n {
+                self.enc.rewind((n - took) as u16);
+                break;
+            }
+        }
+    }
+
+    /// Host bytes out of the compressed stream. Air bytes are counted as
+    /// they are fed; plaintext is counted as it is produced.
+    pub(super) fn stream_read(&mut self, out: &mut [u8]) -> usize {
+        if self.dec.errored() || out.is_empty() {
+            return 0;
+        }
+        let mut n = 0;
+        while n < out.len() {
+            let rest = out.get_mut(n..).unwrap_or(&mut []);
+            match self.dec.pull(rest) {
+                Ok(0) => {
+                    let mut tmp = [0u8; 64];
+                    let room = self.dec.feed_room().min(tmp.len());
+                    if room == 0 {
+                        break;
+                    }
+                    let k = self.rx.read(tmp.get_mut(..room).unwrap_or(&mut []));
+                    if k == 0 {
+                        break;
+                    }
+                    let got = tmp.get(..k).unwrap_or(&[]);
+                    let took = self.dec.feed(got);
+                    self.lz_count(0, took);
+                    if took < k {
+                        break;
+                    }
+                }
+                Ok(w) => {
+                    n += w;
+                    self.lz_count(w, 0);
+                }
+                Err(_) => break,
+            }
+        }
+        n
+    }
+
+    /// Attribute this transmission to the ratio. Bytes sent for the first
+    /// time take their share of the plaintext compressed so far. A resend
+    /// (more air than compressed bytes not yet counted) counts that share
+    /// again, the way per frame LZ counts the same chunk on every send.
+    fn note_stream_tx(&mut self, air: usize) {
+        let air = air as u32;
+        let raw_t = self.enc.raw_total();
+        let comp_t = self.enc.comp_total();
+        let new_comp = air.min(comp_t.saturating_sub(self.cred_comp));
+        let rem_c = comp_t.saturating_sub(self.cred_comp);
+        let rem_r = raw_t.saturating_sub(self.cred_raw);
+        let new_raw = if rem_c == 0 {
+            0
+        } else {
+            ((u64::from(rem_r) * u64::from(new_comp)) / u64::from(rem_c)) as u32
+        };
+        self.cred_comp = self.cred_comp.saturating_add(new_comp);
+        self.cred_raw = self.cred_raw.saturating_add(new_raw);
+        let extra = air.saturating_sub(new_comp);
+        let extra_raw = if comp_t == 0 {
+            0
+        } else {
+            ((u64::from(raw_t) * u64::from(extra)) / u64::from(comp_t)) as u32
+        };
+        self.lz_count((new_raw.saturating_add(extra_raw)) as usize, air as usize);
     }
 
     /// A voice Data or Listener frame of our call (from the Modem, which

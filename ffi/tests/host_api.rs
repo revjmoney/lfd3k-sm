@@ -541,8 +541,8 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
     fake_hal::with(|h| h.tx_frames.clear());
 
     // About 400 bytes of "x\r" pairs in ONE host_in call (pins 160aaf8: in
-    // data mode the bytes go in as one piece, so the first data frame is a
-    // full chunk instead of one tiny frame per line).
+    // data mode the bytes go in as one piece, not one tiny frame per line).
+    // Stream LZ then packs that piece into the compressed stream.
     let data: Vec<u8> = b"x\r".iter().copied().cycle().take(400).collect();
     assert_eq!(rig.ffi_in(&data), 400);
 
@@ -555,13 +555,28 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
         for (_, f) in tx {
             let fr = decode(&f).expect("a valid frame");
             if fr.header.ftype == FrameType::Data {
-                // With /LZ the chunk goes out compressed: count host bytes.
-                let mut plain = [0u8; CHUNK];
-                first = Some(if fr.header.flags & lfd3k_core::frame::FLAG_LZ != 0 {
-                    lfd3k_core::lz::decompress(fr.payload, &mut plain).expect("valid LZ")
-                } else {
-                    fr.payload.len()
-                });
+                // Stream LZ (both ends offered it): the payload is a piece of
+                // the compressed stream, not one plain chunk and not a
+                // per frame LZ blob. Count how much plaintext it yields.
+                let mut dec = lfd3k_core::lz_stream::StreamDec::new();
+                let mut plain = [0u8; 512];
+                let mut got = 0;
+                let mut off = 0;
+                loop {
+                    match dec.pull(&mut plain[got..]) {
+                        Ok(0) => {
+                            if off >= fr.payload.len() {
+                                break;
+                            }
+                            let n = dec.feed(&fr.payload[off..]);
+                            assert!(n > 0);
+                            off += n;
+                        }
+                        Ok(n) => got += n,
+                        Err(e) => panic!("stream decode: {e:?}"),
+                    }
+                }
+                first = Some(got);
                 break;
             }
         }
@@ -569,7 +584,11 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
             break;
         }
     }
-    assert_eq!(first, Some(CHUNK), "first data frame is a full ARQ chunk");
+    assert_eq!(
+        first,
+        Some(data.len()),
+        "the batch is one compressed stream, not a frame per line"
+    );
 }
 
 // ---- Phase 3: Wi-Fi settings, the wire, SimNet and the channel trace. ----

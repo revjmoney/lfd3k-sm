@@ -24,13 +24,13 @@ impl Link {
         let Ok(mut plen) = frame::call_req_payload(me, callee, &mut p) else {
             return false;
         };
-        let lz = lz_wanted(sregs);
-        if lz {
+        let offer = offer_caps(sregs);
+        if offer != 0 {
             // Two 16 byte names plus the byte still fit a QBUF frame.
             let Some(c) = p.get_mut(plen) else {
                 return false;
             };
-            *c = frame::CAP_LZ;
+            *c = offer;
             plen += 1;
         }
         let call_id = (now as u8) | 1;
@@ -47,7 +47,7 @@ impl Link {
         self.callreq_len = n as u8;
         self.call_id = call_id;
         self.reset_call(Role::Caller, now);
-        self.lz_mine = lz;
+        self.lz_mine = offer != 0;
         self.state = State::Dialing;
         self.send_callreq(now);
         true
@@ -73,10 +73,12 @@ impl Link {
         let call_id = self.call_id;
         let snr = self.my_snr;
         let peer_lz = self.lz_peer;
+        let peer_stream = self.stream_peer;
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
         self.lz_peer = peer_lz;
+        self.stream_peer = peer_stream;
         self.lz_mine = lz_wanted(sregs);
         self.own_cap = cap_tier(sregs);
         self.cap = self.own_cap;
@@ -87,13 +89,13 @@ impl Link {
 
     pub(super) fn send_train(&mut self) {
         let s = self.my_snr.to_le_bytes();
-        // CallAck and Train carry the agreed answer: CAP_LZ only when we
-        // offer LZ and the caller did (so it is a new build that takes the
-        // extra byte). Without it they are the old forms (empty, 3 bytes).
-        let agreed = self.lz_mine && self.lz_peer;
-        let p = [self.cap.index(), s[0], s[1], frame::CAP_LZ];
-        let (caps, train): (&[u8], &[u8]) = if agreed {
-            (&[frame::CAP_LZ], &p)
+        // CallAck and Train carry the agreed bits (per frame LZ, stream LZ,
+        // or both). Without any agreed bit they are the old forms (empty
+        // CallAck, 3 byte Train).
+        let agreed = self.agreed_caps();
+        let p = [self.cap.index(), s[0], s[1], agreed];
+        let (caps, train): (&[u8], &[u8]) = if agreed != 0 {
+            (&[agreed], &p)
         } else {
             (&[], p.get(..3).unwrap_or(&[]))
         };
@@ -177,7 +179,18 @@ impl Link {
         self.need_listen = true;
         self.turn = true;
         self.burst = 0;
-        self.lz = self.lz_mine && self.lz_peer;
+        // Stream LZ wins when both offered it. Per frame LZ remains when
+        // the peer only agreed to CAP_LZ. Voice calls do not use the stream:
+        // their capability byte is CAP_LZ alone.
+        self.lz_stream = self.lz_mine && self.stream_peer && !self.voice.on;
+        self.lz = self.lz_mine && (self.lz_peer || self.stream_peer);
+        if self.lz_stream {
+            self.enc.reset_call();
+            self.dec.reset_call();
+            self.cred_raw = 0;
+            self.cred_comp = 0;
+            self.stream_dead = false;
+        }
         self.emit(Event::Connect(self.tier));
     }
 
@@ -196,11 +209,10 @@ impl Link {
         if !callee.eq_ignore_ascii_case(me) || call_id == 0 {
             return;
         }
-        let peer_lz = caps & frame::CAP_LZ != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
             self.voice.on = false;
-            self.lz_peer = peer_lz;
+            self.take_peer_caps(caps);
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;
             self.start = now;
@@ -216,7 +228,7 @@ impl Link {
             self.last_req = now;
             self.my_snr = info.snr_x4;
             if !self.is_connected() {
-                self.lz_peer = peer_lz;
+                self.take_peer_caps(caps);
             }
             if self.state == State::AwaitTierSet && !self.got_tierset {
                 self.send_train();

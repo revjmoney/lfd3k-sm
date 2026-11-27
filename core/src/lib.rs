@@ -9,6 +9,7 @@ pub mod frame;
 pub mod lan;
 pub mod link;
 pub mod lz;
+pub mod lz_stream;
 pub mod menu;
 pub mod modem;
 pub mod radio;

@@ -5,6 +5,10 @@
 //! no history shared between frames, so ARQ can resend, reorder or drop any
 //! frame without the two ends ever disagreeing about the dictionary.
 //!
+//! Peers that both set `CAP_LZ_STREAM` do not use this path. They compress
+//! the byte stream before ARQ (`lz_stream`) and these frames go out without
+//! `FLAG_LZ`. This codec stays for a peer that only offered `CAP_LZ`.
+//!
 //! # Stream format
 //!
 //! A compressed payload is a sequence of tokens, read until the payload
