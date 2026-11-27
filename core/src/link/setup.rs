@@ -15,7 +15,7 @@ impl Link {
     }
 
     /// Start a call. False if busy or a name is invalid. The CallReq offers
-    /// compression (capability byte) when S31 is 1.
+    /// compression and bulk ARQ (one capability byte) when S31 is 1.
     pub fn dial(&mut self, me: &str, callee: &str, sregs: &SRegs, now: u32) -> bool {
         if self.state != State::Idle {
             return false;
@@ -24,13 +24,13 @@ impl Link {
         let Ok(mut plen) = frame::call_req_payload(me, callee, &mut p) else {
             return false;
         };
-        let lz = lz_wanted(sregs);
-        if lz {
+        let caps = offered_caps(sregs);
+        if caps != 0 {
             // Two 16 byte names plus the byte still fit a QBUF frame.
             let Some(c) = p.get_mut(plen) else {
                 return false;
             };
-            *c = frame::CAP_LZ;
+            *c = caps;
             plen += 1;
         }
         let call_id = (now as u8) | 1;
@@ -47,7 +47,8 @@ impl Link {
         self.callreq_len = n as u8;
         self.call_id = call_id;
         self.reset_call(Role::Caller, now);
-        self.lz_mine = lz;
+        self.lz_mine = caps & frame::CAP_LZ != 0;
+        self.bulk_mine = caps & frame::CAP_BULK != 0;
         self.state = State::Dialing;
         self.send_callreq(now);
         true
@@ -73,11 +74,15 @@ impl Link {
         let call_id = self.call_id;
         let snr = self.my_snr;
         let peer_lz = self.lz_peer;
+        let peer_bulk = self.bulk_peer;
+        let mine = offered_caps(sregs);
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
         self.lz_peer = peer_lz;
-        self.lz_mine = lz_wanted(sregs);
+        self.bulk_peer = peer_bulk;
+        self.lz_mine = mine & frame::CAP_LZ != 0;
+        self.bulk_mine = mine & frame::CAP_BULK != 0;
         self.own_cap = cap_tier(sregs);
         self.cap = self.own_cap;
         self.state = State::AwaitTierSet;
@@ -85,15 +90,28 @@ impl Link {
         true
     }
 
+    /// Bits both ends offered. Each bit stands on its own.
+    fn agreed_caps(&self) -> u8 {
+        let mut c = 0u8;
+        if self.lz_mine && self.lz_peer {
+            c |= frame::CAP_LZ;
+        }
+        if self.bulk_mine && self.bulk_peer {
+            c |= frame::CAP_BULK;
+        }
+        c
+    }
+
     pub(super) fn send_train(&mut self) {
         let s = self.my_snr.to_le_bytes();
-        // CallAck and Train carry the agreed answer: CAP_LZ only when we
-        // offer LZ and the caller did (so it is a new build that takes the
-        // extra byte). Without it they are the old forms (empty, 3 bytes).
-        let agreed = self.lz_mine && self.lz_peer;
-        let p = [self.cap.index(), s[0], s[1], frame::CAP_LZ];
-        let (caps, train): (&[u8], &[u8]) = if agreed {
-            (&[frame::CAP_LZ], &p)
+        // CallAck and Train carry the agreed bits (each bit only when both
+        // offered, so a caller that offered nothing gets the old empty
+        // CallAck and the 3 byte Train). A non-zero byte means the caller
+        // offered and can take the extra Train byte.
+        let agreed = self.agreed_caps();
+        let p = [self.cap.index(), s[0], s[1], agreed];
+        let (caps, train): (&[u8], &[u8]) = if agreed != 0 {
+            (&[agreed], &p)
         } else {
             (&[], p.get(..3).unwrap_or(&[]))
         };
@@ -177,7 +195,18 @@ impl Link {
         self.need_listen = true;
         self.turn = true;
         self.burst = 0;
+        self.burst_cap = BURST_MAX;
         self.lz = self.lz_mine && self.lz_peer;
+        // Voice slot frames carry one SACK byte, so a voice call stays at
+        // the classic window even if a data capability bit was copied across.
+        self.bulk = self.bulk_mine && self.bulk_peer && !self.voice.on;
+        let slots = if self.bulk {
+            crate::arq::WINDOW_BULK
+        } else {
+            crate::arq::WINDOW
+        };
+        self.tx.set_limit(slots);
+        self.rx.set_limit(slots);
         self.emit(Event::Connect(self.tier));
     }
 
@@ -197,10 +226,12 @@ impl Link {
             return;
         }
         let peer_lz = caps & frame::CAP_LZ != 0;
+        let peer_bulk = caps & frame::CAP_BULK != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
             self.voice.on = false;
             self.lz_peer = peer_lz;
+            self.bulk_peer = peer_bulk;
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;
             self.start = now;
@@ -217,6 +248,7 @@ impl Link {
             self.my_snr = info.snr_x4;
             if !self.is_connected() {
                 self.lz_peer = peer_lz;
+                self.bulk_peer = peer_bulk;
             }
             if self.state == State::AwaitTierSet && !self.got_tierset {
                 self.send_train();

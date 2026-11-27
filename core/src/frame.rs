@@ -19,12 +19,18 @@
 //! the two names (the caller's offer), and the answerer's CallAck payload
 //! may be that one byte and its Train payload may carry it as a 4th byte
 //! after tier and SNR (the agreed answer: set only when both offered). Bit 0
-//! is `CAP_LZ`. Bits 1 to 3 are for later capabilities and are ignored; a
-//! byte with any of bits 4 to 7 set makes a CallReq or Train malformed. No
-//! byte (the form older builds send) means no capabilities. Older builds
-//! refuse a CallReq that carries the byte, so it is only sent when it says
-//! something (S31 = 1), and a 4 byte Train, so it only goes to a caller that
-//! offered (a new build). TrainAck stays 3 bytes.
+//! is `CAP_LZ`. Bit 1 is `CAP_BULK` (wider ARQ burst and window, 16 bit
+//! ack bitmap, data calls only). Bits 2 and 3 are still free and are
+//! ignored. A byte with any of bits 4 to 7 set makes a CallReq or Train
+//! malformed. No byte (the form older builds send) means no capabilities.
+//! Older builds refuse a CallReq that carries the byte, so it is only sent
+//! when it says something (S31 = 1), and a 4 byte Train, so it only goes to
+//! a caller that offered (a new build). TrainAck stays 3 bytes.
+//!
+//! An Ack payload is one SACK byte, or two bytes (little endian) when
+//! `CAP_BULK` was agreed. A receiver that did not agree ignores a two byte
+//! Ack. Builds that predate `CAP_BULK` accept only the one byte form, which
+//! is why the two byte form is sent only after the bit is agreed.
 //!
 //! Voice calls (`voice::call`): inside a voice call the Train carries a 4
 //! byte answer token after its 3 or 4 bytes, and the setup TierSet carries
@@ -38,8 +44,13 @@ pub const FLAG_LZ: u8 = 4;
 /// Header flag on a ScanReq: a modem with voice names answers with a voice
 /// scan answer (type 15) in place of its normal ScanResp.
 pub const FLAG_VOICE: u8 = 8;
-/// Capability bit: the station can take LZ compressed Data frames.
-pub const CAP_LZ: u8 = 1;
+/// Capability bit 0: the station can take LZ compressed Data frames.
+pub const CAP_LZ: u8 = 1 << 0;
+/// Capability bit 1: bulk ARQ. During a bulk transfer the burst is 8 frames
+/// and the window is 16, and an Ack carries a 16 bit selective bitmap.
+/// Bits 2 and 3 stay free. Later work (stream compression, Reed-Solomon)
+/// should take bit 2 and then bit 3, not bit 1.
+pub const CAP_BULK: u8 = 1 << 1;
 /// Bits a capability byte may use.
 const CAP_MASK: u8 = 0x0F;
 
@@ -179,7 +190,7 @@ pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
         FrameType::TierAck => {
             matches!(payload, [t] if Tier::from_index(*t).is_some())
         }
-        FrameType::Ack => payload.len() == 1,
+        FrameType::Ack => matches!(payload.len(), 1 | 2),
         FrameType::Beacon => crate::discovery::parse_beacon(payload).is_some(),
         FrameType::ScanReq => crate::discovery::parse_scan_req(payload).is_some(),
         FrameType::ScanResp => crate::discovery::parse_scan_resp(payload).is_some(),
@@ -394,6 +405,13 @@ mod tests {
             Err(FrameError::BadPayload)
         );
         assert_eq!(decode(&[0xD1, 0x70, 1, 2, 3]), Err(FrameError::BadPayload));
+        // One or two SACK bytes. Three is not a bitmap this build sends.
+        assert!(decode(&[0xD1, 0x70, 1, 2, 3, 0x05]).is_ok());
+        assert!(decode(&[0xD1, 0x70, 1, 2, 3, 0x05, 0x01]).is_ok());
+        assert_eq!(
+            decode(&[0xD1, 0x70, 1, 2, 3, 0x05, 0x01, 0x00]),
+            Err(FrameError::BadPayload)
+        );
         assert_eq!(
             decode(&[0xD1, 0x10, 1, 2, 3, 0]),
             Err(FrameError::BadPayload)

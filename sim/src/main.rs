@@ -181,6 +181,7 @@ fn main() {
         profile: SnrProfile::Steps(steps),
         seed: args.seed,
         drop: None,
+        no_snr_loss: false,
     });
 
     let mut log = Vec::new();

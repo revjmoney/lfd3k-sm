@@ -1,10 +1,30 @@
-//! Selective repeat ARQ with a window of 8 and 200 byte chunks.
+//! Selective repeat ARQ with 200 byte chunks.
+//!
+//! The classic window is 8 chunks. After `CAP_BULK` is agreed the link
+//! raises the limit to 16 for that call (`WINDOW_BULK`). Storage is always
+//! the larger window: fixed arrays, no heap, so a call that stays at 8
+//! simply leaves the extra slots unused.
 //!
 //! Sequence numbers are u8 modulo 256 and compared with wrapping math.
-//! All storage is fixed arrays, no heap.
+//!
+//! RAM, per modem, versus a build that stored only 8 chunks: two payload
+//! buffers of `(WINDOW_BULK - WINDOW) * CHUNK` bytes (3200), plus 8 extra
+//! `TxSlot`s (8 bytes each, 64) and 8 extra receive length and presence
+//! bytes (24), and one `usize` limit on each of `ArqTx` and `ArqRx`. On the
+//! 64 bit host test build that is 3304 bytes: `Modem` 20552 to 23856,
+//! `Link` 6400 to 9704, `ArqTx` 1688 to 3360, `ArqRx` 1648 to 3280. The
+//! link's own flags fit in padding that was already there. The 3200 bytes
+//! of payload buffers are the same on a 32 bit device; the two limit words
+//! are 4 bytes each there instead of 8.
 
 pub const WINDOW: usize = 8;
+/// Window used on a call that agreed `frame::CAP_BULK`.
+pub const WINDOW_BULK: usize = 16;
+/// Slots actually stored. `limit` is `WINDOW` or `WINDOW_BULK`.
+const SLOTS: usize = WINDOW_BULK;
 pub const CHUNK: usize = 200;
+
+const _: () = assert!(WINDOW_BULK == SLOTS && WINDOW <= SLOTS && WINDOW_BULK <= 16);
 
 #[derive(Clone, Copy)]
 struct TxSlot {
@@ -22,14 +42,16 @@ const EMPTY_TX: TxSlot = TxSlot {
 };
 
 pub struct ArqTx {
-    buf: [[u8; CHUNK]; WINDOW],
-    slots: [TxSlot; WINDOW],
+    buf: [[u8; CHUNK]; SLOTS],
+    slots: [TxSlot; SLOTS],
     /// Ring index of the oldest unacked slot.
     head: usize,
     /// Slots in use.
     count: usize,
     /// Sequence number of the head slot.
     base: u8,
+    /// Outstanding chunks allowed: `WINDOW` or `WINDOW_BULK`.
+    limit: usize,
 }
 
 impl Default for ArqTx {
@@ -41,22 +63,33 @@ impl Default for ArqTx {
 impl ArqTx {
     pub const fn new() -> Self {
         ArqTx {
-            buf: [[0; CHUNK]; WINDOW],
-            slots: [EMPTY_TX; WINDOW],
+            buf: [[0; CHUNK]; SLOTS],
+            slots: [EMPTY_TX; SLOTS],
             head: 0,
             count: 0,
             base: 0,
+            limit: WINDOW,
         }
     }
 
+    /// `WINDOW` or `WINDOW_BULK`. Other values clamp. Call only while idle.
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.clamp(1, SLOTS);
+    }
+
     fn ring(&self, i: usize) -> usize {
-        (self.head + i) % WINDOW
+        (self.head + i) % SLOTS
+    }
+
+    /// Chunks queued or awaiting a cumulative acknowledgement.
+    pub fn outstanding(&self) -> usize {
+        self.count
     }
 
     /// Bytes `push` can still accept: whole free slots, plus the unused tail
     /// of the newest slot if it has not been sent yet.
     pub fn free(&self) -> usize {
-        let mut f = (WINDOW - self.count) * CHUNK;
+        let mut f = self.limit.saturating_sub(self.count) * CHUNK;
         if self.count > 0 {
             if let Some(s) = self.slots.get(self.ring(self.count - 1)) {
                 if !s.sent {
@@ -90,7 +123,7 @@ impl ArqTx {
                 }
             }
             if idx.is_none() {
-                if self.count >= WINDOW {
+                if self.count >= self.limit {
                     break;
                 }
                 let r = self.ring(self.count);
@@ -165,8 +198,10 @@ impl ArqTx {
     }
 
     /// `ack` is the receiver's next expected seq; sack bit i means frame
-    /// `ack + 1 + i` was received. Invalid or stale acks are ignored.
-    pub fn on_ack(&mut self, ack: u8, sack: u8) {
+    /// `ack + 1 + i` was received. The classic bitmap is 8 bits (bit 7
+    /// clear). A bulk call uses 16 bits (bit 15 clear). Invalid or stale
+    /// acks are ignored.
+    pub fn on_ack(&mut self, ack: u8, sack: u16) {
         let adv = ack.wrapping_sub(self.base) as usize;
         if adv > self.count {
             return;
@@ -180,12 +215,13 @@ impl ArqTx {
         self.head = self.ring(adv);
         self.count -= adv;
         self.base = ack;
-        for bit in 0..7usize {
+        let bits = self.limit.saturating_sub(1).min(15);
+        for bit in 0..bits {
             if sack & (1 << bit) == 0 {
                 continue;
             }
             let off = 1 + bit;
-            if off < self.count {
+            if off < self.count && off < self.limit {
                 let r = self.ring(off);
                 if let Some(s) = self.slots.get_mut(r) {
                     if s.sent {
@@ -216,15 +252,17 @@ impl ArqTx {
 }
 
 pub struct ArqRx {
-    buf: [[u8; CHUNK]; WINDOW],
-    len: [u16; WINDOW],
-    have: [bool; WINDOW],
+    buf: [[u8; CHUNK]; SLOTS],
+    len: [u16; SLOTS],
+    have: [bool; SLOTS],
     /// Ring index of the oldest undelivered slot.
     head: usize,
     /// Sequence number of the head slot.
     base: u8,
     /// Bytes of the head slot already delivered.
     read_off: usize,
+    /// Chunks the window accepts: `WINDOW` or `WINDOW_BULK`.
+    limit: usize,
 }
 
 impl Default for ArqRx {
@@ -236,17 +274,23 @@ impl Default for ArqRx {
 impl ArqRx {
     pub const fn new() -> Self {
         ArqRx {
-            buf: [[0; CHUNK]; WINDOW],
-            len: [0; WINDOW],
-            have: [false; WINDOW],
+            buf: [[0; CHUNK]; SLOTS],
+            len: [0; SLOTS],
+            have: [false; SLOTS],
             head: 0,
             base: 0,
             read_off: 0,
+            limit: WINDOW,
         }
     }
 
+    /// `WINDOW` or `WINDOW_BULK`. Other values clamp. Call only while idle.
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.clamp(1, SLOTS);
+    }
+
     fn ring(&self, i: usize) -> usize {
-        (self.head + i) % WINDOW
+        (self.head + i) % SLOTS
     }
 
     fn has(&self, off: usize) -> bool {
@@ -257,7 +301,7 @@ impl ArqRx {
     /// ahead, or oversized); in-window duplicates are ignored and return true.
     pub fn on_data(&mut self, seq: u8, data: &[u8]) -> bool {
         let off = seq.wrapping_sub(self.base) as usize;
-        if off >= WINDOW || data.len() > CHUNK {
+        if off >= self.limit || data.len() > CHUNK {
             return false;
         }
         let r = self.ring(off);
@@ -279,17 +323,19 @@ impl ArqRx {
     }
 
     /// (cumulative next expected seq, sack bitmap) where bit i means
-    /// frame `next + 1 + i` is held.
-    pub fn ack_state(&self) -> (u8, u8) {
+    /// frame `next + 1 + i` is held. Bit 7 stays clear at the classic
+    /// limit. A bulk limit uses bits 0 to 14 and leaves bit 15 clear.
+    pub fn ack_state(&self) -> (u8, u16) {
         let mut contig = 0;
-        while contig < WINDOW && self.has(contig) {
+        while contig < self.limit && self.has(contig) {
             contig += 1;
         }
         let ack = self.base.wrapping_add(contig as u8);
-        let mut sack = 0u8;
-        for bit in 0..7usize {
+        let mut sack = 0u16;
+        let bits = self.limit.saturating_sub(1).min(15);
+        for bit in 0..bits {
             let off = contig + 1 + bit;
-            if off < WINDOW && self.has(off) {
+            if off < self.limit && self.has(off) {
                 sack |= 1 << bit;
             }
         }
@@ -331,7 +377,7 @@ impl ArqRx {
             if let Some(x) = self.have.get_mut(h) {
                 *x = false;
             }
-            self.head = (h + 1) % WINDOW;
+            self.head = (h + 1) % SLOTS;
             self.base = self.base.wrapping_add(1);
             self.read_off = 0;
         }
@@ -532,5 +578,90 @@ mod tests {
         assert_eq!(tx.free(), 0);
         tx.reset();
         assert_eq!(tx.free(), WINDOW * CHUNK);
+    }
+
+    #[test]
+    fn bulk_window_sacks_fifteen_and_retransmits_holes() {
+        let mut tx = ArqTx::new();
+        let mut rx = ArqRx::new();
+        tx.set_limit(WINDOW_BULK);
+        rx.set_limit(WINDOW_BULK);
+        assert_eq!(tx.free(), WINDOW_BULK * CHUNK);
+        // A request past the stored slots clamps.
+        tx.set_limit(100);
+        assert_eq!(tx.free(), WINDOW_BULK * CHUNK);
+
+        let data = pattern(WINDOW_BULK * CHUNK, 9);
+        assert_eq!(tx.push(&data), data.len());
+        assert_eq!(tx.push(&[1]), 0);
+        let mut frames = Vec::new();
+        while let Some((seq, d)) = tx.next_to_send(0, 1000) {
+            frames.push((seq, d.to_vec()));
+        }
+        assert_eq!(frames.len(), WINDOW_BULK);
+        let seqs: Vec<u8> = frames.iter().map(|f| f.0).collect();
+        assert_eq!(seqs, (0..16).collect::<Vec<u8>>());
+
+        for (seq, d) in &frames {
+            if *seq != 0 && *seq != 9 {
+                assert!(rx.on_data(*seq, d));
+            }
+        }
+        // Past the bulk window, and an oversized chunk, are refused.
+        assert!(!rx.on_data(16, &[1]));
+        assert!(!rx.on_data(0, &[0; CHUNK + 1]));
+        let (ack, sack) = rx.ack_state();
+        assert_eq!(ack, 0);
+        let mut want = 0u16;
+        for seq in 1..16u16 {
+            if seq != 9 {
+                want |= 1 << (seq - 1);
+            }
+        }
+        assert_eq!(sack, want);
+        assert_eq!(sack & (1 << 15), 0);
+        // Nothing is readable until seq 0 arrives.
+        assert!(read_all(&mut rx).is_empty());
+
+        tx.on_ack(ack, sack);
+        assert!(tx.next_to_send(999, 1000).is_none());
+        let resent: Vec<u8> = core::iter::from_fn(|| tx.next_to_send(1000, 1000).map(|f| f.0))
+            .take(4)
+            .collect();
+        assert_eq!(resent, [0, 9]);
+        for seq in resent {
+            let d = &data[usize::from(seq) * CHUNK..usize::from(seq + 1) * CHUNK];
+            assert!(rx.on_data(seq, d));
+        }
+        assert_eq!(read_all(&mut rx), data);
+        let (ack, sack) = rx.ack_state();
+        assert_eq!((ack, sack), (16, 0));
+        tx.on_ack(ack, sack);
+        assert!(tx.idle());
+
+        // The classic limit still refuses what a window of 8 cannot hold,
+        // and its bitmap leaves bit 7 clear.
+        let mut narrow = ArqRx::new();
+        assert!(!narrow.on_data(8, &[1]));
+        assert!(narrow.on_data(0, &[7, 7]));
+        assert!(narrow.on_data(2, &[9]));
+        assert_eq!(narrow.ack_state(), (1, 0b0000_0001));
+        tx.reset();
+        assert_eq!(tx.free(), WINDOW * CHUNK);
+    }
+
+    #[test]
+    fn bulk_ram_is_the_extra_slots() {
+        let payloads = (WINDOW_BULK - WINDOW) * CHUNK * 2;
+        assert_eq!(payloads, 3_200);
+        let tx_slots = (WINDOW_BULK - WINDOW) * core::mem::size_of::<TxSlot>();
+        assert_eq!(tx_slots, 64);
+        eprintln!(
+            "RAM modem {} link {} tx {} rx {}",
+            core::mem::size_of::<crate::Modem>(),
+            core::mem::size_of::<crate::link::Link>(),
+            core::mem::size_of::<ArqTx>(),
+            core::mem::size_of::<ArqRx>()
+        );
     }
 }

@@ -117,6 +117,7 @@ fn link_stats_rate_limited() {
         profile: SnrProfile::Steps(&STEPS),
         seed: 4,
         drop: None,
+        no_snr_loss: false,
     });
     server_says_do(&mut h);
     let (mut times, mut seen) = (Vec::new(), 0);
