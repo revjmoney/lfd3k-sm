@@ -2,10 +2,11 @@
 //! air, the DC light, discovery between two modems, privacy modes, the menu
 //! with a call. All seeded, so every run is the same run.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 
-use lfd3k_core::frame::{decode, encode, FrameType, FLAG_LZ};
+use lfd3k_core::frame::{decode, encode, FrameType, Header, FLAG_LZ};
+use lfd3k_core::lz_stream::stream_sum;
 use lfd3k_core::{Config, Tier};
 use lfd3k_sim::{FakeWire, Harness, Outcome, SimChannel, WireScript};
 
@@ -142,7 +143,9 @@ fn lz_negotiation_both_ways() {
         let lz = a31 == 1 && b31 == 1;
         assert_eq!(h.a.lights(h.now_ms).dc, lz, "{a31}/{b31} CALLER DC");
         assert_eq!(h.b.lights(h.now_ms).dc, lz, "{a31}/{b31} AXIS DC");
-        // Data is the same either way; no frame carries FLAG_LZ unless both agreed.
+        // Two current builds agree on stream LZ, so Data frames are the
+        // compressed byte stream and do not carry FLAG_LZ. Per frame LZ
+        // (FLAG_LZ) remains only for a peer that did not offer the stream bit.
         let data = ansi(900);
         h.send_a_data(&data);
         assert!(h.run_until(60_000, |h| h.received_b().len() >= data.len()));
@@ -151,7 +154,7 @@ fn lz_negotiation_both_ways() {
             .trace()
             .iter()
             .any(|t| t.flags & FLAG_LZ != 0 && t.ftype == Some(FrameType::Data));
-        assert_eq!(any_lz, lz, "{a31}/{b31}");
+        assert!(!any_lz, "{a31}/{b31}: stream mode does not set FLAG_LZ");
         // The radio frames: with LZ the screen takes fewer air bytes.
         let air: usize = h
             .trace()
@@ -181,62 +184,32 @@ fn lz_negotiation_both_ways() {
     }
 }
 
-static CORRUPT_CAP: Mutex<Option<Vec<u8>>> = Mutex::new(None);
-static CORRUPT_DONE: AtomicBool = AtomicBool::new(false);
+static SEEN_DATA: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static DROP_DATA_DONE: AtomicBool = AtomicBool::new(false);
 
-fn corrupt_hook(_t: u32, f: &[u8]) -> bool {
-    if let Ok(fr) = decode(f) {
-        if fr.header.ftype == FrameType::Data
-            && fr.header.flags & FLAG_LZ != 0
-            && !CORRUPT_DONE.swap(true, Ordering::SeqCst)
-        {
-            *CORRUPT_CAP.lock().unwrap() = Some(f.to_vec());
-            return true;
-        }
+/// Record every Data frame. Drop the first one. Later copies are delivered,
+/// so the test can check that a resend is the same bytes.
+fn drop_first_data(_t: u32, f: &[u8]) -> bool {
+    let Ok(fr) = decode(f) else {
+        return false;
+    };
+    if fr.header.ftype != FrameType::Data {
+        return false;
     }
-    false
+    SEEN_DATA.lock().unwrap().push(f.to_vec());
+    !DROP_DATA_DONE.swap(true, Ordering::SeqCst)
 }
 
 #[test]
-fn lz_corrupt_frame_is_resent() {
+fn lz_stream_resend_is_the_same_bytes() {
+    SEEN_DATA.lock().unwrap().clear();
+    DROP_DATA_DONE.store(false, Ordering::SeqCst);
     let mut chan = SimChannel::constant_db(12, 4);
-    chan.drop = Some(corrupt_hook);
+    chan.drop = Some(drop_first_data);
     let mut h = Harness::new(chan);
     connect(&mut h);
     let data = ansi(1_000);
-    h.feed_a(&data[..200]);
-    assert!(h.run_until(20_000, |_| CORRUPT_DONE.load(Ordering::SeqCst)));
-    let good = CORRUPT_CAP
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("captured the first LZ frame");
-    let f = decode(&good).expect("frame");
-    let hdr = f.header;
-    // The same frame as the radio would deliver it, but with a compressed
-    // payload that is not valid: a match 1024 back with nothing there. The
-    // frame itself is well formed, so only the codec can refuse it.
-    let mut bad = [0u8; 255];
-    let n = encode(&hdr, &[0x00, b'x', 0x83, 0xFF, 0x83, 0xFF], &mut bad).expect("encode");
-    let sent_b = h.trace().iter().filter(|t| t.from == 1).count();
-    h.inject_b(&bad[..n], Tier::Sf5);
-    // The truncated copy too: a literal run that claims more than it has.
-    let n2 = encode(&hdr, &[0x7F, b'x'], &mut bad).expect("encode");
-    h.inject_b(&bad[..n2], Tier::Sf5);
-    h.run_ms(20);
-    assert_eq!(
-        h.trace().iter().filter(|t| t.from == 1).count(),
-        sent_b,
-        "a frame that does not decode is not acknowledged"
-    );
-    assert!(
-        h.received_b().is_empty(),
-        "nothing delivered from a bad frame: {:?}",
-        h.received_b()
-    );
-    // The rest of the data goes on, and the lost frame is resent by ARQ and
-    // arrives, intact and in order.
-    h.feed_a(&data[200..]);
+    h.send_a_data(&data);
     let ok = h.run_until(60_000, |h| h.received_b().len() >= data.len());
     assert!(ok, "got {} of {}", h.received_b().len(), data.len());
     assert_eq!(h.received_b(), data);
@@ -245,13 +218,155 @@ fn lz_corrupt_frame_is_resent() {
         "the sender resent: {:?}",
         h.stats().resends
     );
-    // The resend carries the same bytes as the first try: FLAG_LZ again.
-    let lz_data = h
-        .trace()
-        .iter()
-        .filter(|t| t.from == 0 && t.ftype == Some(FrameType::Data) && t.flags & FLAG_LZ != 0)
-        .count();
-    assert!(lz_data >= 2, "{lz_data}");
+    let seen = SEEN_DATA.lock().unwrap().clone();
+    let first = seen.first().expect("a data frame was sent").clone();
+    // MORE can differ: the first try may sit in a burst and the resend may
+    // not. Sequence and payload are what the dictionary depends on.
+    let same = |f: &[u8]| {
+        f.len() == first.len() && f.len() > 5 && f[3] == first[3] && f[5..] == first[5..]
+    };
+    assert!(
+        seen.iter().skip(1).any(|f| same(f)),
+        "the resend was not the same payload ({} data frames seen)",
+        seen.len()
+    );
+    assert!(
+        seen.iter()
+            .all(|f| decode(f).map(|fr| fr.header.flags & FLAG_LZ) == Ok(0)),
+        "stream frames do not carry FLAG_LZ"
+    );
+}
+
+static CORRUPT_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static CORRUPT_DROPPED: AtomicBool = AtomicBool::new(false);
+
+/// Drop the first Data frame and remember it, so the test can hand the peer
+/// a damaged copy. Later copies (the resend) are delivered.
+fn drop_first_data_for_corrupt(_t: u32, f: &[u8]) -> bool {
+    let Ok(fr) = decode(f) else {
+        return false;
+    };
+    if fr.header.ftype != FrameType::Data {
+        return false;
+    }
+    if CORRUPT_DROPPED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    *CORRUPT_FRAME.lock().unwrap() = Some(f.to_vec());
+    true
+}
+
+#[test]
+fn lz_stream_corrupt_payload_is_resent() {
+    *CORRUPT_FRAME.lock().unwrap() = None;
+    CORRUPT_DROPPED.store(false, Ordering::SeqCst);
+    let mut chan = SimChannel::constant_db(12, 41);
+    chan.drop = Some(drop_first_data_for_corrupt);
+    let mut h = Harness::new(chan);
+    connect(&mut h);
+    let data = ansi(800);
+    // Queue the bytes, then stop at the first Data frame so the damaged
+    // copy can be injected before the retransmission timer.
+    h.feed_a(&data);
+    let saw = h.run_until(20_000, |_| CORRUPT_DROPPED.load(Ordering::SeqCst));
+    assert!(saw, "no data frame left the caller");
+    let good = CORRUPT_FRAME
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("captured frame");
+    let mut bad = good.clone();
+    let i = 5 + good.len().saturating_sub(6) / 2;
+    if let Some(b) = bad.get_mut(i) {
+        *b ^= 0x5A;
+    }
+    h.inject_b(&bad, Tier::Sf5);
+    let ok = h.run_until(60_000, |h| h.received_b().len() >= data.len());
+    assert!(ok, "got {} of {}", h.received_b().len(), data.len());
+    assert_eq!(h.received_b(), data);
+    assert!(
+        h.stats().resends[0] >= 1,
+        "the good frame was not sent again: {:?}",
+        h.stats().resends
+    );
+}
+
+static BAD_SEQ: AtomicU8 = AtomicU8::new(0);
+static BAD_READY: AtomicBool = AtomicBool::new(false);
+static BAD_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Once armed, drop every Data frame with the first seq we see. The test
+/// injects one bad payload of that seq that still passes the check byte.
+fn drop_bad_seq(_t: u32, f: &[u8]) -> bool {
+    if !BAD_ARMED.load(Ordering::SeqCst) {
+        return false;
+    }
+    let Ok(fr) = decode(f) else {
+        return false;
+    };
+    if fr.header.ftype != FrameType::Data {
+        return false;
+    }
+    if !BAD_READY.load(Ordering::SeqCst) {
+        BAD_SEQ.store(fr.header.seq, Ordering::SeqCst);
+        BAD_READY.store(true, Ordering::SeqCst);
+    }
+    fr.header.seq == BAD_SEQ.load(Ordering::SeqCst)
+}
+
+#[test]
+fn lz_stream_bad_distance_recovers() {
+    BAD_READY.store(false, Ordering::SeqCst);
+    BAD_ARMED.store(false, Ordering::SeqCst);
+    let mut chan = SimChannel::constant_db(12, 42);
+    chan.drop = Some(drop_bad_seq);
+    let mut h = Harness::new(chan);
+    connect(&mut h);
+    // Short, so the history is still under the 1024 byte distance limit.
+    let primer = ansi(40);
+    h.send_a_data(&primer);
+    assert!(h.run_until(30_000, |h| h.received_b().len() >= primer.len()));
+    assert_eq!(h.received_b(), primer);
+    BAD_ARMED.store(true, Ordering::SeqCst);
+    let lost = ansi(80);
+    h.feed_a(&lost);
+    let saw = h.run_until(20_000, |_| BAD_READY.load(Ordering::SeqCst));
+    assert!(saw, "no frame to damage");
+    let seq = BAD_SEQ.load(Ordering::SeqCst);
+    let hdr = Header {
+        ftype: FrameType::Data,
+        flags: 0,
+        call_id: h
+            .trace()
+            .iter()
+            .rev()
+            .find(|t| t.ftype == Some(FrameType::Data) && t.from == 0)
+            .map(|t| t.call_id)
+            .expect("call id"),
+        seq,
+        ack: 0,
+    };
+    let body = [0x83, 0xFF];
+    let mut payload = [0u8; 3];
+    payload[0] = body[0];
+    payload[1] = body[1];
+    payload[2] = stream_sum(&body);
+    let mut frame = [0u8; 32];
+    let n = encode(&hdr, &payload, &mut frame).expect("encode");
+    h.inject_b(&frame[..n], Tier::Sf5);
+    // Let the bad frame be read, the sync keepalive go out, and the caller
+    // reset its encoder.
+    h.run_ms(3_000);
+    let tail = b"TAIL-MARKER-stream-recovers-this-text";
+    h.send_a_data(tail);
+    let ok = h.run_until(60_000, |h| {
+        h.received_b().windows(tail.len()).any(|w| w == tail)
+    });
+    assert!(
+        ok,
+        "tail did not arrive, got {} bytes",
+        h.received_b().len()
+    );
 }
 
 static DROP_ACK_DONE: AtomicBool = AtomicBool::new(false);

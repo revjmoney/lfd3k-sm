@@ -34,7 +34,7 @@ Anti-goals (failure even if it "works")
 - Crashes, hangs, or slowly running out of memory.
 - A modem that ships with a shared default Wi-Fi password.
 - Leaking a user's position or presence when they chose quiet or hidden.
-- Any GPL or LGPL code compiled into the closed firmware.
+- A license that is not GPL compatible. The firmware is GPLv3 or later. GPL, LGPL, and permissive code may be compiled in, with the notices kept in `THIRD_PARTY.md`. The old ban on GPL and LGPL was for the closed firmware and is history.
 - Fake modem speeds ("56000") on the screen.
 - A laggy UI because the screen or Wi-Fi starved the radio.
 
@@ -49,7 +49,7 @@ Hardware (Rev's board, from the brain)
 
 Rules
 - **COM11 (Rev's V4) and COM15 (lathe controller) are never flashed, opened, probed or reset by Claude.** Rev flashes the V4. Take a full flash backup before any reflash.
-- **Closed source.** Only permissive third-party code (MIT, BSD, Apache-2.0, ISC, zlib), notices kept in `THIRD_PARTY.md`. GPL code (Meshtastic, RNode firmware, TC2) may be read for ideas, then written fresh; never copied or closely paraphrased. No LGPL in the closed image (the Arduino-ESP32 core and Codec2 are LGPL-2.1), so no Arduino.
+- **License.** GPL compatible code is allowed: GPL, LGPL, MIT, BSD, Apache-2.0, ISC, zlib, and the same class of license. Notices go in `THIRD_PARTY.md`. This used to say permissive code only, from when the firmware was closed. That rule is history. The repo is GPLv3 or later with the attribution term in `NOTICE.md`.
 - The repo is private. Never push it to a public remote.
 - No AI attribution in commits.
 

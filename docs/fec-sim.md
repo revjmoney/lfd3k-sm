@@ -6,17 +6,17 @@ The codec is a one parity symbol Reed-Solomon code over GF(256). In characterist
 
 ## Same tier (SF5, 12 dB, 8192 incompressible bytes)
 
-Both modems stay on SF5. FEC is S31 = 1, so the capability byte offers LZ, CAP_BULK and CAP_FEC together. ARQ is S31 = 0, which sends no capability byte, so the window stays 8 and the burst stays 4. Random bytes do not compress, so LZ does not change the frame size. The FEC side can also use the bulk burst of 8 and the window of 16.
+Both modems stay on SF5. FEC is S31 = 1, so the capability byte offers LZ, stream LZ, CAP_BULK and CAP_FEC together. ARQ is S31 = 0, which sends no capability byte, so the window stays 8 and the burst stays 4. The bytes are incompressible, so stream LZ only adds its check byte and literal headers. The FEC side can also use the bulk burst of 8 and the window of 16.
 
-Hook drop 0 percent. FEC 1203 ms, 0 resends, 0 parity frames, 0 chunks lost. ARQ 1218 ms, 0 resends, 0 chunks lost. 41 data frames. Parity stayed off. The few milliseconds are the bulk window, not parity.
+Hook drop 0 percent. FEC 1223 ms, 0 resends, 0 parity frames, 0 chunks lost, 42 data frames. ARQ 1218 ms, 0 resends, 0 chunks lost. Parity stayed off. The few milliseconds are the bulk window, not parity.
 
-Hook drop 5 percent. FEC: 5550 B/s, 1476 ms, 3 resends, 3 parity frames, 2 chunks lost. ARQ: 6210 B/s, 1319 ms, 2 resends, 2 chunks lost.
+Hook drop 5 percent. FEC: 5927 B/s, 1382 ms, 1 resend, 4 parity frames, 2 chunks lost. ARQ: 6210 B/s, 1319 ms, 2 resends, 2 chunks lost.
 
-Hook drop 10 percent. FEC: 5626 B/s, 1456 ms, 2 resends, 5 parity frames, 5 chunks lost. ARQ: 5516 B/s, 1485 ms, 4 resends, 4 chunks lost.
+Hook drop 10 percent. FEC: 5475 B/s, 1496 ms, 2 resends, 5 parity frames, 3 chunks lost. ARQ: 5516 B/s, 1485 ms, 4 resends, 4 chunks lost.
 
-Hook drop 20 percent. FEC: 3297 B/s, 2484 ms, 9 resends, 7 parity frames, 12 chunks lost. ARQ: 4804 B/s, 1705 ms, 8 resends, 8 chunks lost.
+Hook drop 20 percent. FEC: 3615 B/s, 2266 ms, 3 resends, 7 parity frames, 7 chunks lost. ARQ: 4804 B/s, 1705 ms, 8 resends, 7 chunks lost.
 
-At a fixed fast tier a light loss rate does not pay for the parity frames (5 percent is slower). At 10 percent the bulk window plus parity is slightly faster and resends drop from 4 to 2. At 20 percent the parity airtime still dominates.
+At a fixed fast tier the parity frames cost airtime, so 5, 10, and 20 percent are a bit slower than ARQ alone. Resends fall (4 to 2 at 10 percent, 8 to 3 at 20 percent).
 
 A clean run sends no parity frame.
 
@@ -26,13 +26,15 @@ Connect at 12 dB on SF5, then the SNR steps to -1 dB at 3.5 s. That is under SF5
 
 ARQ only (S31 = 0): ends on SF6, 15851 ms, 6 resends, 0 parity frames. The step is at 4238 ms.
 
-Parity agreed (also CAP_BULK): stays on SF5 the whole way, 13950 ms, 21 resends, 39 parity frames.
+Parity agreed (also CAP_BULK and stream LZ): stays on SF5 the whole way, 13459 ms, 19 resends, 37 parity frames.
 
-SF6's air rate is 37500 bps against SF5's 62500, about 40 percent less. The ARQ only call steps down to SF6, where the loss band is about 0.5 percent, so it resends little and is slow because of the tier. The parity call stays on SF5, with a bulk burst of eight (seven chunks and one parity frame) and a window of 16. It resends more and still finishes sooner: 65536 bytes in 14.0 s is about 4690 B/s, against about 4130 B/s after the step down.
+SF6's air rate is 37500 bps against SF5's 62500, about 40 percent less. The ARQ only call steps down to SF6, where the loss band is about 0.5 percent, so it resends little and is slow because of the tier. The parity call stays on SF5, with a bulk burst of eight (seven chunks and one parity frame) and a window of 16. It resends more and still finishes sooner: 65536 bytes in 13.5 s is about 4870 B/s, against about 4130 B/s after the step down.
 
 ## Bulk burst and parity together
 
-Simulated, SF5, 12 dB, no SNR loss draw, a 10 percent hook drop of Data frames, 8192 bytes, S31 = 1 so CAP_BULK and CAP_FEC are both on. The call accepts a window of 16 (the first feed takes more than 8 chunks). The longest back to back Data run is 8 frames, which is the bulk burst with the parity frame as the eighth, not a ninth. 2 parity frames, 1 resend, and the bytes arrive intact. A classic burst with parity would have been 5 frames (four chunks and one extra).
+Simulated, SF5, 12 dB, no SNR loss draw, a 10 percent hook drop of Data frames, 8192 incompressible bytes, S31 = 1 so CAP_BULK, CAP_FEC, and stream LZ are all on. The call accepts a window of 16 (the first feed takes more than 8 chunks). The longest back to back Data run is 8 frames, which is the bulk burst with the parity frame as the eighth, not a ninth. 5 parity frames, 1 resend, and the bytes arrive intact. A classic burst with parity would have been 5 frames (four chunks and one extra).
+
+A second run uses a repeated menu line (12298 bytes) so stream LZ is doing real work, and drops every 5th data chunk. The air load of the first sends is 2251 bytes. One parity frame is sent, the burst is still 8, the ack carries two SACK bytes, and the rebuilt compressed bytes decode back to the same line. Normal data frames do not carry the per frame LZ flag.
 
 RETRAIN is held off the data stream until the host escapes, so the test reads the tier the modem is actually on.
 

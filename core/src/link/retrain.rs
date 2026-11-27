@@ -51,6 +51,7 @@ impl Link {
         self.fec_clean = 0;
         if t != self.tier {
             self.tier = t;
+            self.arm_stream_reset();
             self.emit(Event::Retrain(t));
         }
     }
@@ -60,6 +61,7 @@ impl Link {
             self.voice_ready_tick(now);
         }
         let rto = rto_ms(self.tier);
+        self.lz_sync_retry(now);
         // Parity hold: release the host's bytes if the parity frame never
         // arrives (it was lost, or the sender moved on). 4 RTOs is longer
         // than a turn plus the peer's burst, so a parity frame that is
@@ -123,6 +125,7 @@ impl Link {
             };
             self.last_periodic = now.wrapping_sub(u32::MAX / 2);
             self.clear_pending();
+            self.arm_stream_reset();
             if self.vs.slots {
                 // Our wall clock PINGs were for the old tier.
                 self.q_retain(|f| !is_ping(f));

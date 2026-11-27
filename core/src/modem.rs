@@ -554,7 +554,7 @@ impl Modem {
         self.boot_name = cfg.name;
         self.boot_len = cfg.name_len;
         self.cfg = cfg;
-        self.link = Link::new();
+        self.link.reinit();
         self.mode = Mode::Command;
         self.out.head = 0;
         self.out.len = 0;

@@ -77,6 +77,7 @@ impl Link {
         let call_id = self.call_id;
         let snr = self.my_snr;
         let peer_lz = self.lz_peer;
+        let peer_stream = self.stream_peer;
         let peer_bulk = self.bulk_peer;
         let peer_fec = self.fec_peer;
         let mine = offered_caps(sregs);
@@ -84,6 +85,7 @@ impl Link {
         self.call_id = call_id;
         self.my_snr = snr;
         self.lz_peer = peer_lz;
+        self.stream_peer = peer_stream;
         self.bulk_peer = peer_bulk;
         self.fec_peer = peer_fec;
         self.lz_mine = mine & frame::CAP_LZ != 0;
@@ -94,21 +96,6 @@ impl Link {
         self.state = State::AwaitTierSet;
         self.send_train();
         true
-    }
-
-    /// Bits both ends offered. Each bit stands on its own.
-    fn agreed_caps(&self) -> u8 {
-        let mut c = 0u8;
-        if self.lz_mine && self.lz_peer {
-            c |= frame::CAP_LZ;
-        }
-        if self.bulk_mine && self.bulk_peer {
-            c |= frame::CAP_BULK;
-        }
-        if self.fec_mine && self.fec_peer {
-            c |= frame::CAP_FEC;
-        }
-        c
     }
 
     pub(super) fn send_train(&mut self) {
@@ -205,7 +192,17 @@ impl Link {
         self.turn = true;
         self.burst = 0;
         self.burst_cap = BURST_MAX;
-        self.lz = self.lz_mine && self.lz_peer;
+        // Stream LZ wins when both offered it. Per frame LZ remains when
+        // the peer only agreed to CAP_LZ. Voice calls do not use the stream.
+        self.lz_stream = self.lz_mine && self.stream_peer && !self.voice.on;
+        self.lz = self.lz_mine && (self.lz_peer || self.stream_peer);
+        if self.lz_stream {
+            self.enc.reset_call();
+            self.dec.reset_call();
+            self.cred_raw = 0;
+            self.cred_comp = 0;
+            self.stream_dead = false;
+        }
         // Voice slot frames carry one SACK byte, so a voice call stays at
         // the classic window even if a data capability bit was copied across.
         self.bulk = self.bulk_mine && self.bulk_peer && !self.voice.on;
@@ -235,15 +232,10 @@ impl Link {
         if !callee.eq_ignore_ascii_case(me) || call_id == 0 {
             return;
         }
-        let peer_lz = caps & frame::CAP_LZ != 0;
-        let peer_bulk = caps & frame::CAP_BULK != 0;
-        let peer_fec = caps & frame::CAP_FEC != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
             self.voice.on = false;
-            self.lz_peer = peer_lz;
-            self.bulk_peer = peer_bulk;
-            self.fec_peer = peer_fec;
+            self.take_peer_caps(caps);
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;
             self.start = now;
@@ -259,9 +251,7 @@ impl Link {
             self.last_req = now;
             self.my_snr = info.snr_x4;
             if !self.is_connected() {
-                self.lz_peer = peer_lz;
-                self.bulk_peer = peer_bulk;
-                self.fec_peer = peer_fec;
+                self.take_peer_caps(caps);
             }
             if self.state == State::AwaitTierSet && !self.got_tierset {
                 self.send_train();

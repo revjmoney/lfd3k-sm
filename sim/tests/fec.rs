@@ -18,6 +18,7 @@ const BYTES: usize = 8 * 1024;
 thread_local! {
     static DROP_PCT: Cell<u8> = const { Cell::new(0) };
     static DROP_SEED: Cell<u32> = const { Cell::new(1) };
+    static DROP_N: Cell<u32> = const { Cell::new(0) };
 }
 
 fn drop_data(t_ms: u32, frame: &[u8]) -> bool {
@@ -41,6 +42,20 @@ fn drop_data(t_ms: u32, frame: &[u8]) -> bool {
     x ^= x >> 17;
     x ^= x << 5;
     (x % 100) < u32::from(pct)
+}
+
+/// Bytes with no repeated runs, so stream LZ cannot shrink them. The FEC
+/// timing tests need the same air load they had before stream LZ.
+fn noise(n: usize, seed: u32) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 24) as u8
+        })
+        .collect()
 }
 
 fn modem(name: &str, s31: u16, auto: bool) -> Config {
@@ -82,7 +97,7 @@ fn run_transfer(loss_pct: u8, fec: bool, seed: u64) -> Run {
         h.screen_a()
     );
     let t0 = h.now_ms;
-    let msg: Vec<u8> = (0..BYTES).map(|i| ((i * 17 + 3) % 251) as u8).collect();
+    let msg = noise(BYTES, seed as u32);
     let mut sent = 0;
     while sent < msg.len() {
         sent += h.feed_a(&msg[sent..(sent + 400).min(msg.len())]);
@@ -222,7 +237,7 @@ fn simulated_marginal_snr_stays_on_sf5() {
             "trained below SF5: {}",
             h.screen_a()
         );
-        let msg: Vec<u8> = (0..64 * 1024).map(|i| ((i * 13 + 9) % 251) as u8).collect();
+        let msg = noise(64 * 1024, 31);
         let mut sent = 0;
         while sent < msg.len() {
             sent += h.feed_a(&msg[sent..(sent + 400).min(msg.len())]);
@@ -309,10 +324,13 @@ fn simulated_bulk_burst_carries_parity() {
         "no connect {:?}",
         h.screen_a()
     );
-    let msg: Vec<u8> = (0..8 * 1024).map(|i| ((i * 19 + 5) % 251) as u8).collect();
+    let msg = noise(8 * 1024, 44);
     let took = h.feed_a(&msg[..msg.len().min(5_000)]);
+    // Stream LZ is also agreed, so the window holds compressed bytes plus
+    // a lookahead. Incompressible input still stops near 16 chunks, which
+    // is more than the classic window of 8.
     assert!(
-        took > (WINDOW_BULK / 2) * CHUNK && took <= WINDOW_BULK * CHUNK,
+        took > 8 * CHUNK && took <= WINDOW_BULK * CHUNK + 64 + 256,
         "bulk window took {took}, classic would stop at {}",
         8 * CHUNK
     );
@@ -337,4 +355,122 @@ fn simulated_bulk_burst_carries_parity() {
     );
     assert!(parity > 0, "bulk loss never armed parity");
     assert_eq!(run, 8, "parity did not ride in the bulk burst of 8");
+}
+
+/// Drop every 5th data chunk. Parity frames are left alone so a group
+/// can still be rebuilt.
+fn drop_every_fifth_chunk(_ms: u32, frame: &[u8]) -> bool {
+    if frame.get(1).map(|b| b >> 4) != Some(FrameType::Data as u8) {
+        return false;
+    }
+    if frame.get(1).is_some_and(|b| b & FLAG_PARITY != 0) {
+        return false;
+    }
+    DROP_N.with(|c| {
+        let n = c.get();
+        c.set(n.wrapping_add(1));
+        n % 5 == 4
+    })
+}
+
+/// Simulated. S31 = 1 agrees bulk ARQ (burst 8, window 16), burst parity,
+/// and stream LZ together. A repeated line shrinks on the air. Dropping
+/// every 5th chunk leaves a selective hole, so parity arms, and the
+/// compressed bytes that arrive or are rebuilt still decode.
+#[test]
+fn simulated_bulk_fec_and_stream_lz_together() {
+    DROP_N.with(|c| c.set(0));
+    let mut h = Harness::with_configs(
+        SimChannel {
+            profile: SnrProfile::Constant(12 * 4),
+            seed: 77,
+            drop: Some(drop_every_fifth_chunk),
+            no_snr_loss: true,
+        },
+        modem("CALLER", 1, false),
+        modem("AXIS", 1, true),
+    );
+    h.run_ms(50);
+    h.type_a("ATDT AXIS\r");
+    assert!(
+        h.run_until(8_000, |h| h.a.is_connected() && h.b.is_connected()),
+        "no connect {:?}",
+        h.screen_a()
+    );
+    assert!(
+        h.screen_a().contains("/ARQ/LZ"),
+        "stream LZ was not agreed: {}",
+        h.screen_a()
+    );
+    // A repeated line compresses. The counter bytes keep the compressed
+    // stream long enough to fill a bulk burst.
+    let mut msg = Vec::new();
+    while msg.len() < 12 * 1024 {
+        let n = msg.len();
+        msg.extend_from_slice(b"\x1b[1;37;44mMAIN MENU\x1b[0m\r\n");
+        msg.push((n % 251) as u8);
+    }
+    let took = h.feed_a(&msg);
+    assert!(
+        took > 8 * CHUNK,
+        "bulk window took {took}, classic would stop near {}",
+        8 * CHUNK
+    );
+    let mut sent = took;
+    while sent < msg.len() {
+        sent += h.feed_a(&msg[sent..(sent + 800).min(msg.len())]);
+        h.run_ms(1);
+        assert!(h.now_ms < 120_000, "stalled at {sent}");
+    }
+    assert!(
+        h.run_until(120_000, |h| h.received_b().len() >= msg.len()),
+        "got {}",
+        h.received_b().len()
+    );
+    assert_eq!(h.received_b(), msg);
+    let parity = h.stats().parity_frames[0] + h.stats().parity_frames[1];
+    let run = max_data_run(&h);
+    let acks = h
+        .trace()
+        .iter()
+        .filter(|t| t.ftype == Some(FrameType::Ack))
+        .map(|t| t.len)
+        .collect::<Vec<_>>();
+    let data_flags = h
+        .trace()
+        .iter()
+        .filter(|t| t.from == 0 && t.ftype == Some(FrameType::Data) && t.flags & FLAG_PARITY == 0)
+        .map(|t| t.flags)
+        .collect::<Vec<_>>();
+    let air: usize = h
+        .trace()
+        .iter()
+        .filter(|t| {
+            t.from == 0
+                && t.ftype == Some(FrameType::Data)
+                && t.flags & FLAG_PARITY == 0
+                && !t.resend
+        })
+        .map(|t| t.len.saturating_sub(5))
+        .sum();
+    eprintln!(
+        "simulated bulk+fec+lz: took={took} parity={parity} burst={run} air={air} plain={} ms={}",
+        msg.len(),
+        h.now_ms
+    );
+    assert!(parity > 0, "loss never armed parity");
+    assert_eq!(run, 8, "parity did not ride in the bulk burst of 8");
+    assert!(
+        acks.iter().any(|&n| n == 7),
+        "bulk ack is two SACK bytes (frame len 7), got {acks:?}"
+    );
+    assert!(
+        data_flags.iter().all(|f| f & 4 == 0),
+        "stream data set per frame FLAG_LZ: {data_flags:?}"
+    );
+    assert!(
+        air < msg.len(),
+        "stream LZ did not shrink the air load: {air} vs {}",
+        msg.len()
+    );
 }

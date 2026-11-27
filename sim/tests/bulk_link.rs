@@ -163,12 +163,16 @@ fn both_ways(s31: u16, n: usize, seed: u64) -> (u32, u32) {
 
 #[test]
 fn bulk_window_and_classic_window() {
+    // Incompressible bytes. With S31=1 the call also runs stream LZ, which
+    // stores compressed bytes in the window, so a run of one character
+    // would fill far fewer slots than the window and hide the limit.
+    let wide_payload = bytes(5_000, 7);
     let mut wide = harness(1, 1, None);
     wide.run_ms(20);
     connect(&mut wide);
-    let took = wide.feed_a(&[0x3C; 5_000]);
+    let took = wide.feed_a(&wide_payload);
     assert!(
-        took > (WINDOW_BULK - 1) * CHUNK && took <= WINDOW_BULK * CHUNK,
+        took > WINDOW * CHUNK && took <= WINDOW_BULK * CHUNK + 64 + 256,
         "bulk window took {took}"
     );
     let mut narrow = harness(0, 1, None);

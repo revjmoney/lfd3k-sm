@@ -554,8 +554,9 @@ fn letters(n: usize) -> Vec<u8> {
 
 #[test]
 fn old_peer_stays_on_classic_acks_when_new_offers_bulk() {
-    // 0x0B is CAP_LZ | CAP_BULK | CAP_FEC. The old build ignores bits 1
-    // and 3 and agrees only CAP_LZ (0x01). Acks stay one SACK byte.
+    // 0x0F is CAP_LZ | CAP_BULK | CAP_LZ_STREAM | CAP_FEC. The old build
+    // ignores bits it does not implement and agrees only CAP_LZ (0x01).
+    // Acks stay one SACK byte.
     let payload = letters(1200);
     for new_dials in [true, false] {
         let mut net = Net::new(vec![St::new("ALPHA"), St::old("OLDIE", 1)]);
@@ -580,7 +581,10 @@ fn old_peer_stays_on_classic_acks_when_new_offers_bulk() {
             .collect();
         assert!(!reqs.is_empty(), "no CallReq");
         let want_cap = if new_dials {
-            lfd3k_core::frame::CAP_LZ | lfd3k_core::frame::CAP_BULK | lfd3k_core::frame::CAP_FEC
+            lfd3k_core::frame::CAP_LZ
+                | lfd3k_core::frame::CAP_BULK
+                | lfd3k_core::frame::CAP_LZ_STREAM
+                | lfd3k_core::frame::CAP_FEC
         } else {
             lfd3k_core::frame::CAP_LZ
         };

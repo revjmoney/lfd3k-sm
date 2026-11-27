@@ -16,27 +16,34 @@
 //! frame and during TX; after TX the core calls `listen` again (never while
 //! busy) before expecting to hear anything.
 //!
-//! Compression (see `lz.rs`): the caller appends a capability byte to its
-//! CallReq when its own S31 is 1. The answerer agrees when its own S31 is 1
-//! too, and then says so with CAP_LZ on its CallAck and as a 4th Train byte;
-//! the caller reads the answer from the Train (the frame it cannot connect
-//! without), so both ends always agree. At CONNECT the call uses LZ when we
-//! offered and the peer said yes. The same byte carries `CAP_BULK` (bit 1)
-//! on a data call when S31 is 1. Both ends then use a window of 16, and a
-//! turn that already has more than 4 chunks queued sends 8 frames. A short
-//! turn (typing, a line, anything of 4 chunks or fewer) stays at 4 frames
-//! so the other side is not held off. Voice calls do not offer the bit:
-//! their slot frames carry an 8 bit bitmap. It sits between ARQ
-//! and the air: ArqTx keeps chunks plain (sequence numbers, the window and
-//! CHUNK all count host bytes), and a Data frame is compressed when it is
-//! built from a staged chunk, so a resend compresses the same chunk again
-//! to the same bytes. A received Data frame with `FLAG_LZ` is decompressed
-//! before ArqRx sees it; one that fails to decompress is dropped unacked,
-//! so the sender resends it. Receiving does not depend on the agreement:
-//! any `FLAG_LZ` frame is decoded (a peer only sends one after we offered).
+//! Compression (see `lz.rs` and `lz_stream`): the caller appends a capability
+//! byte to its CallReq when its own S31 is 1. The byte offers `CAP_LZ`,
+//! `CAP_BULK`, and `CAP_LZ_STREAM`. The answerer agrees to each bit it also
+//! offers, and says so on its CallAck and as a 4th Train byte. The caller
+//! reads the answer from the Train (the frame it cannot connect without), so
+//! both ends always agree. A peer that does not know a bit ignores it.
+//!
+//! `CAP_BULK` (bit 1) uses a window of 16, and a turn that already has more
+//! than 4 chunks queued sends 8 frames. A short turn stays at 4 frames.
+//! Voice calls do not offer the bit: their slot frames carry an 8 bit bitmap.
+//!
+//! When both ends set `CAP_LZ_STREAM`, host bytes are compressed before they
+//! enter ArqTx. A resend is those same bytes. The receiver decodes only the
+//! in order stream from ArqRx. A normal Data frame does not carry `FLAG_LZ`.
+//! That bit, on this call, asks for a dictionary reset or marks the frame
+//! that starts the fresh one. The dictionary is reset on retrain and on
+//! resync by a RESET token in that stream, and on link loss by dropping the
+//! history (the receiver keeps it until bytes already in ARQ have been
+//! delivered).
+//!
+//! Otherwise, when both ends set `CAP_LZ` and not the stream bit, compression
+//! stays between ARQ and the air: ArqTx keeps chunks plain, and a Data frame
+//! is compressed when it is built, so a resend compresses the same chunk
+//! again to the same bytes. A received `FLAG_LZ` frame is decompressed before
+//! ArqRx sees it; one that fails to decompress is dropped unacked.
 //!
 //! Burst parity (see `fec`): the same capability byte carries `CAP_FEC`
-//! (bit 3; bit 1 is `CAP_BULK`, bit 2 stays free for stream compression). It is offered whenever the byte is
+//! (bit 3; bit 1 is `CAP_BULK`, bit 2 is `CAP_LZ_STREAM`). It is offered whenever the byte is
 //! sent, which is still only when S31 is 1, so a pre-capability peer is
 //! reached the same way as before (S31 = 0, no byte). The answerer agrees
 //! when the caller offered, and the caller reads the answer from the Train.
@@ -59,6 +66,7 @@ use crate::arq::{ArqRx, ArqTx, CHUNK};
 use crate::at::{SRegs, REG_LZ};
 use crate::fec::Group;
 use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
+use crate::lz_stream::{StreamDec, StreamEnc};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
 use crate::voice::call::{self as vcall, VoiceCallInfo, VoiceLink};
@@ -239,22 +247,16 @@ fn lz_wanted(s: &SRegs) -> bool {
 
 /// Capability bits this station offers on a data call.
 ///
-/// `CAP_BULK` and `CAP_FEC` ride in the same byte as `CAP_LZ`. Bit 2 is
-/// left clear for stream compression. The byte is sent only
-/// when it is non-zero, and it is non-zero only when S31 is 1, so `ATS31=0`
-/// still sends the pre-capability CallReq (no extra byte) that builds older
-/// than r.420 require. Each bit is agreed on its own: an older peer that
-/// offers only `CAP_LZ` keeps compression and stays on the classic window.
-/// Voice calls do not use this function.
+/// `CAP_BULK`, `CAP_LZ_STREAM`, and `CAP_FEC` ride in the same byte as
+/// `CAP_LZ`. The byte is sent only when it is non-zero, and it is non-zero
+/// only when S31 is 1, so `ATS31=0` still sends the pre-capability CallReq
+/// (no extra byte) that builds older than r.420 require. Each bit is agreed
+/// on its own. Voice calls do not use this function.
 fn offered_caps(s: &SRegs) -> u8 {
     if !lz_wanted(s) {
         return 0;
     }
-    let mut c = 0u8;
-    c |= frame::CAP_LZ;
-    c |= frame::CAP_BULK;
-    c |= frame::CAP_FEC;
-    c
+    frame::CAP_LZ | frame::CAP_BULK | frame::CAP_LZ_STREAM | frame::CAP_FEC
 }
 
 pub struct Link {
@@ -332,12 +334,33 @@ pub struct Link {
     slot_hangup: Option<u32>,
     /// We offered compression on this call (own S31 at dial or answer).
     lz_mine: bool,
-    /// The peer offered compression (CallReq), or the Train's agreed bit
-    /// (caller). See `lz`.
+    /// The peer offered per frame LZ (`CAP_LZ`), or the Train agreed it.
     lz_peer: bool,
-    /// Both offered: Data frames go out compressed when that saves enough.
+    /// The peer offered stream LZ (`CAP_LZ_STREAM`).
+    stream_peer: bool,
+    /// Both offered some compression: `/ARQ/LZ` and the DC light.
     /// Kept after the call ends, for AT&V.
     lz: bool,
+    /// Stream LZ is in force: compress above ARQ, not per frame.
+    lz_stream: bool,
+    /// The call has ended. The decoder is cleared once ARQ has no more
+    /// in order bytes to deliver.
+    stream_dead: bool,
+    /// Plaintext and compressed bytes already attributed to sent frames
+    /// (stream mode ratio, so a resend can be counted again).
+    cred_raw: u32,
+    cred_comp: u32,
+    enc: StreamEnc,
+    dec: StreamDec,
+    /// Decoder failed: drop compressed bytes until the peer's sync frame.
+    lz_sync_wait: bool,
+    /// Sequence of the Data frame that starts the fresh dictionary.
+    lz_sync_at: Option<u8>,
+    /// Sequence of the chunk we send after the peer asks us to reset.
+    lz_sync_tx: Option<u8>,
+    /// When the last sync request went out, and how many we have sent.
+    lz_sync_ask_at: u32,
+    lz_sync_asks: u8,
     /// We offered `CAP_BULK` on this data call.
     bulk_mine: bool,
     /// The peer offered `CAP_BULK`, or the Train's agreed bit (caller).
@@ -461,7 +484,19 @@ impl Link {
             slot_hangup: None,
             lz_mine: false,
             lz_peer: false,
+            stream_peer: false,
             lz: false,
+            lz_stream: false,
+            stream_dead: false,
+            cred_raw: 0,
+            cred_comp: 0,
+            enc: StreamEnc::new(),
+            dec: StreamDec::new(),
+            lz_sync_wait: false,
+            lz_sync_at: None,
+            lz_sync_tx: None,
+            lz_sync_ask_at: 0,
+            lz_sync_asks: 0,
             bulk_mine: false,
             bulk_peer: false,
             bulk: false,
@@ -487,6 +522,95 @@ impl Link {
             air_tx: [AirNote::EMPTY; 2],
             air_tx_len: 0,
         }
+    }
+
+    /// Back to `new`, in place. The stream dictionaries are reseeded without
+    /// building a second `Link` on the stack (that copy is the modem task's
+    /// largest temporary, and the dictionaries are several KB).
+    pub(crate) fn reinit(&mut self) {
+        self.state = State::Idle;
+        self.role = Role::Caller;
+        self.call_id = 0;
+        self.tier = Tier::ROBUST;
+        self.cap = Tier::Sf5;
+        self.own_cap = Tier::Sf5;
+        self.train = Tier::ROBUST;
+        self.start = 0;
+        self.last_periodic = 0;
+        self.probe_ms = 0;
+        self.probe_tries = 0;
+        self.rings = 0;
+        self.last_req = 0;
+        self.got_tierset = false;
+        self.my_snr = 0;
+        self.callreq = [0; QBUF];
+        self.callreq_len = 0;
+        self.last_rx = 0;
+        self.last_tx = 0;
+        self.last_change = 0;
+        self.ewma_x32 = 0;
+        self.good_since = None;
+        self.low_since = None;
+        self.ping_out = 0;
+        self.ping_last = 0;
+        self.ping_wait = 0;
+        self.rng = 1;
+        self.pending = None;
+        self.pend_last = 0;
+        self.pend_tries = 0;
+        self.pend_wait = 0;
+        self.silence_done = false;
+        self.turn = true;
+        self.turn_start = 0;
+        self.turn_ms = 0;
+        self.burst = 0;
+        self.burst_cap = BURST_MAX;
+        self.ack_owed = false;
+        self.ka_reply = false;
+        self.last_snr = 0;
+        self.resync_prev = Tier::ROBUST;
+        self.staged = None;
+        self.staged_buf = [0; CHUNK];
+        self.data_tx = None;
+        self.data_rx = None;
+        self.need_listen = true;
+        self.listening = None;
+        self.tx.reset();
+        self.rx.reset();
+        self.q = [EMPTY_Q; QLEN];
+        self.q_head = 0;
+        self.q_len = 0;
+        self.ev = [Event::Ring; EVLEN];
+        self.ev_head = 0;
+        self.ev_len = 0;
+        self.engaged = false;
+        self.slot_hangup = None;
+        self.lz_mine = false;
+        self.lz_peer = false;
+        self.stream_peer = false;
+        self.lz = false;
+        self.lz_stream = false;
+        self.stream_dead = false;
+        self.cred_raw = 0;
+        self.cred_comp = 0;
+        self.enc.reset_call();
+        self.dec.reset_call();
+        self.lz_sync_wait = false;
+        self.lz_sync_at = None;
+        self.lz_sync_tx = None;
+        self.lz_sync_ask_at = 0;
+        self.lz_sync_asks = 0;
+        self.bulk_mine = false;
+        self.bulk_peer = false;
+        self.bulk = false;
+        self.clear_fec();
+        self.lz_raw = 0;
+        self.lz_air = 0;
+        self.moved = 0;
+        self.voice = VoiceLink::new();
+        self.vs.reset();
+        self.air_tx = [AirNote::EMPTY; 2];
+        self.air_tx_len = 0;
     }
 
     /// A frame just went to the radio: note it for the AirEvents.
@@ -554,6 +678,47 @@ impl Link {
         let (raw, air) = (raw as u32, air as u32);
         self.lz_raw = self.lz_raw.saturating_add(raw);
         self.lz_air = self.lz_air.saturating_add(air);
+    }
+
+    /// Store which compression bits the peer offered or agreed.
+    fn take_peer_caps(&mut self, caps: u8) {
+        self.lz_peer = caps & frame::CAP_LZ != 0;
+        self.bulk_peer = caps & frame::CAP_BULK != 0;
+        self.stream_peer = caps & frame::CAP_LZ_STREAM != 0;
+        self.fec_peer = caps & frame::CAP_FEC != 0;
+    }
+
+    /// Bits both ends have offered. Each bit stands on its own.
+    fn agreed_caps(&self) -> u8 {
+        let mut c = 0u8;
+        if self.lz_mine && self.lz_peer {
+            c |= frame::CAP_LZ;
+        }
+        if self.bulk_mine && self.bulk_peer {
+            c |= frame::CAP_BULK;
+        }
+        if self.lz_mine && self.stream_peer {
+            c |= frame::CAP_LZ_STREAM;
+        }
+        if self.fec_mine && self.fec_peer {
+            c |= frame::CAP_FEC;
+        }
+        c
+    }
+
+    /// Retrain or resync: RESET goes into the compressed stream after the
+    /// bytes already produced, then the sender's history returns to the preset.
+    pub(super) fn arm_stream_reset(&mut self) {
+        if !self.lz_stream {
+            return;
+        }
+        self.enc.request_reset();
+        self.stream_drain();
+        // The first flush can fail while the pending buffer is full. Drain
+        // makes room, then the bytes still in the lookahead go out after
+        // the RESET token, against the fresh history.
+        self.enc.flush_tail();
+        self.stream_drain();
     }
 
     /// While true, an idle link answers every CallReq with CallReject.
@@ -656,14 +821,24 @@ impl Link {
         n
     }
 
-    /// Received in-order bytes. While a parity group is open the bytes
-    /// stay in `ArqRx` so a missing chunk can still be rebuilt.
+    /// Received in-order bytes. In stream mode these are plaintext from the
+    /// decoder; the ARQ payload itself is the compressed stream. While a
+    /// parity group is open the bytes stay in `ArqRx` so a missing chunk
+    /// can still be rebuilt, including a compressed chunk.
     pub fn read_data(&mut self, out: &mut [u8]) -> usize {
         if self.fec_open {
             return 0;
         }
-        let n = self.rx.read(out);
+        let n = if self.lz_stream {
+            self.stream_read(out)
+        } else {
+            self.rx.read(out)
+        };
         self.moved = self.moved.wrapping_add(n as u32);
+        if self.stream_dead && !self.rx.has_ready() {
+            self.dec.reset_call();
+            self.stream_dead = false;
+        }
         n
     }
 
@@ -774,7 +949,19 @@ impl Link {
         self.rx.reset();
         self.lz_mine = false;
         self.lz_peer = false;
+        self.stream_peer = false;
         self.lz = false;
+        self.lz_stream = false;
+        self.stream_dead = false;
+        self.cred_raw = 0;
+        self.cred_comp = 0;
+        self.enc.reset_call();
+        self.dec.reset_call();
+        self.lz_sync_wait = false;
+        self.lz_sync_at = None;
+        self.lz_sync_tx = None;
+        self.lz_sync_ask_at = 0;
+        self.lz_sync_asks = 0;
         self.bulk_mine = false;
         self.bulk_peer = false;
         self.bulk = false;
@@ -807,6 +994,17 @@ impl Link {
         self.pending = None;
         self.staged = None;
         self.need_listen = true;
+        // Link loss: drop the sender's dictionary now. The receiver's
+        // dictionary stays until `read_data` has delivered what ARQ already
+        // holds, then it is cleared too.
+        if self.lz_stream {
+            self.enc.reset_call();
+            self.stream_dead = true;
+        }
+        self.lz_sync_wait = false;
+        self.lz_sync_at = None;
+        self.lz_sync_tx = None;
+        self.lz_sync_asks = 0;
     }
 
     fn fail(&mut self, e: Event, bye: bool) {
@@ -859,10 +1057,7 @@ impl Link {
                     };
                     // The caller cannot connect without a Train, so its 4th
                     // byte is the one place the agreed capability answer is read.
-                    let agreed = frame::parse_train_caps(p);
-                    self.lz_peer = agreed & frame::CAP_LZ != 0;
-                    self.bulk_peer = agreed & frame::CAP_BULK != 0;
-                    self.fec_peer = agreed & frame::CAP_FEC != 0;
+                    self.take_peer_caps(frame::parse_train_caps(p));
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
                     self.own_cap = cap_tier(sregs);
                     self.cap = self.own_cap.min(peer_cap);

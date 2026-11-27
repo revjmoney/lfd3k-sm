@@ -9,9 +9,10 @@
 //!
 //! RAM, per modem, versus a build that stored only 8 chunks: two payload
 //! buffers of `(WINDOW_BULK - WINDOW) * CHUNK` bytes (3200), plus 8 extra
-//! `TxSlot`s. Each slot is 12 bytes once it records how many times the
-//! chunk was sent (the parity tier-hold uses that), so the extra slots are
-//! 96 bytes, not 64. Eight extra receive length and presence bytes are 24,
+//! `TxSlot`s. Each slot stays 8 bytes: the sent, acked, and closed flags
+//! share one byte, and `sends` (how many times the chunk went out, which
+//! the parity tier-hold uses) is the next byte. The extra slots are 64
+//! bytes. Eight extra receive length and presence bytes are 24,
 //! and one `usize` limit sits on each of `ArqTx` and `ArqRx`. `Link` also
 //! holds one parity `Group` (217 bytes) and a `last_sends` byte on `ArqTx`.
 //! The 3200 bytes of payload buffers are the same on a 32 bit device; the
@@ -26,20 +27,41 @@ pub const CHUNK: usize = 200;
 
 const _: () = assert!(WINDOW_BULK == SLOTS && WINDOW <= SLOTS && WINDOW_BULK <= 16);
 
+/// Sent, individually acknowledged, or sealed against further appends.
+const TX_SENT: u8 = 1;
+const TX_ACKED: u8 = 2;
+const TX_CLOSED: u8 = 4;
+
 #[derive(Clone, Copy)]
 struct TxSlot {
     len: u16,
-    sent: bool,
-    acked: bool,
+    /// `TX_SENT`, `TX_ACKED`, `TX_CLOSED`. One byte keeps the slot at 8 bytes.
+    flags: u8,
     /// Times this chunk has been handed to the sender. 0 until the first.
     sends: u8,
     last_ms: u32,
 }
 
+const _: () = assert!(core::mem::size_of::<TxSlot>() == 8);
+
+impl TxSlot {
+    fn sent(self) -> bool {
+        self.flags & TX_SENT != 0
+    }
+    fn acked(self) -> bool {
+        self.flags & TX_ACKED != 0
+    }
+    fn closed(self) -> bool {
+        self.flags & TX_CLOSED != 0
+    }
+    fn set(&mut self, bit: u8) {
+        self.flags |= bit;
+    }
+}
+
 const EMPTY_TX: TxSlot = TxSlot {
     len: 0,
-    sent: false,
-    acked: false,
+    flags: 0,
     sends: 0,
     last_ms: 0,
 };
@@ -98,7 +120,7 @@ impl ArqTx {
         let mut f = self.limit.saturating_sub(self.count) * CHUNK;
         if self.count > 0 {
             if let Some(s) = self.slots.get(self.ring(self.count - 1)) {
-                if !s.sent {
+                if !s.sent() {
                     f += CHUNK - s.len as usize;
                 }
             }
@@ -123,7 +145,7 @@ impl ArqTx {
             if self.count > 0 {
                 let r = self.ring(self.count - 1);
                 if let Some(s) = self.slots.get(r) {
-                    if !s.sent && (s.len as usize) < max {
+                    if !s.sent() && !s.closed() && (s.len as usize) < max {
                         idx = Some(r);
                     }
                 }
@@ -164,7 +186,7 @@ impl ArqTx {
         let i = self.pick(now_ms, rto_ms)?;
         let r = self.ring(i);
         let s = self.slots.get_mut(r)?;
-        s.sent = true;
+        s.set(TX_SENT);
         s.sends = s.sends.saturating_add(1);
         s.last_ms = now_ms;
         self.last_sends = s.sends;
@@ -182,7 +204,7 @@ impl ArqTx {
 
     /// True when a queued chunk has never been sent.
     pub fn has_unsent(&self) -> bool {
-        (0..self.count).any(|i| self.slots.get(self.ring(i)).is_some_and(|s| !s.sent))
+        (0..self.count).any(|i| self.slots.get(self.ring(i)).is_some_and(|s| !s.sent()))
     }
 
     /// Length of the chunk `next_to_send` would hand out now, without
@@ -197,7 +219,7 @@ impl ArqTx {
         let mut pick = None;
         for i in 0..self.count {
             if let Some(s) = self.slots.get(self.ring(i)) {
-                if !s.sent {
+                if !s.sent() {
                     pick = Some(i);
                     break;
                 }
@@ -206,7 +228,7 @@ impl ArqTx {
         if pick.is_none() {
             for i in 0..self.count {
                 if let Some(s) = self.slots.get(self.ring(i)) {
-                    if !s.acked && now_ms.wrapping_sub(s.last_ms) >= rto_ms {
+                    if !s.acked() && now_ms.wrapping_sub(s.last_ms) >= rto_ms {
                         pick = Some(i);
                         break;
                     }
@@ -227,7 +249,7 @@ impl ArqTx {
         }
         // Only frames that were actually sent can be acknowledged.
         for i in 0..adv {
-            if !self.slots.get(self.ring(i)).is_some_and(|s| s.sent) {
+            if !self.slots.get(self.ring(i)).is_some_and(|s| s.sent()) {
                 return;
             }
         }
@@ -243,8 +265,8 @@ impl ArqTx {
             if off < self.count && off < self.limit {
                 let r = self.ring(off);
                 if let Some(s) = self.slots.get_mut(r) {
-                    if s.sent {
-                        s.acked = true;
+                    if s.sent() {
+                        s.set(TX_ACKED);
                     }
                 }
             }
@@ -267,6 +289,31 @@ impl ArqTx {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Sequence number of the oldest unacked chunk.
+    pub fn base(&self) -> u8 {
+        self.base
+    }
+
+    /// Sequence number the next new chunk will get.
+    pub fn next_seq(&self) -> u8 {
+        self.base.wrapping_add(self.count as u8)
+    }
+
+    /// The newest unsent chunk will not take more bytes. A later `push`
+    /// starts a new chunk, so a dictionary reset is not appended to bytes
+    /// that were compressed with the old one.
+    pub fn seal(&mut self) {
+        if self.count == 0 {
+            return;
+        }
+        let r = self.ring(self.count - 1);
+        if let Some(s) = self.slots.get_mut(r) {
+            if !s.sent() && s.len > 0 {
+                s.set(TX_CLOSED);
+            }
+        }
     }
 }
 
@@ -353,6 +400,35 @@ impl ArqRx {
             *h = true;
         }
         true
+    }
+
+    /// True when the next in order frame is here (`read` would make progress
+    /// or finish a frame it already started).
+    pub fn has_ready(&self) -> bool {
+        self.has(0)
+    }
+
+    /// Sequence number of the frame `read` would take from, if one is here.
+    pub fn head_seq(&self) -> Option<u8> {
+        if self.has(0) {
+            Some(self.base)
+        } else {
+            None
+        }
+    }
+
+    /// Drop the in order frame, including a tail already partly read.
+    pub fn discard_head(&mut self) {
+        if !self.has(0) {
+            return;
+        }
+        let h = self.head;
+        if let Some(x) = self.have.get_mut(h) {
+            *x = false;
+        }
+        self.head = (h + 1) % SLOTS;
+        self.base = self.base.wrapping_add(1);
+        self.read_off = 0;
     }
 
     /// (cumulative next expected seq, sack bitmap) where bit i means
@@ -687,10 +763,10 @@ mod tests {
     fn bulk_ram_is_the_extra_slots() {
         let payloads = (WINDOW_BULK - WINDOW) * CHUNK * 2;
         assert_eq!(payloads, 3_200);
-        // `sends` makes each slot 12 bytes (was 8 before parity counted sends).
-        assert_eq!(core::mem::size_of::<TxSlot>(), 12);
+        // Flags and `sends` are one byte each, so the slot stays 8 bytes.
+        assert_eq!(core::mem::size_of::<TxSlot>(), 8);
         let tx_slots = (WINDOW_BULK - WINDOW) * core::mem::size_of::<TxSlot>();
-        assert_eq!(tx_slots, 96);
+        assert_eq!(tx_slots, 64);
         eprintln!(
             "RAM modem {} link {} tx {} rx {}",
             core::mem::size_of::<crate::Modem>(),
