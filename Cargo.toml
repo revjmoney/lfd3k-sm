@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "sim", "ffi", "sx1262", "voice", "apps/pc"]
+members = ["core", "sim", "ffi", "sx1262", "voice", "apps/pc", "apps/android/engine"]
 resolver = "2"
 
 [profile.release]

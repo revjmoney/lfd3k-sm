@@ -43,7 +43,7 @@ across town on 918.5 MHz.
   (`ATDT AXIS` opens a telnet call), and a published forward so radio callers reach a telnet BBS.
 - **Find your friends.** Beacons, `AT+SCAN`, a station directory with pinning, dial by name, and a
   privacy mode.
-- **Voice calls by name.** Your own encrypted radio (cell) phone network!! Call anyone with a modem. No carrier. No tower. No one listening. Call a person by name (REV rings whatever REV is on), talk like a phone call on the fast tiers and push to talk on the slow ones, scrambled end to end by the FLOWTRON SCRAMBLER with a two word check; the PC app `lfd3k-voice-pc` runs today with its own simulated modem ([docs/voice-pc.md](docs/voice-pc.md)).
+- **Voice calls by name.** Your own encrypted radio (cell) phone network!! Call anyone with a modem. No carrier. No tower. No one listening. Call a person by name (REV rings whatever REV is on), talk like a phone call on the fast tiers and push to talk on the slow ones, scrambled end to end by the FLOWTRON SCRAMBLER with a two word check. The PC app `lfd3k-voice-pc` runs with its own simulated modem ([docs/voice-pc.md](docs/voice-pc.md)). The phone app `lfd3k-voice-android` is the same calls on Android ([docs/voice-android.md](docs/voice-android.md)).
 - **A full-screen setup menu.** `AT+MENU` opens an 80x24 ANSI lightbar menu (CP437, 16 colors) for
   SyncTERM: directory and scan, live link status, settings, forwards, Wi-Fi.
 - **A front panel with attitude.** The OLED shows modem lights (OH CD SD RD HS EC DC AA), the call
@@ -118,13 +118,14 @@ images every tagged release publishes (`.github/workflows/release.yml`).
 | Firmware for the Heltec V3 (the modem alone) | `firmware/` | `firmware\build_core.ps1`, then `pio run -d firmware -e heltec_v3_single -t upload --upload-port COMn` |
 | Multimode bootloader and picker | `multimode/` | see [`multimode/README.md`](multimode/README.md) |
 | Voice engine and the PC voice app | `voice/`, `apps/pc/` | `cargo build --release -p lfd3k-voice-pc` (prerequisites below; see [`docs/voice-pc.md`](docs/voice-pc.md)) |
+| Android voice app | `apps/android/` | `apps/android/gradlew :app:assembleDebug` (NDK, cargo-ndk; see [`docs/voice-android.md`](docs/voice-android.md)) |
 
 The Rust toolchain for the ESP32-S3 is installed with `espup`. The first firmware build downloads
 ESP-IDF and takes a while; later builds take seconds.
 
 ### Prerequisites for the voice crates
 
-`cargo build --workspace` builds the voice engine (`voice/`) and the PC voice app (`apps/pc/`) too. They need:
+`cargo build --workspace` builds the voice engine (`voice/`), the PC voice app (`apps/pc/`), and the phone engine crate (`apps/android/engine/`, the host build of the C ABI) too. They need:
 
 - **clang-cl on Windows (MSVC target).** Codec 2 is C99 with variable length arrays, which MSVC's `cl` cannot compile, so `voice/build.rs` builds it with clang-cl. Set `LFD3K_CLANG_CL` to the full path of `clang-cl.exe`, or put clang-cl on PATH. The Android NDK's clang-cl (under `toolchains\llvm\prebuilt\windows-x86_64\bin`) works, and so does Visual Studio's "C++ Clang tools for Windows" component. Linux and macOS use their usual C compiler.
 - **cmake** on PATH: `opusic-sys` builds the bundled libopus with cmake.
@@ -145,6 +146,7 @@ cargo test --workspace
 - [Multimode](docs/multimode.md): four firmwares on one radio (V4)
 - [SimNet](docs/simnet.md): call a real V4 or V3 from the PC over Wi-Fi with a simulated radio
 - [Voice calls on the PC](docs/voice-pc.md): `lfd3k-voice-pc`, call by name, push to talk, linking devices
+- [Voice calls on Android](docs/voice-android.md): `lfd3k-voice-android`, the same calls in a native phone app
 - Bench sheets: [phase 2](docs/phase2-bench.md), [phase 3](docs/phase3-bench.md), [phase 4](docs/phase4-bench.md)
 - [A full demo call transcript](docs/phase1-demo.txt)
 

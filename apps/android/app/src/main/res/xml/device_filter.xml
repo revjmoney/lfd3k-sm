@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Espressif USB serial (Heltec V4), decimal 0x303A. -->
+    <usb-device vendor-id="12346" />
+    <!-- Silicon Labs CP210x (Heltec V3), decimal 0x10C4. -->
+    <usb-device vendor-id="4292" />
+    <!-- CDC-ACM class, for a modem that enumerates as a communications device. -->
+    <usb-device class="2" />
+</resources>

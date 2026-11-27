@@ -2,7 +2,7 @@
 
 **Your own encrypted radio (cell) phone network!! Call anyone with a modem. No carrier. No tower. No one listening.**
 
-`lfd3k-voice-pc` is the PC voice app of the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM. It calls people by name, like a phone. In this first part it carries its own modem inside: a real LFD3K-SM core on a simulated radio over UDP (SimNet, the same as `lfd3k-pcmodem`), so two copies of the app call each other with no radio at all, on one PC or on two. It can also drive a real modem over USB or Wi-Fi (see "With a real modem" below). The phone app comes later.
+`lfd3k-voice-pc` is the PC voice app of the LRA FLOWTRON DATAMASTER 3000 SERIAL MODEM - LFD3K-SM. It calls people by name, like a phone. In this first part it carries its own modem inside: a real LFD3K-SM core on a simulated radio over UDP (SimNet, the same as `lfd3k-pcmodem`), so two copies of the app call each other with no radio at all, on one PC or on two. It can also drive a real modem over USB or Wi-Fi (see "With a real modem" below). The phone app is `lfd3k-voice-android` ([docs/voice-android.md](voice-android.md)).
 
 Everything in a call is scrambled by the FLOWTRON SCRAMBLER (end to end, keys made fresh for every call). Ham mode does not exist yet, so the scrambler is always on.
 

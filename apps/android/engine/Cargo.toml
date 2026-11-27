@@ -1,0 +1,20 @@
+[package]
+name = "lfd3k-voice-android"
+version = "0.5.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Rev. J. Money <https://jmscnc.com>"]
+publish = false
+description = "C ABI the Android voice app uses to run the LFD3K-SM voice engine and modem core"
+
+[lib]
+name = "lfd3k_voice_android"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+lfd3k-core = { path = "../../../core" }
+lfd3k-voice = { path = "../../../voice" }
+# Find a modem on the LAN by its _lfd3k._tcp service. Same crate and
+# features as the PC app, so the lock does not grow a second copy.
+mdns-sd = { version = "0.22", default-features = false }
+zeroize = "1"

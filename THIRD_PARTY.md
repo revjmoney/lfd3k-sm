@@ -298,6 +298,17 @@ These run on Rev's PC only and are never built into the firmware or the core. In
 | FLAC (`flac` command line) | as installed (MSYS2 mingw64) | GPL-2.0-or-later (tools), BSD-3-Clause (libFLAC) | compresses the two source sides of the recorded test call in `docs/voice-bench/call/source` (plain FLAC; nothing of the tool is shipped) |
 | FFmpeg with libopus | as installed (C: ffmpeg folder) | LGPL-2.1-or-later or GPL (FFmpeg build), BSD-3-Clause (libopus) | encodes the recorded test call and the source mix in `docs/voice-bench/call` as Opus (plain Ogg Opus files; nothing of the tool is shipped) |
 
+## Android voice app
+
+The phone app (`apps/android`) links the same `voice` crate as the PC app, so the codec and scrambler notices above cover the Rust in the APK. Two more pieces are compiled into the native library:
+
+| Piece | Version | License | Why |
+|---|---|---|---|
+| Dear ImGui | 1.91.8 (ocornut/imgui tag v1.91.8), sources under `apps/android/app/src/main/cpp/third_party/imgui/` with `LICENSE.txt` | MIT | The NativeActivity screens (calls, directory, settings). Only the core and the Android and OpenGL ES 3 backends are compiled. Seven size and slider multiplications are widened before the product so a large pair of dimensions cannot overflow a 32 bit int on the way to `size_t` or `double`. |
+| IBM Plex Mono Regular | already in `apps/pc/assets/fonts/` (see the PC voice app table) | SIL Open Font License 1.1 | The phone UI loads the same file from the APK assets. |
+
+The Java class is this project's own code (GPL-3.0-or-later, the attribution term in `NOTICE.md`). AAudio, EGL, and the NDK are the Android platform, not vendored.
+
 ## Test audio
 
 - `sim/testdata/speech-16k.wav`: 20 s (from 3 s in) of "Evening Star" by Edgar Allan Poe, read for LibriVox (archive.org item `evening_star_0901_librivox`, file `eveningstar_poe_ac_64kb.mp3`, 574,611 bytes, sha256 ef9b5c1a62e8e9033757724d5fca7f175b5fa18eb42c95ebb6fe1c9165742675). LibriVox recordings are in the public domain. Converted to 16 kHz mono 16 bit with ffmpeg. Used only as test speech for `lfd3k-voicesim` and the voice tests.
