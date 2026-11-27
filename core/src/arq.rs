@@ -393,9 +393,9 @@ impl ArqRx {
 mod tests {
     use super::*;
 
-    fn pattern(len: usize, salt: usize) -> Vec<u8> {
+    fn pattern(len: usize, mix: usize) -> Vec<u8> {
         (0..len)
-            .map(|i| ((i * 31 + salt * 17) % 251) as u8)
+            .map(|i| ((i * 31 + mix * 17) % 251) as u8)
             .collect()
     }
 
