@@ -53,6 +53,7 @@ impl Link {
             self.voice_ready_tick(now);
         }
         let rto = rto_ms(self.tier);
+        self.lz_sync_retry(now);
         // Voice slots: only slots in which the peer was due to send count
         // as silence, and missed ones stand for unanswered pings (an
         // answerer still waiting for the caller's clock counts time).

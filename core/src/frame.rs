@@ -19,15 +19,16 @@
 //! the two names (the caller's offer), and the answerer's CallAck payload
 //! may be that one byte and its Train payload may carry it as a 4th byte
 //! after tier and SNR (the agreed answer: set only when both offered). Bit 0
-//! is `CAP_LZ` (per frame LZ). Bit 3 is `CAP_LZ_STREAM` (one LZ77 dictionary
-//! for the whole call, above ARQ; see `lz_stream`). Bits 1 and 2 are left
-//! open for other capabilities and are ignored here. A byte with any of
-//! bits 4 to 7 set makes a CallReq or Train malformed. No byte (the form
-//! older builds send) means no capabilities. Older builds refuse a CallReq
-//! that carries the byte, so it is only sent when it says something
-//! (S31 = 1), and a 4 byte Train, so it only goes to a caller that offered
-//! (a new build). A build that knows `CAP_LZ` and not `CAP_LZ_STREAM` ignores
-//! bit 3 and answers with `CAP_LZ` alone, and the call stays on per frame LZ.
+//! is `CAP_LZ` (per frame LZ). Bit 2 is `CAP_LZ_STREAM` (one LZ77 dictionary
+//! for the whole call, above ARQ; see `lz_stream`). Bit 1 is the wider ARQ
+//! window and bit 3 is Reed-Solomon parity in the parallel work; this build
+//! ignores those bits. A byte with any of bits 4 to 7 set makes a CallReq
+//! or Train malformed. No byte (the form older builds send) means no
+//! capabilities. Older builds refuse a CallReq that carries the byte, so it
+//! is only sent when it says something (S31 = 1), and a 4 byte Train, so it
+//! only goes to a caller that offered (a new build). A build that knows
+//! `CAP_LZ` and not `CAP_LZ_STREAM` ignores bit 2 and answers with `CAP_LZ`
+//! alone, and the call stays on per frame LZ.
 //! TrainAck stays 3 bytes.
 //!
 //! Voice calls (`voice::call`): inside a voice call the Train carries a 4
@@ -37,8 +38,14 @@
 
 use crate::tier::Tier;
 
-/// Header flag on Data: the payload is LZ compressed (see `lz.rs`).
+/// Header flag on Data: the payload is per frame LZ (see `lz.rs`).
+///
+/// On a stream LZ call the same bit is not per frame compression. On
+/// Keepalive it asks the peer to reset its encoder. On Data it marks the
+/// frame that starts a fresh dictionary (see `lz_stream`).
 pub const FLAG_LZ: u8 = 4;
+/// Same bit as `FLAG_LZ`, used as the stream dictionary sync mark.
+pub const FLAG_LZ_SYNC: u8 = FLAG_LZ;
 /// Header flag on a ScanReq: a modem with voice names answers with a voice
 /// scan answer (type 15) in place of its normal ScanResp.
 pub const FLAG_VOICE: u8 = 8;
@@ -46,10 +53,12 @@ pub const FLAG_VOICE: u8 = 8;
 pub const CAP_LZ: u8 = 1;
 /// Capability bit: stream LZ above ARQ (`lz_stream`).
 ///
-/// Bit 3 of the capability byte. Bits 1 and 2 are left for other work (a
-/// larger burst or window, Reed-Solomon). Move this constant if bit 3 is
-/// taken; it is the only place the bit number is written.
-pub const CAP_LZ_STREAM: u8 = 0x08;
+/// Bit 2 of the capability byte (value 4). Bit 1 is the wider window and
+/// bit 3 is Reed-Solomon parity in the parallel work. This constant is the
+/// place to retarget the bit.
+pub const CAP_LZ_STREAM: u8 = 0x04;
+
+const _: () = assert!(CAP_LZ_STREAM == 0x04);
 /// Bits a capability byte may use.
 const CAP_MASK: u8 = 0x0F;
 

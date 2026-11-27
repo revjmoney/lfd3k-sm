@@ -558,6 +558,8 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
                 // Stream LZ (both ends offered it): the payload is a piece of
                 // the compressed stream, not one plain chunk and not a
                 // per frame LZ blob. Count how much plaintext it yields.
+                let (sum, comp) = fr.payload.split_last().expect("check byte");
+                assert_eq!(*sum, lfd3k_core::lz_stream::stream_sum(comp));
                 let mut dec = lfd3k_core::lz_stream::StreamDec::new();
                 let mut plain = [0u8; 512];
                 let mut got = 0;
@@ -565,10 +567,10 @@ fn data_mode_batch_fills_a_full_arq_chunk() {
                 loop {
                     match dec.pull(&mut plain[got..]) {
                         Ok(0) => {
-                            if off >= fr.payload.len() {
+                            if off >= comp.len() {
                                 break;
                             }
-                            let n = dec.feed(&fr.payload[off..]);
+                            let n = dec.feed(&comp[off..]);
                             assert!(n > 0);
                             off += n;
                         }

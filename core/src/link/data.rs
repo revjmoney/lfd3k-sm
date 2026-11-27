@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::lz;
+use crate::lz_stream::{self, HOLD};
 use crate::voice::frames::VSub;
 use crate::voice::plan::{talk_plan, TalkPlan};
 use crate::voice::sched::{self, Floor, Turn, VF_READY, VF_SLOTS};
@@ -96,7 +97,20 @@ impl Link {
                 // resent frame is stored as the same bytes and the
                 // dictionary does not move until those bytes are delivered.
                 if self.lz_stream {
-                    self.rx.on_data(h.seq, f.payload);
+                    // The last byte is a check of the compressed bytes. A
+                    // mismatch is the air's copy, not the sender's, so it is
+                    // not stored and not acked. ARQ sends the good frame again.
+                    let Some((&sum, data)) = f.payload.split_last() else {
+                        return;
+                    };
+                    if lz_stream::stream_sum(data) != sum {
+                        return;
+                    }
+                    if h.flags & frame::FLAG_LZ_SYNC != 0 {
+                        self.lz_sync_at = Some(h.seq);
+                    }
+                    self.rx.on_data(h.seq, data);
+                    self.lz_count(0, 1);
                     self.ack_owed = true;
                     self.data_rx = Some(now);
                     return;
@@ -120,9 +134,13 @@ impl Link {
             FrameType::Ack => {
                 if let [sack] = f.payload {
                     self.tx.on_ack(h.ack, *sack);
+                    self.clear_lz_sync_tx();
                 }
             }
             FrameType::Keepalive => {
+                if self.lz_stream && h.flags & frame::FLAG_LZ_SYNC != 0 {
+                    self.recover_tx_dict();
+                }
                 if h.flags & FLAG_PING != 0 {
                     self.ka_reply = true;
                 }
@@ -310,8 +328,26 @@ impl Link {
             // Stream mode already compressed these bytes in `push_data`.
             // Sending them again, on a resend, does not touch the dictionary.
             if self.lz_stream {
-                let n = mk(FrameType::Data, 0, seq, 0, raw, out, self.call_id)?;
-                self.note_stream_tx(raw.len());
+                let mut body = [0u8; CHUNK + 1];
+                let nraw = raw.len();
+                body.get_mut(..nraw)?.copy_from_slice(raw);
+                *body.get_mut(nraw)? = lz_stream::stream_sum(raw);
+                let flags = if self.lz_sync_tx == Some(seq) {
+                    frame::FLAG_LZ_SYNC
+                } else {
+                    0
+                };
+                let n = mk(
+                    FrameType::Data,
+                    flags,
+                    seq,
+                    0,
+                    body.get(..nraw + 1)?,
+                    out,
+                    self.call_id,
+                )?;
+                self.note_stream_tx(nraw);
+                self.lz_count(0, 1);
                 return Some((n, t, false, true));
             }
             // Per frame LZ: the staged chunk stays plain, and compressing
@@ -463,7 +499,14 @@ impl Link {
     /// Host bytes out of the compressed stream. Air bytes are counted as
     /// they are fed; plaintext is counted as it is produced.
     pub(super) fn stream_read(&mut self, out: &mut [u8]) -> usize {
-        if self.dec.errored() || out.is_empty() {
+        if out.is_empty() {
+            return 0;
+        }
+        if self.dec.errored() {
+            self.ask_lz_sync();
+        }
+        self.skip_until_sync();
+        if self.lz_sync_wait {
             return 0;
         }
         let mut n = 0;
@@ -491,10 +534,113 @@ impl Link {
                     n += w;
                     self.lz_count(w, 0);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    self.ask_lz_sync();
+                    break;
+                }
             }
         }
         n
+    }
+
+    /// The decoder saw a bad distance. Ask the peer to reset its encoder,
+    /// and do not feed any more compressed bytes until that fresh stream
+    /// arrives. Bytes already produced stay with the host.
+    fn ask_lz_sync(&mut self) {
+        if !self.lz_stream || self.lz_sync_wait {
+            return;
+        }
+        self.lz_sync_wait = true;
+        self.lz_sync_at = None;
+        self.lz_sync_asks = 1;
+        self.lz_sync_ask_at = self.last_rx;
+        self.dec.reset_call();
+        self.rx.discard_head();
+        self.send_lz_sync_ask();
+    }
+
+    pub(super) fn lz_sync_retry(&mut self, now: u32) {
+        if !self.lz_stream || !self.lz_sync_wait || self.lz_sync_at.is_some() {
+            return;
+        }
+        if self.lz_sync_asks >= 6 {
+            return;
+        }
+        let rto = rto_ms(self.tier);
+        if since(now, self.lz_sync_ask_at) < rto {
+            return;
+        }
+        self.lz_sync_asks = self.lz_sync_asks.saturating_add(1);
+        self.lz_sync_ask_at = now;
+        self.send_lz_sync_ask();
+    }
+
+    fn send_lz_sync_ask(&mut self) {
+        let p = self.ka_payload();
+        let t = self.tier;
+        self.enq(
+            t,
+            FrameType::Keepalive,
+            frame::FLAG_LZ_SYNC,
+            &p,
+            true,
+            false,
+        );
+    }
+
+    /// Drop compressed frames that belong to the dictionary that just failed.
+    /// The frame that carries `FLAG_LZ_SYNC` starts the fresh one.
+    fn skip_until_sync(&mut self) {
+        if !self.lz_sync_wait {
+            return;
+        }
+        while let Some(seq) = self.rx.head_seq() {
+            if self.lz_sync_at == Some(seq) {
+                self.dec.reset_call();
+                self.lz_sync_wait = false;
+                break;
+            }
+            if let Some(at) = self.lz_sync_at {
+                let before = at.wrapping_sub(seq);
+                if before == 0 || before >= 64 {
+                    break;
+                }
+            }
+            self.rx.discard_head();
+        }
+    }
+
+    /// Peer says its decoder failed. Reset our encoder and mark the next
+    /// chunk so the peer can tell where the fresh dictionary starts.
+    fn recover_tx_dict(&mut self) {
+        if self.lz_sync_tx.is_some() {
+            return;
+        }
+        let mut saved = [0u8; HOLD];
+        let n = self.enc.copy_hold(&mut saved);
+        self.enc.reset_call();
+        self.cred_raw = 0;
+        self.cred_comp = 0;
+        self.tx.seal();
+        let seq = self.tx.next_seq();
+        if n == 0 {
+            self.enc.request_reset();
+        } else {
+            let _ = self.enc.push(&saved[..n]);
+            self.enc.flush_tail();
+        }
+        self.stream_drain();
+        self.lz_sync_tx = Some(seq);
+    }
+
+    pub(super) fn clear_lz_sync_tx(&mut self) {
+        let Some(s) = self.lz_sync_tx else {
+            return;
+        };
+        let d = self.tx.base().wrapping_sub(s);
+        if d > 0 && d < 64 {
+            self.lz_sync_tx = None;
+        }
     }
 
     /// Attribute this transmission to the ratio. Bytes sent for the first

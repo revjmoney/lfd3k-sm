@@ -26,8 +26,10 @@
 //!
 //! When both ends set `CAP_LZ_STREAM`, host bytes are compressed before they
 //! enter ArqTx (`lz_stream`). A resend is those same bytes. The receiver
-//! decodes only the in order stream from ArqRx. Data frames do not carry
-//! `FLAG_LZ`. The dictionary is reset on retrain and on resync by a RESET
+//! decodes only the in order stream from ArqRx. A normal Data frame does not
+//! carry `FLAG_LZ`. That bit, on this call, asks for a dictionary reset or
+//! marks the frame that starts the fresh one. The dictionary is reset on
+//! retrain and on resync by a RESET
 //! token in that stream, and on link loss by dropping the history (the
 //! receiver keeps it until bytes already in ARQ have been delivered).
 //!
@@ -319,6 +321,15 @@ pub struct Link {
     cred_comp: u32,
     enc: StreamEnc,
     dec: StreamDec,
+    /// Decoder failed: drop compressed bytes until the peer's sync frame.
+    lz_sync_wait: bool,
+    /// Sequence of the Data frame that starts the fresh dictionary.
+    lz_sync_at: Option<u8>,
+    /// Sequence of the chunk we send after the peer asks us to reset.
+    lz_sync_tx: Option<u8>,
+    /// When the last sync request went out, and how many we have sent.
+    lz_sync_ask_at: u32,
+    lz_sync_asks: u8,
     /// Data payload bytes of this (or the last) call, both directions:
     /// host bytes before compression and bytes on the air.
     lz_raw: u32,
@@ -412,6 +423,11 @@ impl Link {
             cred_comp: 0,
             enc: StreamEnc::new(),
             dec: StreamDec::new(),
+            lz_sync_wait: false,
+            lz_sync_at: None,
+            lz_sync_tx: None,
+            lz_sync_ask_at: 0,
+            lz_sync_asks: 0,
             lz_raw: 0,
             lz_air: 0,
             moved: 0,
@@ -492,6 +508,11 @@ impl Link {
         self.cred_comp = 0;
         self.enc.reset_call();
         self.dec.reset_call();
+        self.lz_sync_wait = false;
+        self.lz_sync_at = None;
+        self.lz_sync_tx = None;
+        self.lz_sync_ask_at = 0;
+        self.lz_sync_asks = 0;
         self.lz_raw = 0;
         self.lz_air = 0;
         self.moved = 0;
@@ -814,6 +835,11 @@ impl Link {
         self.cred_comp = 0;
         self.enc.reset_call();
         self.dec.reset_call();
+        self.lz_sync_wait = false;
+        self.lz_sync_at = None;
+        self.lz_sync_tx = None;
+        self.lz_sync_ask_at = 0;
+        self.lz_sync_asks = 0;
         self.lz_raw = 0;
         self.lz_air = 0;
         self.staged = None;
@@ -845,6 +871,10 @@ impl Link {
             self.enc.reset_call();
             self.stream_dead = true;
         }
+        self.lz_sync_wait = false;
+        self.lz_sync_at = None;
+        self.lz_sync_tx = None;
+        self.lz_sync_asks = 0;
     }
 
     fn fail(&mut self, e: Event, bye: bool) {

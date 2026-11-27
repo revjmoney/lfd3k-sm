@@ -60,6 +60,14 @@
 //! * Link loss: the sender drops its history at once. The receiver keeps
 //!   its history until it has delivered the bytes already in ARQ, then
 //!   clears it. The next call starts from the preset again.
+//!
+//! Each stream Data frame ends with one check byte ([`stream_sum`] of the
+//! compressed bytes). The sender still holds the good copy, so a mismatch
+//! is not acknowledged and ARQ sends that frame again. The bad copy never
+//! reaches the dictionary. If the decoder still reports a bad distance, the
+//! receiver asks the peer to reset (Keepalive with `FLAG_LZ_SYNC`) and skips
+//! compressed bytes until the Data frame that carries the same flag. The
+//! call continues instead of stalling.
 
 use crate::lz::{LzError, PRESET};
 
@@ -80,11 +88,22 @@ const RESET: u8 = 0x7F;
 const POS_RESET: u32 = 60_000;
 /// Candidates tried at one position. Bounds the time per byte.
 const MAX_CHAIN: usize = 64;
+
+/// One byte mixed into each stream Data frame, after the compressed bytes.
+/// A mismatch means the copy on the air is not the copy the sender still
+/// holds, so the frame is not acknowledged and ARQ sends the good one again.
+pub fn stream_sum(data: &[u8]) -> u8 {
+    let mut s = 0u8;
+    for &b in data {
+        s = s.wrapping_mul(33).wrapping_add(b);
+    }
+    s
+}
 /// Plaintext held across `push` calls. The host feeds one byte at a time
 /// (the `+++` escape scan), so a match has to be able to see earlier bytes
 /// of the same burst. Full, this is one batch: compress it, keep two bytes
 /// so the next byte can still extend a match. `flush_tail` sends the rest.
-const HOLD: usize = 64;
+pub(crate) const HOLD: usize = 64;
 
 const _: () = assert!(PRESET.len() < WINDOW);
 const _: () = assert!(PRESET.len() < NIL as usize);
@@ -251,6 +270,15 @@ impl StreamEnc {
     /// Compressed bytes waiting to be handed to ARQ.
     pub fn pending(&self) -> usize {
         usize::from(self.pend_len.saturating_sub(self.pend_at))
+    }
+
+    /// Plaintext still in the lookahead hold, not yet turned into tokens.
+    pub(crate) fn copy_hold(&self, out: &mut [u8]) -> usize {
+        let n = usize::from(self.hold_len).min(out.len());
+        if let (Some(dst), Some(src)) = (out.get_mut(..n), self.hold.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        n
     }
 
     /// Take `input` into the hold and compress while the hold is full.

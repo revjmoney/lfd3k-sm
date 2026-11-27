@@ -11,6 +11,8 @@ struct TxSlot {
     len: u16,
     sent: bool,
     acked: bool,
+    /// Do not append more bytes. The slot is still unsent until it goes out.
+    closed: bool,
     last_ms: u32,
 }
 
@@ -18,6 +20,7 @@ const EMPTY_TX: TxSlot = TxSlot {
     len: 0,
     sent: false,
     acked: false,
+    closed: false,
     last_ms: 0,
 };
 
@@ -84,7 +87,7 @@ impl ArqTx {
             if self.count > 0 {
                 let r = self.ring(self.count - 1);
                 if let Some(s) = self.slots.get(r) {
-                    if !s.sent && (s.len as usize) < max {
+                    if !s.sent && !s.closed && (s.len as usize) < max {
                         idx = Some(r);
                     }
                 }
@@ -213,6 +216,31 @@ impl ArqTx {
     pub fn reset(&mut self) {
         *self = Self::new();
     }
+
+    /// Sequence number of the oldest unacked chunk.
+    pub fn base(&self) -> u8 {
+        self.base
+    }
+
+    /// Sequence number the next new chunk will get.
+    pub fn next_seq(&self) -> u8 {
+        self.base.wrapping_add(self.count as u8)
+    }
+
+    /// The newest unsent chunk will not take more bytes. A later `push`
+    /// starts a new chunk, so a dictionary reset is not appended to bytes
+    /// that were compressed with the old one.
+    pub fn seal(&mut self) {
+        if self.count == 0 {
+            return;
+        }
+        let r = self.ring(self.count - 1);
+        if let Some(s) = self.slots.get_mut(r) {
+            if !s.sent && s.len > 0 {
+                s.closed = true;
+            }
+        }
+    }
 }
 
 pub struct ArqRx {
@@ -282,6 +310,29 @@ impl ArqRx {
     /// or finish a frame it already started).
     pub fn has_ready(&self) -> bool {
         self.has(0)
+    }
+
+    /// Sequence number of the frame `read` would take from, if one is here.
+    pub fn head_seq(&self) -> Option<u8> {
+        if self.has(0) {
+            Some(self.base)
+        } else {
+            None
+        }
+    }
+
+    /// Drop the in order frame, including a tail already partly read.
+    pub fn discard_head(&mut self) {
+        if !self.has(0) {
+            return;
+        }
+        let h = self.head;
+        if let Some(x) = self.have.get_mut(h) {
+            *x = false;
+        }
+        self.head = (h + 1) % WINDOW;
+        self.base = self.base.wrapping_add(1);
+        self.read_off = 0;
     }
 
     /// (cumulative next expected seq, sack bitmap) where bit i means
