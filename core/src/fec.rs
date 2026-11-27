@@ -189,9 +189,9 @@ const _: () = assert!(core::mem::size_of::<Group>() <= 224);
 mod tests {
     use super::*;
 
-    fn pattern(len: usize, salt: usize) -> Vec<u8> {
+    fn pattern(len: usize, which: usize) -> Vec<u8> {
         (0..len)
-            .map(|i| ((i * 31 + salt * 17) % 251) as u8)
+            .map(|i| ((i * 31 + which * 17) % 251) as u8)
             .collect()
     }
 
