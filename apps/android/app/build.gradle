@@ -1,0 +1,81 @@
+plugins {
+    id "com.android.application"
+}
+
+def repoRoot = rootProject.projectDir.parentFile.parentFile
+
+android {
+    namespace "com.jmscnc.lfd3k.voice"
+    compileSdk 34
+    ndkVersion "26.3.11579264"
+
+    defaultConfig {
+        applicationId "com.jmscnc.lfd3k.voice"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.5.0"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    sourceSets {
+        main {
+            // The PC app already vendors these OFL fonts. Package them, do not copy the bytes.
+            assets.srcDirs += ["${rootProject.projectDir}/../pc/assets/fonts"]
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+def cargoAndroid = tasks.register("cargoAndroid", Exec) {
+    workingDir repoRoot
+    def ndkDir = android.ndkDirectory
+    environment "ANDROID_NDK_HOME", ndkDir.absolutePath
+    environment "ANDROID_NDK_ROOT", ndkDir.absolutePath
+    environment "ANDROID_ABI", "arm64-v8a"
+    environment "ANDROID_PLATFORM", "26"
+    def toolchain = new File(ndkDir, "build/cmake/android.toolchain.cmake")
+    environment "CMAKE_TOOLCHAIN_FILE", toolchain.absolutePath
+    def wrap = new File(rootProject.projectDir, "scripts/cmake-android.sh")
+    environment "CMAKE", wrap.absolutePath
+    environment "CARGO_BUILD_JOBS", "2"
+    environment "CMAKE_BUILD_PARALLEL_LEVEL", "2"
+    commandLine "cargo", "ndk", "-t", "arm64-v8a", "-P", "26",
+            "build", "--release", "--locked", "-p", "lfd3k-voice-android"
+}
+
+tasks.configureEach { task ->
+    def n = task.name
+    if (n.startsWith("configureCMake") || n.startsWith("buildCMake") || n.startsWith("externalNativeBuild")) {
+        task.dependsOn cargoAndroid
+    }
+}

@@ -1451,6 +1451,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lfd3k-voice-android"
+version = "0.5.0"
+dependencies = [
+ "lfd3k-core 0.5.0",
+ "lfd3k-voice",
+ "mdns-sd",
+ "zeroize",
+]
+
+[[package]]
 name = "lfd3k-voice-pc"
 version = "0.5.0"
 dependencies = [

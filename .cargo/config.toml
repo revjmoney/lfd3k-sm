@@ -1,0 +1,4 @@
+# The phone engine is a static library the NDK links. Aborting on panic
+# keeps that link free of Rust's unwind runtime. Host builds are unchanged.
+[target.aarch64-linux-android]
+rustflags = ["-C", "panic=abort"]
