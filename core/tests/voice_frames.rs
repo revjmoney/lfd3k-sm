@@ -20,7 +20,8 @@ use lfd3k_core::discovery::{
     beacon_payload, scan_req_payload, scan_resp_payload, Beacon, ScanReq, ScanResp,
 };
 use lfd3k_core::frame::{
-    self, call_req_payload, FrameError, FrameType, Header, CAP_LZ, FLAG_VOICE, MAX_PAYLOAD,
+    self, call_req_payload, FrameError, FrameType, Header, CAP_BULK, CAP_LZ, FLAG_VOICE,
+    MAX_PAYLOAD,
 };
 use lfd3k_core::lz::{compress, decompress, LzError};
 use lfd3k_core::voice::call::{
@@ -461,8 +462,35 @@ fn v223_lra_link_annex_c_frames() {
 }
 
 #[test]
+fn v223_lra_link_bulk_frames() {
+    // CAP_BULK is bit 1 (0x02). With CAP_LZ the offer byte is 0x03.
+    assert_eq!(CAP_LZ | CAP_BULK, 0x03);
+    let mut p = [0u8; 64];
+    let n = call_req_payload("CALLER", "AXIS", &mut p).unwrap();
+    let mut both = p[..n].to_vec();
+    both.push(CAP_LZ | CAP_BULK);
+    assert_eq!(
+        frame(FrameType::CallReq, 0, 0x2B, 0, 0, &both),
+        hex("D1 10 2B 00 00 06 43 41 4C 4C 45 52 04 41 58 49 53 03")
+    );
+    let ack = frame(FrameType::CallAck, 0, 0x2B, 0, 0, &[CAP_LZ | CAP_BULK]);
+    assert_eq!(ack, hex("D1 20 2B 00 00 03"));
+    let train = frame(FrameType::Train, 0, 0x2B, 0, 0, &[0x07, 0x0D, 0x00, 0x03]);
+    assert_eq!(train, hex("D1 40 2B 00 00 07 0D 00 03"));
+    // Next expected 4, SACK 0x05 (seq 5 and 7) in the low byte, bit 8
+    // (seq 13) in the high byte. Bit 15 stays clear.
+    let sack = frame(FrameType::Ack, 0, 0x2B, 0, 4, &[0x05, 0x01]);
+    assert_eq!(sack, hex("D1 70 2B 00 04 05 01"));
+    assert!(frame::decode(&sack).is_ok());
+    assert_eq!(
+        frame::decode(&hex("D1 70 2B 00 04 05 01 00")).err(),
+        Some(FrameError::BadPayload)
+    );
+}
+
+#[test]
 fn v223_lra_link_annex_c4_frames_to_drop() {
-    let rows: [(&str, FrameError); 10] = [
+    let rows: [(&str, FrameError); 11] = [
         ("7E 10 2B 00 00", FrameError::Foreign),
         ("D1 10 2B 00", FrameError::TooShort),
         ("D1 00 2B 00 00", FrameError::BadType),
@@ -475,6 +503,7 @@ fn v223_lra_link_annex_c4_frames_to_drop() {
             FrameError::BadPayload,
         ),
         ("D1 70 2B 00 04", FrameError::BadPayload),
+        ("D1 70 2B 00 04 05 01 00", FrameError::BadPayload),
         (
             "D1 C0 00 00 00 04 41 58 49 53 01 00",
             FrameError::BadPayload,

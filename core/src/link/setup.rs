@@ -15,7 +15,7 @@ impl Link {
     }
 
     /// Start a call. False if busy or a name is invalid. The CallReq offers
-    /// compression (capability byte) when S31 is 1.
+    /// compression and bulk ARQ (one capability byte) when S31 is 1.
     pub fn dial(&mut self, me: &str, callee: &str, sregs: &SRegs, now: u32) -> bool {
         if self.state != State::Idle {
             return false;
@@ -24,13 +24,13 @@ impl Link {
         let Ok(mut plen) = frame::call_req_payload(me, callee, &mut p) else {
             return false;
         };
-        let offer = offer_caps(sregs);
-        if offer != 0 {
+        let caps = offered_caps(sregs);
+        if caps != 0 {
             // Two 16 byte names plus the byte still fit a QBUF frame.
             let Some(c) = p.get_mut(plen) else {
                 return false;
             };
-            *c = offer;
+            *c = caps;
             plen += 1;
         }
         let call_id = (now as u8) | 1;
@@ -47,7 +47,8 @@ impl Link {
         self.callreq_len = n as u8;
         self.call_id = call_id;
         self.reset_call(Role::Caller, now);
-        self.lz_mine = offer != 0;
+        self.lz_mine = caps & frame::CAP_LZ != 0;
+        self.bulk_mine = caps & frame::CAP_BULK != 0;
         self.state = State::Dialing;
         self.send_callreq(now);
         true
@@ -74,12 +75,16 @@ impl Link {
         let snr = self.my_snr;
         let peer_lz = self.lz_peer;
         let peer_stream = self.stream_peer;
+        let peer_bulk = self.bulk_peer;
+        let mine = offered_caps(sregs);
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
         self.lz_peer = peer_lz;
         self.stream_peer = peer_stream;
-        self.lz_mine = lz_wanted(sregs);
+        self.bulk_peer = peer_bulk;
+        self.lz_mine = mine & frame::CAP_LZ != 0;
+        self.bulk_mine = mine & frame::CAP_BULK != 0;
         self.own_cap = cap_tier(sregs);
         self.cap = self.own_cap;
         self.state = State::AwaitTierSet;
@@ -89,9 +94,10 @@ impl Link {
 
     pub(super) fn send_train(&mut self) {
         let s = self.my_snr.to_le_bytes();
-        // CallAck and Train carry the agreed bits (per frame LZ, stream LZ,
-        // or both). Without any agreed bit they are the old forms (empty
-        // CallAck, 3 byte Train).
+        // CallAck and Train carry the agreed bits (each bit only when both
+        // offered, so a caller that offered nothing gets the old empty
+        // CallAck and the 3 byte Train). A non-zero byte means the caller
+        // offered and can take the extra Train byte.
         let agreed = self.agreed_caps();
         let p = [self.cap.index(), s[0], s[1], agreed];
         let (caps, train): (&[u8], &[u8]) = if agreed != 0 {
@@ -179,9 +185,9 @@ impl Link {
         self.need_listen = true;
         self.turn = true;
         self.burst = 0;
+        self.burst_cap = BURST_MAX;
         // Stream LZ wins when both offered it. Per frame LZ remains when
-        // the peer only agreed to CAP_LZ. Voice calls do not use the stream:
-        // their capability byte is CAP_LZ alone.
+        // the peer only agreed to CAP_LZ. Voice calls do not use the stream.
         self.lz_stream = self.lz_mine && self.stream_peer && !self.voice.on;
         self.lz = self.lz_mine && (self.lz_peer || self.stream_peer);
         if self.lz_stream {
@@ -191,6 +197,16 @@ impl Link {
             self.cred_comp = 0;
             self.stream_dead = false;
         }
+        // Voice slot frames carry one SACK byte, so a voice call stays at
+        // the classic window even if a data capability bit was copied across.
+        self.bulk = self.bulk_mine && self.bulk_peer && !self.voice.on;
+        let slots = if self.bulk {
+            crate::arq::WINDOW_BULK
+        } else {
+            crate::arq::WINDOW
+        };
+        self.tx.set_limit(slots);
+        self.rx.set_limit(slots);
         self.emit(Event::Connect(self.tier));
     }
 

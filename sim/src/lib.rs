@@ -116,6 +116,9 @@ pub struct SimChannel {
     pub seed: u64,
     /// Called once per frame at its start: `(send time ms, bytes)`; true drops it.
     pub drop: Option<fn(u32, &[u8]) -> bool>,
+    /// Skip the SNR loss draw. Collisions, a deaf receiver and `drop` still
+    /// apply. Throughput figures use this so the number is the protocol.
+    pub no_snr_loss: bool,
 }
 
 impl SimChannel {
@@ -125,6 +128,7 @@ impl SimChannel {
             profile: SnrProfile::Constant(snr_db.saturating_mul(4)),
             seed,
             drop: None,
+            no_snr_loss: false,
         }
     }
 }
@@ -963,7 +967,7 @@ impl Harness {
             if rx.alive && outcome == Outcome::Pending {
                 let snr = self.snr_x4_now();
                 let margin = snr.saturating_sub(rx.tier.snr_floor_x4());
-                let lost = self.rng.chance(loss_x1000(margin));
+                let lost = !self.chan.no_snr_loss && self.rng.chance(loss_x1000(margin));
                 outcome = if rx.hooked {
                     Outcome::Dropped
                 } else if lost {

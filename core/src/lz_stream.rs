@@ -209,6 +209,7 @@ impl StreamEnc {
         self.reset_owed = false;
         self.raw_total = 0;
         self.comp_total = 0;
+        self.hold_len = 0;
         self.reseed_const();
     }
 
@@ -226,7 +227,9 @@ impl StreamEnc {
         self.pos = load_preset(&mut self.hist);
         self.unhashed = 0;
         self.lit_pending = 0;
-        self.hold_len = 0;
+        // `hold` is plaintext not yet compressed. A RESET keeps it so those
+        // bytes are emitted against the fresh history instead of being
+        // dropped. `reset_call` clears `hold_len` before it gets here.
         let mut p = 0;
         while p + 2 < PRESET.len() {
             let h = hash(PRESET[p], PRESET[p + 1], PRESET[p + 2]);
@@ -950,6 +953,50 @@ mod tests {
             comp.extend_from_slice(&buf[..k]);
         }
         assert_eq!(decode_all(&comp).unwrap(), s);
+    }
+
+    #[test]
+    fn reset_keeps_plaintext_still_in_the_hold() {
+        // Fill the pending buffer and stop, so a reset runs while accepted
+        // plaintext is still in the lookahead. Those bytes must come back.
+        let data: Vec<u8> = (0..600u16)
+            .map(|i| (i.wrapping_mul(13).wrapping_add(9)) as u8)
+            .collect();
+        let mut enc = StreamEnc::new();
+        let mut off = 0;
+        while off < data.len() {
+            let n = enc.push(&data[off..]);
+            if n == 0 {
+                break;
+            }
+            off += n;
+        }
+        assert!(off < data.len(), "pending buffer never filled");
+        assert!(enc.hold_len > 0, "nothing left in the lookahead");
+        enc.request_reset();
+        let mut comp = Vec::new();
+        let mut buf = [0u8; 64];
+        let drain_all = |enc: &mut StreamEnc, comp: &mut Vec<u8>, buf: &mut [u8]| loop {
+            enc.pump();
+            let k = enc.drain(buf);
+            if k == 0 {
+                break;
+            }
+            comp.extend_from_slice(&buf[..k]);
+        };
+        drain_all(&mut enc, &mut comp, &mut buf);
+        enc.flush_tail();
+        drain_all(&mut enc, &mut comp, &mut buf);
+        while off < data.len() {
+            let n = enc.push(&data[off..]);
+            assert!(n > 0, "no progress at {off}");
+            off += n;
+            drain_all(&mut enc, &mut comp, &mut buf);
+        }
+        enc.flush_tail();
+        enc.pump();
+        drain_all(&mut enc, &mut comp, &mut buf);
+        assert_eq!(decode_all(&comp).unwrap(), data);
     }
 
     #[test]

@@ -157,6 +157,8 @@ struct Net {
     host: Vec<Vec<u8>>,
     /// Every frame sent: (start ms, station, sf, bytes).
     log: Vec<(u32, usize, u8, Vec<u8>)>,
+    /// Data frames still to drop on delivery (loss tests). 0 in every other test.
+    skip_data: u32,
     /// Pending bytes for the new station's voice session 1, and what came back.
     vin: Vec<u8>,
     vout: Vec<u8>,
@@ -171,6 +173,7 @@ impl Net {
             air: Vec::new(),
             host: vec![Vec::new(); n],
             log: Vec::new(),
+            skip_data: 0,
             vin: Vec::new(),
             vout: Vec::new(),
         };
@@ -234,6 +237,11 @@ impl Net {
             .partition(|f| f.end_us <= now_us);
         self.air = rest;
         for f in due {
+            let data = f.bytes.get(1).is_some_and(|b| b >> 4 == 6);
+            if data && self.skip_data > 0 {
+                self.skip_data -= 1;
+                continue;
+            }
             for &k in &f.to {
                 if k != f.from && self.st[k].rad().listen_sf == Some(f.sf) {
                     self.st[k].rx(f.sf, &f.bytes, now);
@@ -290,6 +298,13 @@ impl Net {
         let now = self.now;
         self.st[i].host_in(s.as_bytes(), now);
         self.after(i);
+    }
+
+    fn feed(&mut self, i: usize, data: &[u8]) -> usize {
+        let now = self.now;
+        let n = self.st[i].host_in(data, now);
+        self.after(i);
+        n
     }
 
     fn text(&self, i: usize) -> String {
@@ -514,4 +529,120 @@ fn old_new_data_call_works() {
             .iter()
             .all(|e| e.3.get(1).map(|b| b >> 4) != Some(15)));
     }
+}
+
+fn feed_all(net: &mut Net, i: usize, data: &[u8]) {
+    let mut off = 0;
+    let mut idle = 0u32;
+    while off < data.len() {
+        let n = net.feed(i, &data[off..]);
+        off += n;
+        idle = if n == 0 { idle + 1 } else { 0 };
+        assert!(idle < 30_000, "took nothing for 30 s at {}", net.now);
+        net.step();
+    }
+}
+
+fn frame_ty(bytes: &[u8]) -> u8 {
+    bytes.get(1).map_or(0, |b| b >> 4)
+}
+
+/// Pattern with no CR, so it cannot look like a result code.
+fn letters(n: usize) -> Vec<u8> {
+    (0..n).map(|i| b'a' + (i % 26) as u8).collect()
+}
+
+#[test]
+fn old_peer_stays_on_classic_acks_when_new_offers_bulk() {
+    // 0x07 is CAP_LZ | CAP_BULK | CAP_LZ_STREAM. The old build ignores
+    // bits it does not implement and agrees only CAP_LZ (0x01). Acks stay
+    // one SACK byte.
+    let payload = letters(1200);
+    for new_dials in [true, false] {
+        let mut net = Net::new(vec![St::new("ALPHA"), St::old("OLDIE", 1)]);
+        if !new_dials {
+            net.type_in(0, "ATS0=1\r");
+        }
+        let (a, b, name) = if new_dials {
+            (0usize, 1usize, "OLDIE")
+        } else {
+            (1, 0, "ALPHA")
+        };
+        net.type_in(a, &format!("ATDT {name}\r"));
+        let up = net.run_until(30_000, |n| {
+            n.text(a).contains("CONNECT") && n.text(b).contains("CONNECT")
+        });
+        assert!(up, "connected: {:?} / {:?}", net.text(a), net.text(b));
+        let reqs: Vec<&[u8]> = net
+            .log
+            .iter()
+            .filter(|e| e.1 == a && frame_ty(&e.3) == 1)
+            .map(|e| e.3.as_slice())
+            .collect();
+        assert!(!reqs.is_empty(), "no CallReq");
+        let want_cap = if new_dials { 0x07 } else { 0x01 };
+        assert_eq!(reqs[0].last().copied(), Some(want_cap), "CallReq caps");
+        let trains: Vec<&[u8]> = net
+            .log
+            .iter()
+            .filter(|e| e.1 == b && frame_ty(&e.3) == 4)
+            .map(|e| e.3.as_slice())
+            .collect();
+        assert!(
+            trains
+                .iter()
+                .any(|t| t.len() == 9 && t.last() == Some(&0x01)),
+            "Train should agree CAP_LZ only, got {trains:?}"
+        );
+        net.host[b].clear();
+        feed_all(&mut net, a, &payload);
+        let got = net.run_until(30_000, |n| {
+            n.host[b].windows(payload.len()).any(|w| w == payload)
+        });
+        assert!(got, "only {} bytes on the far host", net.host[b].len());
+        let acks: Vec<usize> = net
+            .log
+            .iter()
+            .filter(|e| frame_ty(&e.3) == 7)
+            .map(|e| e.3.len())
+            .collect();
+        assert!(!acks.is_empty(), "no Ack");
+        assert!(acks.iter().all(|&n| n == 6), "ack lens {acks:?}");
+    }
+}
+
+#[test]
+fn old_peer_retransmits_when_one_data_frame_is_lost() {
+    let payload = letters(800);
+    let mut net = Net::new(vec![St::new("ALPHA"), St::old("OLDIE", 1)]);
+    net.type_in(0, "ATDT OLDIE\r");
+    assert!(net.run_until(30_000, |n| {
+        n.text(0).contains("CONNECT") && n.text(1).contains("CONNECT")
+    }));
+    net.skip_data = 1;
+    net.host[1].clear();
+    let mark = net.log.len();
+    feed_all(&mut net, 0, &payload);
+    let got = net.run_until(30_000, |n| {
+        n.host[1].windows(payload.len()).any(|w| w == payload)
+    });
+    assert!(
+        got,
+        "lost frame was not filled in, host {}",
+        net.host[1].len()
+    );
+    let seqs: Vec<u8> = net.log[mark..]
+        .iter()
+        .filter(|e| e.1 == 0 && frame_ty(&e.3) == 6)
+        .map(|e| e.3.get(3).copied().unwrap_or(0))
+        .collect();
+    let mut seen = [0u8; 256];
+    let mut dup = false;
+    for s in seqs {
+        if seen[usize::from(s)] > 0 {
+            dup = true;
+        }
+        seen[usize::from(s)] = seen[usize::from(s)].saturating_add(1);
+    }
+    assert!(dup, "expected a retransmit");
 }

@@ -10,7 +10,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::{Mutex, MutexGuard};
 
-use lfd3k_core::arq::{CHUNK, WINDOW};
+use lfd3k_core::arq::{CHUNK, WINDOW_BULK};
 use lfd3k_core::frame::{decode, FrameType};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 use lfd3k_ffi::panic::{format_note, NOTE_LEN};
@@ -475,15 +475,15 @@ fn host_in_partial_take_mid_batch() {
     let st = status(rig.now);
     assert_eq!(st.tier, 7, "SF5 at 12 dB");
 
-    // 3000 bytes with CRs inside, offered in one call at one instant. The
-    // send window holds at most WINDOW * CHUNK bytes (a little less when the
-    // first slot is sealed short), so the call takes about that many and
-    // reports the rest as not consumed.
-    let data = pattern(3_000, 9);
+    // 5000 bytes with CRs inside, offered in one call at one instant. Both
+    // peers offer CAP_BULK, so ARQ holds at most WINDOW_BULK * CHUNK
+    // compressed bytes. Stream LZ may also be holding a 64 byte lookahead
+    // and a 256 byte pending buffer that are not slots yet.
+    let data = pattern(5_000, 9);
     assert!(data.contains(&b'\r'), "the batch has CRs in it");
     let took = rig.ffi_in(&data);
     assert!(
-        took > (WINDOW - 1) * CHUNK && took <= WINDOW * CHUNK,
+        took > (WINDOW_BULK - 1) * CHUNK && took <= WINDOW_BULK * CHUNK + 64 + 256,
         "took {took}"
     );
     assert!(took < data.len());

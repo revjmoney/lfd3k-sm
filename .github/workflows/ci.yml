@@ -22,6 +22,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: System packages for the PC voice app (eframe) and libopus
         run: |
+          # ubuntu-latest (26.04) ships a Microsoft apt source that answers
+          # 403 and is no longer signed, which fails apt-get update.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+            /etc/apt/sources.list.d/microsoft-prod.sources \
+            /etc/apt/sources.list.d/microsoft-prod.list.save
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
       - name: Toolchain
