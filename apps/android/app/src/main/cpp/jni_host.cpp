@@ -153,3 +153,56 @@ void jni_keep_screen(android_app *app, bool on) {
     if (id) env->CallVoidMethod(obj, id, on ? JNI_TRUE : JNI_FALSE);
     clear_exc(env);
 }
+
+int jni_density_dpi(android_app *app) {
+    JNIEnv *env = env_of(app);
+    if (!env) return 160;
+    jobject obj = app->activity->clazz;
+    jmethodID id = method(env, obj, "densityDpi", "()I");
+    if (!id) return 160;
+    jint v = env->CallIntMethod(obj, id);
+    clear_exc(env);
+    return v >= 120 && v < 2000 ? v : 160;
+}
+
+float jni_font_scale(android_app *app) {
+    JNIEnv *env = env_of(app);
+    if (!env) return 1.f;
+    jobject obj = app->activity->clazz;
+    jmethodID id = method(env, obj, "fontScale", "()F");
+    if (!id) return 1.f;
+    jfloat v = env->CallFloatMethod(obj, id);
+    clear_exc(env);
+    if (v < 0.5f || v > 3.f) return 1.f;
+    return v;
+}
+
+void jni_insets(android_app *app, int out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    JNIEnv *env = env_of(app);
+    if (!env) return;
+    jobject obj = app->activity->clazz;
+    jmethodID id = method(env, obj, "windowInsets", "()[I");
+    if (!id) return;
+    jintArray arr = (jintArray)env->CallObjectMethod(obj, id);
+    if (env->ExceptionCheck() || !arr) {
+        clear_exc(env);
+        return;
+    }
+    if (env->GetArrayLength(arr) >= 4) {
+        jint tmp[4] = {};
+        env->GetIntArrayRegion(arr, 0, 4, tmp);
+        for (int i = 0; i < 4; i++) out[i] = tmp[i] < 0 ? 0 : tmp[i];
+    }
+    env->DeleteLocalRef(arr);
+    clear_exc(env);
+}
+
+void jni_request_insets(android_app *app) {
+    JNIEnv *env = env_of(app);
+    if (!env) return;
+    jobject obj = app->activity->clazz;
+    jmethodID id = method(env, obj, "requestInsets", "()V");
+    if (id) env->CallVoidMethod(obj, id);
+    clear_exc(env);
+}

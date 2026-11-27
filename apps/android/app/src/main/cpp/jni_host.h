@@ -14,3 +14,7 @@ void jni_request_audio(android_app *app);
 std::string jni_files(android_app *app);
 std::string jni_extra(android_app *app, const char *key);
 void jni_keep_screen(android_app *app, bool on);
+int jni_density_dpi(android_app *app);
+float jni_font_scale(android_app *app);
+void jni_insets(android_app *app, int out[4]);
+void jni_request_insets(android_app *app);

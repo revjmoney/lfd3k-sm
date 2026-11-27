@@ -10,7 +10,9 @@ Ham mode does not exist yet, so the scrambler is always on. There is no echo can
 
 The engine crate's host tests were run on Linux x86_64 (`cargo test -p lfd3k-voice-android`): the `AT+VOICE` answer parser, the Wi-Fi read-only AT filter, the tier cap save order, and one simulated modem that answers `ATI`.
 
-`./gradlew :app:assembleDebug` was run on the same machine and produced `app-debug.apk` (arm64-v8a, about 6 MB, `liblfd3kvoice.so` linked against the platform EGL, GLESv3, and AAudio libraries). That APK was not installed on a phone, a tablet, or an emulator. USB, Wi-Fi TCP, mDNS find, the microphone, and the speaker were not exercised on hardware. Nothing below that needs a real modem or a real phone should be read as a bench result.
+A host layout check (`apps/android/shot`, OpenGL under Xvfb, the same `ui.cpp` as the phone) drew the connect, calls, directory, and settings screens at 360x800, 412x915, and 1080x2400 at 480 dpi (3x), plus landscape 800x360 and 2400x1080 at 480 dpi, and one 1080x2400 frame with a top and bottom inset. It fails if a row is wider than the window or a visible vertex sits outside the display. Those PNGs are in this folder. They are not photographs of a phone.
+
+`./gradlew :app:assembleDebug` was run on the same machine and produced `app-debug.apk` (arm64-v8a, about 6 MB, `liblfd3kvoice.so` linked against the platform EGL, GLESv3, and AAudio libraries). That APK was not installed on a phone, a tablet, or an emulator for this layout pass. An owner had already run an earlier build on a phone and reported text and controls running off the right edge. USB, Wi-Fi TCP, mDNS find, the microphone, and the speaker were not exercised again here. Nothing below that needs a real modem or a real phone should be read as a bench result.
 
 ## How it is built
 
@@ -50,13 +52,47 @@ adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
 
 CI does this on every pull request and uploads the APK as the artifact `lfd3k-voice-android-debug`.
 
+The layout PNGs above are regenerated from the repo root with GLFW and Xvfb (the binary is not committed):
+
+```text
+sudo apt-get install libglfw3-dev libgl1-mesa-dev xvfb zlib1g-dev
+make -C apps/android/shot
+xvfb-run -a ./apps/android/shot/lfd3k-shot
+```
+
 `cargo build --workspace` on the host also builds this crate as a normal library, so a mistake in the C ABI fails the existing Rust job. The Android target is only the APK job.
 
 libopus is cross compiled by a small `cmake` wrapper (`apps/android/scripts/cmake-android.sh`). The NDK toolchain file otherwise defaults the ABI to `armeabi-v7a`, which will not link into an arm64 static library.
 
 ## Install and the first screen
 
-The app is `LFD3K Voice`, package `com.jmscnc.lfd3k.voice`. It stays in portrait. The first screen asks which modem to use, then CONNECT.
+The app is `LFD3K Voice`, package `com.jmscnc.lfd3k.voice`. It rotates with the phone. The first screen asks which modem to use, then CONNECT.
+
+The window size is the real surface size from `eglQuerySurface`. Density comes from `AConfiguration` (160 dpi is 1x; a Java `densityDpi` is the fallback). Font size is that density times the system `fontScale`. Style sizes are scaled once from a saved base. The font is baked at `16 * scale` pixels, with `FontGlobalScale` left at 1. Display cutouts and system bars are insets from the Java window (`SHORT_EDGES` cutout mode). The activity is not recreated on rotation (`configChanges` already lists orientation and screen size). The native loop reads the new size and insets every frame.
+
+Buttons are full width and at least 48 dp tall. A row of buttons shares the width when each one stays wide enough to tap, and stacks when the screen is narrow. Text wraps. If the screen is shorter than the form, the window scrolls.
+
+Host renders of that layout:
+
+![Connect, 360x800 at 160 dpi](connect-360x800.png)
+
+![Calls, 360x800 at 160 dpi](calls-360x800.png)
+
+![Connect, 412x915 at 160 dpi](connect-412x915.png)
+
+![Calls, 412x915 at 160 dpi](calls-412x915.png)
+
+![Calls, 1080x2400 at 480 dpi](calls-1080x2400-3x.png)
+
+![Calls, landscape 2400x1080 at 480 dpi](calls-landscape-2400x1080-3x.png)
+
+![Directory, 360x800](directory-360x800.png)
+
+![Settings, 360x800](settings-360x800.png)
+
+![Calls, landscape 800x360 at 160 dpi](calls-landscape-800x360.png)
+
+![Calls, 1080x2400 at 480 dpi with top and bottom insets](calls-1080x2400-3x-insets.png)
 
 | Choice | What it does |
 |---|---|
@@ -96,6 +132,6 @@ The on-screen keyboard is there because a `NativeActivity` does not get Unicode 
 - No run on a device or an emulator, so USB, TCP, find, and audio are untested on hardware.
 - No echo canceller of our own.
 - No PC test helpers (script, screenshots, trace, WAV mic, WAV record, the auto-answer WAV push to talk cycle).
-- One ABI, arm64-v8a, portrait only.
+- One ABI, arm64-v8a. Portrait and landscape both layout from the live window size.
 - The screens are a phone layout of the same controls, not a copy of the 1280 x 720 PC window, and they do not draw the Simian logo.
 - If a V4 enumerates as something other than CDC-ACM or a vendor interface with bulk endpoints, USB open fails with the error on the connect screen. That path was not tried on a board.

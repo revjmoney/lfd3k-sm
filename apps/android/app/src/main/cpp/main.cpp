@@ -3,13 +3,16 @@
 #include "imgui.h"
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
+#include "jni_host.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 #include <android/asset_manager.h>
+#include <android/configuration.h>
 #include <android/log.h>
 #include <android_native_app_glue.h>
 
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -24,6 +27,7 @@ struct Egl {
     EGLContext context = EGL_NO_CONTEXT;
     EGLConfig config = nullptr;
     bool imgui = false;
+    float font_px = 0;
 };
 
 Egl g;
@@ -66,12 +70,13 @@ bool init_display(ANativeWindow *window) {
     return true;
 }
 
-void load_font(android_app *app, float scale) {
+void load_font(android_app *app, float px) {
     ImGuiIO &io = ImGui::GetIO();
-    float px = 18.f * scale;
+    io.FontGlobalScale = 1.f;
     AAsset *asset = AAssetManager_open(app->activity->assetManager, "IBMPlexMono-Regular.ttf", AASSET_MODE_BUFFER);
     if (!asset) {
-        io.FontGlobalScale = scale;
+        io.Fonts->AddFontDefault();
+        io.FontGlobalScale = px / 13.f;
         return;
     }
     size_t n = (size_t)AAsset_getLength(asset);
@@ -85,37 +90,51 @@ void load_font(android_app *app, float scale) {
     io.Fonts->AddFontFromMemoryTTF(copy, (int)n, px, &cfg);
 }
 
+void refresh_metrics(android_app *app) {
+    float dpi = 0;
+    if (app->config) {
+        int d = AConfiguration_getDensity(app->config);
+        if (d >= 120 && d < 0xfffe) dpi = (float)d;
+    }
+    if (dpi < 120.f) dpi = (float)jni_density_dpi(app);
+    float font = jni_font_scale(app);
+    int insets[4] = {};
+    jni_insets(app, insets);
+    ui_set_metrics(dpi, font, (float)insets[0], (float)insets[1], (float)insets[2], (float)insets[3]);
+}
+
+void apply_font(android_app *app) {
+    float px = ui_font_px();
+    if (std::fabs(g.font_px - px) < 0.5f && ImGui::GetIO().Fonts->Fonts.Size > 0) return;
+    if (g.imgui) ImGui_ImplOpenGL3_DestroyFontsTexture();
+    ImGui::GetIO().Fonts->Clear();
+    load_font(app, px);
+    g.font_px = px;
+}
+
 void init_imgui(android_app *app) {
     if (g.imgui) return;
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
-    float scale = 2.2f;
-    int w = ANativeWindow_getWidth(app->window);
-    if (w > 0) scale = w / 420.f;
-    if (scale < 1.6f) scale = 1.6f;
-    if (scale > 3.4f) scale = 3.4f;
-    ImGuiStyle &st = ImGui::GetStyle();
-    st.ScaleAllSizes(scale);
-    st.WindowRounding = 0;
-    st.FrameRounding = 4;
-    auto c = [](float r, float g, float b, float a = 1.f) { return ImVec4(r, g, b, a); };
-    ImVec4 *col = st.Colors;
-    col[ImGuiCol_WindowBg] = c(0.055f, 0.059f, 0.067f);
-    col[ImGuiCol_ChildBg] = c(0.055f, 0.059f, 0.067f);
-    col[ImGuiCol_FrameBg] = c(0.086f, 0.094f, 0.106f);
-    col[ImGuiCol_Button] = c(0.086f, 0.094f, 0.106f);
-    col[ImGuiCol_ButtonHovered] = c(0.18f, 0.24f, 0.36f);
-    col[ImGuiCol_ButtonActive] = c(0.48f, 0.64f, 0.97f);
-    col[ImGuiCol_Header] = c(0.48f, 0.64f, 0.97f, 0.45f);
-    col[ImGuiCol_HeaderHovered] = c(0.48f, 0.64f, 0.97f, 0.65f);
-    col[ImGuiCol_Text] = c(0.91f, 0.92f, 0.93f);
-    load_font(app, scale);
+    ui_init_style(app, 1.f);
+    refresh_metrics(app);
+    ui_apply_style_scale();
+    apply_font(app);
     ImGui_ImplAndroid_Init(app->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
-    ui_init_style(app, scale);
     g.imgui = true;
-    LOGI("imgui ready, scale %.2f", scale);
+    LOGI("imgui ready, dpi scale %.2f, font %.1f px", ui_style_scale(), ui_font_px());
+}
+
+void apply_surface_size() {
+    if (g.display == EGL_NO_DISPLAY || g.surface == EGL_NO_SURFACE) return;
+    EGLint sw = 0, sh = 0;
+    eglQuerySurface(g.display, g.surface, EGL_WIDTH, &sw);
+    eglQuerySurface(g.display, g.surface, EGL_HEIGHT, &sh);
+    ImGuiIO &io = ImGui::GetIO();
+    if (sw > 0 && sh > 0) io.DisplaySize = ImVec2((float)sw, (float)sh);
+    io.DisplayFramebufferScale = ImVec2(1.f, 1.f);
 }
 
 void shutdown_all() {
@@ -153,6 +172,11 @@ void on_cmd(android_app *app, int32_t cmd) {
     case APP_CMD_TERM_WINDOW:
         destroy_surface();
         break;
+    case APP_CMD_CONFIG_CHANGED:
+    case APP_CMD_WINDOW_RESIZED:
+    case APP_CMD_CONTENT_RECT_CHANGED:
+        jni_request_insets(app);
+        break;
     case APP_CMD_DESTROY:
         shutdown_all();
         break;
@@ -179,8 +203,12 @@ extern "C" void android_main(android_app *app) {
             }
         }
         if (!g.imgui || g.surface == EGL_NO_SURFACE) continue;
+        refresh_metrics(app);
+        ui_apply_style_scale();
+        apply_font(app);
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplAndroid_NewFrame();
+        apply_surface_size();
         ImGui::NewFrame();
         ui_frame(app);
         ImGui::Render();

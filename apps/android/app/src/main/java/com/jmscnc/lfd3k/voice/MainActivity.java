@@ -15,8 +15,12 @@ import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 import android.net.wifi.WifiManager;
+import android.content.res.Configuration;
+import android.graphics.Insets;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 
 import java.util.HashMap;
@@ -36,6 +40,7 @@ public class MainActivity extends NativeActivity {
     private volatile boolean usbWaiting;
     private volatile String usbError = "";
     private WifiManager.MulticastLock multicast;
+    private final int[] insetsPx = new int[4];
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override
@@ -57,6 +62,74 @@ public class MainActivity extends NativeActivity {
             registerReceiver(usbReceiver, filter);
         }
         requestAudio();
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+        View decor = getWindow().getDecorView();
+        decor.setOnApplyWindowInsetsListener((v, windowInsets) -> {
+            cacheInsets(windowInsets);
+            return v.onApplyWindowInsets(windowInsets);
+        });
+        decor.requestApplyInsets();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        requestInsets();
+    }
+
+    public int densityDpi() {
+        int d = getResources().getConfiguration().densityDpi;
+        return d < 120 ? 160 : d;
+    }
+
+    public float fontScale() {
+        float f = getResources().getConfiguration().fontScale;
+        if (f < 0.5f || f > 3.f) return 1.f;
+        return f;
+    }
+
+    public int[] windowInsets() {
+        int[] copy = new int[4];
+        synchronized (insetsPx) {
+            System.arraycopy(insetsPx, 0, copy, 0, 4);
+        }
+        return copy;
+    }
+
+    public void requestInsets() {
+        runOnUiThread(() -> {
+            View decor = getWindow().getDecorView();
+            if (decor != null) decor.requestApplyInsets();
+        });
+    }
+
+    private void cacheInsets(WindowInsets windowInsets) {
+        int left;
+        int top;
+        int right;
+        int bottom;
+        if (Build.VERSION.SDK_INT >= 30) {
+            Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            left = bars.left;
+            top = bars.top;
+            right = bars.right;
+            bottom = bars.bottom;
+        } else {
+            left = windowInsets.getSystemWindowInsetLeft();
+            top = windowInsets.getSystemWindowInsetTop();
+            right = windowInsets.getSystemWindowInsetRight();
+            bottom = windowInsets.getSystemWindowInsetBottom();
+        }
+        synchronized (insetsPx) {
+            insetsPx[0] = Math.max(0, left);
+            insetsPx[1] = Math.max(0, top);
+            insetsPx[2] = Math.max(0, right);
+            insetsPx[3] = Math.max(0, bottom);
+        }
     }
 
     @Override
