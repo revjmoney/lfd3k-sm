@@ -35,6 +35,19 @@
 //! so the sender resends it. Receiving does not depend on the agreement:
 //! any `FLAG_LZ` frame is decoded (a peer only sends one after we offered).
 //!
+//! Burst parity (see `fec`): the same capability byte carries `CAP_FEC`
+//! (bit 3; bit 1 is `CAP_BULK`, bit 2 stays free for stream compression). It is offered whenever the byte is
+//! sent, which is still only when S31 is 1, so a pre-capability peer is
+//! reached the same way as before (S31 = 0, no byte). The answerer agrees
+//! when the caller offered, and the caller reads the answer from the Train.
+//! Parity stays off until a selective ack shows a hole. Then one parity
+//! frame covers up to four plain chunks on a classic burst, or seven on a
+//! bulk burst of eight. A clean stretch turns it off
+//! again, unless the SNR is under the step-down line: there the call keeps
+//! its tier and lets parity absorb the loss, instead of paying for a
+//! slower spreading factor. Voice calls do not offer the bit (their
+//! capability byte stays `CAP_LZ` only) and their slots do not use it.
+//!
 //! Voice calls (see `voice::call`): set up with type 15 sub-types (voice
 //! CallReq, Answer, Decline) handed in by the Modem, which owns the
 //! registrations; then today's Train, TierSet and TierAck, the voice Train
@@ -44,6 +57,7 @@
 
 use crate::arq::{ArqRx, ArqTx, CHUNK};
 use crate::at::{SRegs, REG_LZ};
+use crate::fec::Group;
 use crate::frame::{self, FrameType, Header, HEADER_LEN, MAX_FRAME};
 use crate::radio::{Radio, RxInfo};
 use crate::tier::{best_tier, Tier};
@@ -225,7 +239,8 @@ fn lz_wanted(s: &SRegs) -> bool {
 
 /// Capability bits this station offers on a data call.
 ///
-/// `CAP_BULK` rides in the same byte as `CAP_LZ`. The byte is sent only
+/// `CAP_BULK` and `CAP_FEC` ride in the same byte as `CAP_LZ`. Bit 2 is
+/// left clear for stream compression. The byte is sent only
 /// when it is non-zero, and it is non-zero only when S31 is 1, so `ATS31=0`
 /// still sends the pre-capability CallReq (no extra byte) that builds older
 /// than r.420 require. Each bit is agreed on its own: an older peer that
@@ -238,6 +253,7 @@ fn offered_caps(s: &SRegs) -> u8 {
     let mut c = 0u8;
     c |= frame::CAP_LZ;
     c |= frame::CAP_BULK;
+    c |= frame::CAP_FEC;
     c
 }
 
@@ -333,6 +349,36 @@ pub struct Link {
     /// host bytes before compression and bytes on the air.
     lz_raw: u32,
     lz_air: u32,
+    /// We offered burst parity on this call (the capability byte carried it).
+    fec_mine: bool,
+    /// The peer offered burst parity.
+    fec_peer: bool,
+    /// Both sides agreed: parity may be sent once a hole is seen.
+    fec: bool,
+    /// A hole was seen, or the tier is being held: send parity groups.
+    fec_arm: bool,
+    /// New chunks sent, while armed, since the last hole or resend.
+    fec_clean: u8,
+    /// Chunks sent a third time while armed. `FAIL_LIMIT` of them means
+    /// parity is not keeping up and the tier may step down.
+    fec_fail: u8,
+    /// Parity is not covering the loss: SNR step-down is allowed again.
+    fec_overwhelmed: bool,
+    /// The SNR average is under this tier's step-down line.
+    fec_snr_low: bool,
+    /// The next data-phase frame should be the open group's parity.
+    parity_due: bool,
+    /// Receiver: do not deliver to the host until parity arrives or the
+    /// hold times out. The chunks stay in `ArqRx` so a hole can be rebuilt.
+    fec_open: bool,
+    fec_hold_at: u32,
+    /// When the newest chunk was folded. A short group is closed after one
+    /// airtime with nothing new to send, so a burst that never reaches four
+    /// chunks still gets its parity frame.
+    fec_group_at: u32,
+    parity: Group,
+    /// `ArqTx::last_sends` for the chunk in `staged`.
+    staged_sends: u8,
     /// Call data bytes the host side moved: taken by `push_data` plus
     /// handed out by `read_data`. Wraps; never reset (the menu's throughput).
     moved: u32,
@@ -421,6 +467,20 @@ impl Link {
             bulk: false,
             lz_raw: 0,
             lz_air: 0,
+            fec_mine: false,
+            fec_peer: false,
+            fec: false,
+            fec_arm: false,
+            fec_clean: 0,
+            fec_fail: 0,
+            fec_overwhelmed: false,
+            fec_snr_low: false,
+            parity_due: false,
+            fec_open: false,
+            fec_hold_at: 0,
+            fec_group_at: 0,
+            parity: Group::new(),
+            staged_sends: 0,
             moved: 0,
             voice: VoiceLink::new(),
             vs: VoiceSched::new(),
@@ -470,6 +530,23 @@ impl Link {
     /// the menu's throughput is its difference over a second.
     pub fn data_bytes(&self) -> u32 {
         self.moved
+    }
+
+    fn clear_fec(&mut self) {
+        self.fec_mine = false;
+        self.fec_peer = false;
+        self.fec = false;
+        self.fec_arm = false;
+        self.fec_clean = 0;
+        self.fec_fail = 0;
+        self.fec_overwhelmed = false;
+        self.fec_snr_low = false;
+        self.parity_due = false;
+        self.fec_open = false;
+        self.fec_hold_at = 0;
+        self.fec_group_at = 0;
+        self.parity.clear();
+        self.staged_sends = 0;
     }
 
     /// Count one Data payload for the ratio.
@@ -579,8 +656,12 @@ impl Link {
         n
     }
 
-    /// Received in-order bytes.
+    /// Received in-order bytes. While a parity group is open the bytes
+    /// stay in `ArqRx` so a missing chunk can still be rebuilt.
     pub fn read_data(&mut self, out: &mut [u8]) -> usize {
+        if self.fec_open {
+            return 0;
+        }
         let n = self.rx.read(out);
         self.moved = self.moved.wrapping_add(n as u32);
         n
@@ -700,6 +781,7 @@ impl Link {
         self.burst_cap = BURST_MAX;
         self.lz_raw = 0;
         self.lz_air = 0;
+        self.clear_fec();
         self.staged = None;
         self.pending = None;
         self.ack_owed = false;
@@ -715,6 +797,9 @@ impl Link {
 
     fn go_idle(&mut self) {
         self.slot_hangup = None;
+        self.fec_open = false;
+        self.parity_due = false;
+        self.parity.clear();
         self.state = State::Idle;
         self.vs.reset();
         self.call_id = 0;
@@ -777,6 +862,7 @@ impl Link {
                     let agreed = frame::parse_train_caps(p);
                     self.lz_peer = agreed & frame::CAP_LZ != 0;
                     self.bulk_peer = agreed & frame::CAP_BULK != 0;
+                    self.fec_peer = agreed & frame::CAP_FEC != 0;
                     let peer_cap = tier_arg.unwrap_or(Tier::ROBUST);
                     self.own_cap = cap_tier(sregs);
                     self.cap = self.own_cap.min(peer_cap);
