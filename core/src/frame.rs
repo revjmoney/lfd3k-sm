@@ -22,14 +22,13 @@
 //! is `CAP_LZ` (per frame LZ). Bit 1 is `CAP_BULK` (wider ARQ burst and
 //! window, 16 bit ack bitmap, data calls only). Bit 2 is `CAP_LZ_STREAM`
 //! (one LZ77 dictionary for the whole call, above ARQ; see `lz_stream`).
-//! Bit 3 is left for Reed-Solomon parity. A byte with any of bits 4 to 7
-//! set makes a CallReq or Train malformed. No byte (the form older builds
-//! send) means no capabilities. Older builds refuse a CallReq that carries
-//! the byte, so it is only sent when it says something (S31 = 1), and a 4
-//! byte Train, so it only goes to a caller that offered (a new build). A
-//! build that knows `CAP_LZ` and not `CAP_LZ_STREAM` ignores bit 2 and
-//! answers with the bits it implements. The call stays on per frame LZ.
-//! TrainAck stays 3 bytes.
+//! Bit 3 is `CAP_FEC` (burst parity, see `fec`). A byte with any of bits 4
+//! to 7 set makes a CallReq or Train malformed. No byte (the form older
+//! builds send) means no capabilities. Older builds refuse a CallReq that
+//! carries the byte, so it is only sent when it says something (S31 = 1),
+//! and a 4 byte Train, so it only goes to a caller that offered (a new
+//! build). A build that does not know a bit ignores it and answers with
+//! the bits it implements. TrainAck stays 3 bytes.
 //!
 //! An Ack payload is one SACK byte, or two bytes (little endian) when
 //! `CAP_BULK` was agreed. A receiver that did not agree ignores a two byte
@@ -51,6 +50,12 @@ use crate::tier::Tier;
 pub const FLAG_LZ: u8 = 4;
 /// Same bit as `FLAG_LZ`, used as the stream dictionary sync mark.
 pub const FLAG_LZ_SYNC: u8 = FLAG_LZ;
+/// Header flag on Data: this chunk is in a parity group (see `fec`).
+/// Bit 1. On a Keepalive the same bit is PING; flags are per frame type.
+pub const FLAG_FEC: u8 = 2;
+/// Header flag on Data: the payload is parity for a group, not a chunk.
+/// Bit 3. On a ScanReq the same bit is `FLAG_VOICE`.
+pub const FLAG_PARITY: u8 = 8;
 /// Header flag on a ScanReq: a modem with voice names answers with a voice
 /// scan answer (type 15) in place of its normal ScanResp.
 pub const FLAG_VOICE: u8 = 8;
@@ -60,13 +65,15 @@ pub const CAP_LZ: u8 = 1 << 0;
 /// and the window is 16, and an Ack carries a 16 bit selective bitmap.
 pub const CAP_BULK: u8 = 1 << 1;
 /// Capability bit 2: stream LZ above ARQ (`lz_stream`).
-///
-/// Bit 3 is left for Reed-Solomon parity. This constant is the place to
-/// retarget the stream bit.
 pub const CAP_LZ_STREAM: u8 = 1 << 2;
+/// Capability bit 3: burst parity (see `fec`).
+///
+/// Moving either bit is the constant plus the registry row that names it.
+pub const CAP_FEC: u8 = 1 << 3;
 
 const _: () = assert!(CAP_LZ_STREAM == 0x04);
 const _: () = assert!(CAP_BULK == 0x02);
+const _: () = assert!(CAP_FEC == 0x08);
 /// Bits a capability byte may use.
 const CAP_MASK: u8 = 0x0F;
 
@@ -510,5 +517,26 @@ mod tests {
         assert!(decode(&[AIR_ID, 0x60, 1, 2, 3]).is_ok());
         assert_eq!(decode(&[]), Err(FrameError::TooShort));
         assert_eq!(decode(&[AIR_ID, 0x60]), Err(FrameError::TooShort));
+    }
+
+    #[test]
+    fn cap_fec_is_bit_3() {
+        // Bit 1 is CAP_BULK. Bit 2 is reserved for stream compression.
+        // Moving CAP_FEC is this assertion, the constant, and the registry row.
+        assert_eq!(CAP_FEC, 1 << 3);
+        assert_eq!(CAP_FEC & CAP_LZ, 0);
+        assert_eq!(CAP_FEC & CAP_BULK, 0);
+        assert_eq!(CAP_BULK, 1 << 1);
+        assert_eq!(FLAG_FEC, 0x02);
+        assert_eq!(FLAG_PARITY, 0x08);
+        let mut p = [0u8; 64];
+        let n = call_req_payload("CALLER", "AXIS", &mut p).unwrap();
+        p[n] = CAP_LZ | CAP_FEC;
+        assert_eq!(
+            parse_call_req_caps(&p[..n + 1]),
+            Ok(("CALLER", "AXIS", CAP_LZ | CAP_FEC))
+        );
+        p[n] = CAP_FEC | 0x10;
+        assert!(parse_call_req_caps(&p[..n + 1]).is_err());
     }
 }

@@ -9,13 +9,14 @@
 //!
 //! RAM, per modem, versus a build that stored only 8 chunks: two payload
 //! buffers of `(WINDOW_BULK - WINDOW) * CHUNK` bytes (3200), plus 8 extra
-//! `TxSlot`s (8 bytes each, 64) and 8 extra receive length and presence
-//! bytes (24), and one `usize` limit on each of `ArqTx` and `ArqRx`. On the
-//! 64 bit host test build that is 3304 bytes: `Modem` 20552 to 23856,
-//! `Link` 6400 to 9704, `ArqTx` 1688 to 3360, `ArqRx` 1648 to 3280. The
-//! link's own flags fit in padding that was already there. The 3200 bytes
-//! of payload buffers are the same on a 32 bit device; the two limit words
-//! are 4 bytes each there instead of 8.
+//! `TxSlot`s. Each slot stays 8 bytes: the sent, acked, and closed flags
+//! share one byte, and `sends` (how many times the chunk went out, which
+//! the parity tier-hold uses) is the next byte. The extra slots are 64
+//! bytes. Eight extra receive length and presence bytes are 24,
+//! and one `usize` limit sits on each of `ArqTx` and `ArqRx`. `Link` also
+//! holds one parity `Group` (217 bytes) and a `last_sends` byte on `ArqTx`.
+//! The 3200 bytes of payload buffers are the same on a 32 bit device; the
+//! two limit words are 4 bytes each there instead of 8.
 
 pub const WINDOW: usize = 8;
 /// Window used on a call that agreed `frame::CAP_BULK`.
@@ -36,6 +37,8 @@ struct TxSlot {
     len: u16,
     /// `TX_SENT`, `TX_ACKED`, `TX_CLOSED`. One byte keeps the slot at 8 bytes.
     flags: u8,
+    /// Times this chunk has been handed to the sender. 0 until the first.
+    sends: u8,
     last_ms: u32,
 }
 
@@ -59,6 +62,7 @@ impl TxSlot {
 const EMPTY_TX: TxSlot = TxSlot {
     len: 0,
     flags: 0,
+    sends: 0,
     last_ms: 0,
 };
 
@@ -73,6 +77,8 @@ pub struct ArqTx {
     base: u8,
     /// Outstanding chunks allowed: `WINDOW` or `WINDOW_BULK`.
     limit: usize,
+    /// `sends` of the chunk `next_to_send` handed out most recently.
+    last_sends: u8,
 }
 
 impl Default for ArqTx {
@@ -90,6 +96,7 @@ impl ArqTx {
             count: 0,
             base: 0,
             limit: WINDOW,
+            last_sends: 0,
         }
     }
 
@@ -180,11 +187,24 @@ impl ArqTx {
         let r = self.ring(i);
         let s = self.slots.get_mut(r)?;
         s.set(TX_SENT);
+        s.sends = s.sends.saturating_add(1);
         s.last_ms = now_ms;
+        self.last_sends = s.sends;
         let len = s.len as usize;
         let seq = self.base.wrapping_add(i as u8);
         let data = self.buf.get(r)?.get(..len)?;
         Some((seq, data))
+    }
+
+    /// How many times the chunk from the latest `next_to_send` has been
+    /// handed out. 1 is the first send, 2 is the first resend.
+    pub fn last_sends(&self) -> u8 {
+        self.last_sends
+    }
+
+    /// True when a queued chunk has never been sent.
+    pub fn has_unsent(&self) -> bool {
+        (0..self.count).any(|i| self.slots.get(self.ring(i)).is_some_and(|s| !s.sent()))
     }
 
     /// Length of the chunk `next_to_send` would hand out now, without
@@ -343,6 +363,20 @@ impl ArqRx {
         self.have.get(self.ring(off)).copied().unwrap_or(false)
     }
 
+    /// Plain bytes held for `seq`, if they are inside the window.
+    pub fn get(&self, seq: u8) -> Option<&[u8]> {
+        let off = seq.wrapping_sub(self.base) as usize;
+        if off >= self.limit {
+            return None;
+        }
+        let r = self.ring(off);
+        if !self.have.get(r).copied().unwrap_or(false) {
+            return None;
+        }
+        let len = self.len.get(r).copied().unwrap_or(0) as usize;
+        self.buf.get(r).and_then(|b| b.get(..len))
+    }
+
     /// Store a frame. Returns false if it is out of window (old, too far
     /// ahead, or oversized); in-window duplicates are ignored and return true.
     pub fn on_data(&mut self, seq: u8, data: &[u8]) -> bool {
@@ -392,7 +426,7 @@ impl ArqRx {
         if let Some(x) = self.have.get_mut(h) {
             *x = false;
         }
-        self.head = (h + 1) % WINDOW;
+        self.head = (h + 1) % SLOTS;
         self.base = self.base.wrapping_add(1);
         self.read_off = 0;
     }
@@ -729,6 +763,8 @@ mod tests {
     fn bulk_ram_is_the_extra_slots() {
         let payloads = (WINDOW_BULK - WINDOW) * CHUNK * 2;
         assert_eq!(payloads, 3_200);
+        // Flags and `sends` are one byte each, so the slot stays 8 bytes.
+        assert_eq!(core::mem::size_of::<TxSlot>(), 8);
         let tx_slots = (WINDOW_BULK - WINDOW) * core::mem::size_of::<TxSlot>();
         assert_eq!(tx_slots, 64);
         eprintln!(

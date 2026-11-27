@@ -101,14 +101,16 @@ impl Link {
         let h = f.header;
         match h.ftype {
             FrameType::Data => {
+                if h.flags & frame::FLAG_PARITY != 0 {
+                    self.on_parity(f.payload, now);
+                    return;
+                }
                 // Stream mode: the payload is already the compressed byte
-                // stream. It is decoded in order from `read_data`, so a
-                // resent frame is stored as the same bytes and the
-                // dictionary does not move until those bytes are delivered.
+                // stream, plus one check byte. It is decoded in order from
+                // `read_data`, so a resent frame is stored as the same bytes
+                // and the dictionary does not move until those bytes arrive.
+                // Parity covers those stored bytes, not the check byte.
                 if self.lz_stream {
-                    // The last byte is a check of the compressed bytes. A
-                    // mismatch is the air's copy, not the sender's, so it is
-                    // not stored and not acked. ARQ sends the good frame again.
                     let Some((&sum, data)) = f.payload.split_last() else {
                         return;
                     };
@@ -120,6 +122,10 @@ impl Link {
                     }
                     self.rx.on_data(h.seq, data);
                     self.lz_count(0, 1);
+                    if self.fec && h.flags & frame::FLAG_FEC != 0 {
+                        self.fec_open = true;
+                        self.fec_hold_at = now;
+                    }
                     self.ack_owed = true;
                     self.data_rx = Some(now);
                     return;
@@ -136,6 +142,12 @@ impl Link {
                 };
                 self.lz_count(data.len(), f.payload.len());
                 self.rx.on_data(h.seq, data);
+                if self.fec && h.flags & frame::FLAG_FEC != 0 {
+                    // Hold delivery until the group's parity frame, so a
+                    // later hole can still be rebuilt from these chunks.
+                    self.fec_open = true;
+                    self.fec_hold_at = now;
+                }
                 // Ack every Data frame, whatever on_data said.
                 self.ack_owed = true;
                 self.data_rx = Some(now);
@@ -152,6 +164,12 @@ impl Link {
                 if let Some(sack) = sack {
                     self.tx.on_ack(h.ack, sack);
                     self.clear_lz_sync_tx();
+                    // A set SACK bit is a hole the peer really saw. One
+                    // resend of a frame the ack was already covering is not.
+                    if self.fec && sack != 0 {
+                        self.fec_arm = true;
+                        self.fec_clean = 0;
+                    }
                 }
             }
             FrameType::Keepalive => {
@@ -221,7 +239,19 @@ impl Link {
             self.relisten(radio);
             return;
         };
-        let more = turns && !end_turn && self.burst + 1 < self.burst_cap && self.has_more(now);
+        // A classic burst is 4. Parity needs a fifth slot there, and the
+        // resend timer waits one airtime longer while parity is armed.
+        // A bulk burst is already 8: the group stops at 7 so the parity
+        // frame is the eighth, and the turn does not grow a ninth frame.
+        let burst_lim = if self.parity_due && self.burst_cap <= BURST_MAX {
+            self.burst_cap.saturating_add(1)
+        } else {
+            self.burst_cap
+        };
+        let more = turns
+            && !end_turn
+            && self.burst + 1 < burst_lim
+            && (self.parity_due || self.has_more(now));
         if more {
             if let Some(b0) = buf.get_mut(1) {
                 *b0 |= FLAG_MORE;
@@ -276,13 +306,14 @@ impl Link {
         if self.staged.is_some() {
             return true;
         }
-        let rto = rto_ms(self.tier);
+        let rto = self.resend_rto();
         if let Some((seq, d)) = self.tx.next_to_send(now, rto) {
             let n = d.len().min(CHUNK);
             if let (Some(dst), Some(src)) = (self.staged_buf.get_mut(..n), d.get(..n)) {
                 dst.copy_from_slice(src);
             }
             self.staged = Some((seq, n as u8));
+            self.staged_sends = self.tx.last_sends();
         }
         self.staged.is_some()
     }
@@ -304,6 +335,7 @@ impl Link {
         if self.state != State::Connected {
             return None;
         }
+        self.promote_parity_tail(now);
         let t = self.tier;
         let mk = |ft, flags, seq, ack, p: &[u8], out: &mut [u8], cid| {
             let h = Header {
@@ -323,6 +355,24 @@ impl Link {
             let p: &[u8] = if self.bulk { &raw } else { &raw[..1] };
             let n = mk(FrameType::Ack, 0, 0, a, p, out, self.call_id)?;
             return Some((n, t, false, false));
+        }
+        if self.parity_due {
+            self.parity_due = false;
+            let mut payload = [0u8; CHUNK + crate::fec::GROUP + 2];
+            let pn = self.parity.encode(&mut payload).unwrap_or(0);
+            self.parity.clear();
+            if pn > 0 {
+                let n = mk(
+                    FrameType::Data,
+                    frame::FLAG_PARITY,
+                    0,
+                    0,
+                    payload.get(..pn).unwrap_or(&[]),
+                    out,
+                    self.call_id,
+                )?;
+                return Some((n, t, false, true));
+            }
         }
         // Probe the peer: first PING after 2 RTOs (answerer 2.5) of hearing
         // nothing, then again after about 1 RTO (jittered) while unanswered.
@@ -351,45 +401,54 @@ impl Link {
         if self.stage(now) {
             let (seq, len) = self.staged.take()?;
             self.ka_reply = false;
-            let raw = self.staged_buf.get(..len as usize)?;
+            let nplain = len as usize;
             // Stream mode already compressed these bytes in `push_data`.
             // Sending them again, on a resend, does not touch the dictionary.
+            // Parity folds the compressed chunk, which is what `ArqRx` holds.
             if self.lz_stream {
                 let mut body = [0u8; CHUNK + 1];
-                let nraw = raw.len();
-                body.get_mut(..nraw)?.copy_from_slice(raw);
-                *body.get_mut(nraw)? = lz_stream::stream_sum(raw);
-                let flags = if self.lz_sync_tx == Some(seq) {
-                    frame::FLAG_LZ_SYNC
-                } else {
-                    0
-                };
+                body.get_mut(..nplain)?
+                    .copy_from_slice(self.staged_buf.get(..nplain)?);
+                let raw = body.get(..nplain)?;
+                let sum = lz_stream::stream_sum(raw);
+                let fec_flag = self.note_fec_chunk(seq, raw, now);
+                *body.get_mut(nplain)? = sum;
+                let mut flags = fec_flag;
+                if self.lz_sync_tx == Some(seq) {
+                    flags |= frame::FLAG_LZ_SYNC;
+                }
                 let n = mk(
                     FrameType::Data,
                     flags,
                     seq,
                     0,
-                    body.get(..nraw + 1)?,
+                    body.get(..nplain + 1)?,
                     out,
                     self.call_id,
                 )?;
-                self.note_stream_tx(nraw);
+                self.note_stream_tx(nplain);
                 self.lz_count(0, 1);
                 return Some((n, t, false, true));
             }
             // Per frame LZ: the staged chunk stays plain, and compressing
             // it here each time it is sent gives the same bytes on a resend.
+            let mut plain_buf = [0u8; CHUNK];
+            plain_buf
+                .get_mut(..nplain)?
+                .copy_from_slice(self.staged_buf.get(..nplain)?);
+            let plain = plain_buf.get(..nplain)?;
             let mut packed = [0u8; CHUNK];
             let z = if self.lz {
-                lz::compress(raw, &mut packed)
+                lz::compress(plain, &mut packed)
             } else {
                 None
             };
+            let fec_flag = self.note_fec_chunk(seq, plain, now);
             let (flags, p) = match z {
-                Some(m) => (frame::FLAG_LZ, packed.get(..m)?),
-                None => (0, raw),
+                Some(m) => (frame::FLAG_LZ | fec_flag, packed.get(..m)?),
+                None => (fec_flag, plain),
             };
-            let (raw_len, air_len) = (raw.len(), p.len());
+            let (raw_len, air_len) = (plain.len(), p.len());
             let n = mk(FrameType::Data, flags, seq, 0, p, out, self.call_id)?;
             self.lz_count(raw_len, air_len);
             return Some((n, t, false, true));
@@ -408,6 +467,114 @@ impl Link {
             return Some((n, t, true, false));
         }
         None
+    }
+
+    /// Resend timeout. While parity is armed the burst may carry one
+    /// extra frame, so the sender waits one more airtime before treating
+    /// a missing ack as a loss.
+    fn resend_rto(&self) -> u32 {
+        let r = rto_ms(self.tier);
+        if self.fec_arm {
+            r.saturating_add(air_ms(self.tier, HEADER_LEN + CHUNK))
+        } else {
+            r
+        }
+    }
+
+    /// Fold a first send into the open parity group. Returns `FLAG_FEC`
+    /// when this chunk is covered. A lone chunk (nothing else unsent, and
+    /// no group already open) is left to ARQ: a parity frame would double it.
+    fn note_fec_chunk(&mut self, seq: u8, plain: &[u8], now: u32) -> u8 {
+        let sends = self.staged_sends;
+        if self.fec_arm && sends >= 3 {
+            self.fec_fail = self.fec_fail.saturating_add(1);
+            if self.fec_fail >= crate::fec::FAIL_LIMIT {
+                self.fec_overwhelmed = true;
+            }
+        }
+        if self.fec_arm && sends >= 2 {
+            self.fec_clean = 0;
+        }
+        // Marginal SNR: a resend is a real loss even when the SACK byte
+        // stayed clear (the lost chunk was the only one in flight).
+        if self.fec && self.fec_snr_low && sends >= 2 {
+            self.fec_arm = true;
+            self.fec_clean = 0;
+        }
+        if !self.fec_arm || sends != 1 || self.parity_due {
+            self.finish_fec_group();
+            return 0;
+        }
+        let alone = self.parity.count() == 0 && !self.tx.has_unsent();
+        let folded = !alone && self.parity.fold(seq, plain);
+        if folded {
+            self.fec_clean = self.fec_clean.saturating_add(1);
+            self.fec_group_at = now;
+        }
+        self.finish_fec_group();
+        if folded {
+            frame::FLAG_FEC
+        } else {
+            0
+        }
+    }
+
+    fn finish_fec_group(&mut self) {
+        // A full group closes at once. A shorter one stays open so the
+        // next chunks can join it; `promote_parity_tail` closes it if
+        // nothing new is queued.
+        if self.parity.count() >= self.fec_group_max() {
+            self.parity_due = true;
+        }
+    }
+
+    /// Chunks per parity frame. Four on a classic burst (the parity frame
+    /// is a fifth). Seven on a bulk burst of eight, so the parity frame
+    /// is the eighth and the turn stays inside `BURST_BULK`.
+    fn fec_group_max(&self) -> usize {
+        if self.burst_cap > BURST_MAX {
+            usize::from(self.burst_cap.saturating_sub(1)).min(crate::fec::GROUP)
+        } else {
+            4.min(crate::fec::GROUP)
+        }
+    }
+
+    /// Send parity for a short group once a chunk-airtime has passed with
+    /// nothing left to send. Waiting that long lets a busy sender fill the
+    /// group to four chunks (one parity frame in five) instead of closing
+    /// on every short push.
+    fn promote_parity_tail(&mut self, now: u32) {
+        if self.parity_due || self.staged.is_some() || self.parity.count() == 0 {
+            return;
+        }
+        if self.tx.has_unsent() {
+            return;
+        }
+        let wait = air_ms(self.tier, HEADER_LEN + CHUNK);
+        if since(now, self.fec_group_at) >= wait {
+            self.parity_due = true;
+        }
+    }
+
+    /// Rebuild one missing chunk from a parity frame, if exactly one of
+    /// the group is absent and still inside the receive window.
+    fn on_parity(&mut self, payload: &[u8], now: u32) {
+        self.fec_open = false;
+        if !self.fec {
+            return;
+        }
+        let mut rebuilt = [0u8; CHUNK];
+        let Some((seq, len)) = crate::fec::recover(payload, |s| self.rx.get(s), &mut rebuilt)
+        else {
+            return;
+        };
+        let Some(data) = rebuilt.get(..len) else {
+            return;
+        };
+        if self.rx.on_data(seq, data) {
+            self.ack_owed = true;
+            self.data_rx = Some(now);
+        }
     }
 }
 

@@ -5,6 +5,7 @@ pub mod arq;
 pub mod at;
 pub mod directory;
 pub mod discovery;
+pub mod fec;
 pub mod frame;
 pub mod lan;
 pub mod link;

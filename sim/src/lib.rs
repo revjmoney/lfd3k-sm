@@ -80,7 +80,7 @@ pub mod rng;
 
 use std::collections::VecDeque;
 
-use lfd3k_core::frame::{decode, FrameType};
+use lfd3k_core::frame::{decode, FrameType, FLAG_PARITY};
 use lfd3k_core::{Config, Modem, Radio, RxInfo, Tier};
 pub use multi::Multi;
 pub use rng::Rng;
@@ -197,7 +197,10 @@ pub struct Stats {
     pub frames_sent: [u32; 2],
     pub data_frames: [u32; 2],
     /// Data frames sent again (same sequence number, same call).
+    /// Parity frames are not data and are not resends.
     pub resends: [u32; 2],
+    /// Parity frames (Data with FLAG_PARITY), per sender.
+    pub parity_frames: [u32; 2],
     pub delivered: u32,
     pub lost: u32,
     pub undetected: u32,
@@ -1015,10 +1018,12 @@ impl Harness {
             Err(_) => (None, 0, 0, 0),
         };
         let is_data = ftype == Some(FrameType::Data);
+        let is_parity = is_data && flags & FLAG_PARITY != 0;
+        let is_chunk = is_data && !is_parity;
 
         let mut resend = false;
         if let Some(st) = self.seqs.get_mut(from) {
-            if is_data {
+            if is_chunk {
                 match *st {
                     Some((c, next)) if c == call_id => {
                         if seq.wrapping_sub(next) < 128 {
@@ -1035,7 +1040,7 @@ impl Harness {
         if let Some(n) = s.frames_sent.get_mut(from) {
             *n += 1;
         }
-        if is_data {
+        if is_chunk {
             if let Some(n) = s.data_frames.get_mut(from) {
                 *n += 1;
             }
@@ -1043,6 +1048,11 @@ impl Harness {
                 if let Some(n) = s.resends.get_mut(from) {
                     *n += 1;
                 }
+            }
+        }
+        if is_parity {
+            if let Some(n) = s.parity_frames.get_mut(from) {
+                *n += 1;
             }
         }
         if let Some(log) = s.tiers.get_mut(from) {
