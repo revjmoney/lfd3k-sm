@@ -41,6 +41,14 @@ impl Link {
         self.good_since = None;
         self.low_since = None;
         self.need_listen = true;
+        // The open group was built at the old airtime. Drop it and let the
+        // new tier prove whether parity is still needed.
+        self.parity.clear();
+        self.parity_due = false;
+        self.fec_open = false;
+        self.fec_overwhelmed = false;
+        self.fec_fail = 0;
+        self.fec_clean = 0;
         if t != self.tier {
             self.tier = t;
             self.emit(Event::Retrain(t));
@@ -52,6 +60,27 @@ impl Link {
             self.voice_ready_tick(now);
         }
         let rto = rto_ms(self.tier);
+        // Parity hold: release the host's bytes if the parity frame never
+        // arrives (it was lost, or the sender moved on). 4 RTOs is longer
+        // than a turn plus the peer's burst, so a parity frame that is
+        // coming still lands first.
+        if self.fec_open && since(now, self.fec_hold_at) >= rto.saturating_mul(4) {
+            self.fec_open = false;
+        }
+        let floor_now = i32::from(self.tier.snr_floor_x4());
+        let margin = reg(sregs, 20, 20) as i32;
+        self.fec_snr_low =
+            self.tier.slower().is_some() && self.ewma_x32 / 8 < floor_now + margin - 8;
+        if self.fec_arm
+            && self.fec_clean >= crate::fec::CLEAN_FRAMES
+            && !self.fec_snr_low
+            && self.parity.count() == 0
+            && !self.parity_due
+        {
+            self.fec_arm = false;
+            self.fec_clean = 0;
+            self.fec_fail = 0;
+        }
         // Voice slots: only slots in which the peer was due to send count
         // as silence, and missed ones stand for unanswered pings (an
         // answerer still waiting for the caller's clock counts time).
@@ -138,6 +167,14 @@ impl Link {
         let floor = i32::from(self.tier.snr_floor_x4());
         if let Some(s) = self.tier.slower() {
             if ewma < floor + s20 - 8 {
+                // Parity is cheaper than the next slower tier (SF5 to SF6
+                // is about 40 percent of the air rate). Hold this tier while
+                // the peer agreed and parity is still covering the loss.
+                // A dead link still steps down on silence, above.
+                if self.fec && !self.fec_overwhelmed {
+                    self.low_since = None;
+                    return;
+                }
                 let l = *self.low_since.get_or_insert(now);
                 if since(now, l) >= off {
                     self.low_since = None;

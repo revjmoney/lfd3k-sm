@@ -27,6 +27,8 @@ impl Link {
         let caps = offered_caps(sregs);
         if caps != 0 {
             // Two 16 byte names plus the byte still fit a QBUF frame.
+            // CAP_FEC rides in that same byte (bit 3). S31 = 0 still sends
+            // no byte, which is how a pre-capability build is called.
             let Some(c) = p.get_mut(plen) else {
                 return false;
             };
@@ -49,6 +51,7 @@ impl Link {
         self.reset_call(Role::Caller, now);
         self.lz_mine = caps & frame::CAP_LZ != 0;
         self.bulk_mine = caps & frame::CAP_BULK != 0;
+        self.fec_mine = caps & frame::CAP_FEC != 0;
         self.state = State::Dialing;
         self.send_callreq(now);
         true
@@ -75,14 +78,17 @@ impl Link {
         let snr = self.my_snr;
         let peer_lz = self.lz_peer;
         let peer_bulk = self.bulk_peer;
+        let peer_fec = self.fec_peer;
         let mine = offered_caps(sregs);
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
         self.lz_peer = peer_lz;
         self.bulk_peer = peer_bulk;
+        self.fec_peer = peer_fec;
         self.lz_mine = mine & frame::CAP_LZ != 0;
         self.bulk_mine = mine & frame::CAP_BULK != 0;
+        self.fec_mine = mine & frame::CAP_FEC != 0;
         self.own_cap = cap_tier(sregs);
         self.cap = self.own_cap;
         self.state = State::AwaitTierSet;
@@ -98,6 +104,9 @@ impl Link {
         }
         if self.bulk_mine && self.bulk_peer {
             c |= frame::CAP_BULK;
+        }
+        if self.fec_mine && self.fec_peer {
+            c |= frame::CAP_FEC;
         }
         c
     }
@@ -207,6 +216,7 @@ impl Link {
         };
         self.tx.set_limit(slots);
         self.rx.set_limit(slots);
+        self.fec = self.fec_mine && self.fec_peer && !self.voice.on;
         self.emit(Event::Connect(self.tier));
     }
 
@@ -227,11 +237,13 @@ impl Link {
         }
         let peer_lz = caps & frame::CAP_LZ != 0;
         let peer_bulk = caps & frame::CAP_BULK != 0;
+        let peer_fec = caps & frame::CAP_FEC != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
             self.voice.on = false;
             self.lz_peer = peer_lz;
             self.bulk_peer = peer_bulk;
+            self.fec_peer = peer_fec;
             self.my_snr = info.snr_x4;
             self.state = State::Ringing;
             self.start = now;
@@ -249,6 +261,7 @@ impl Link {
             if !self.is_connected() {
                 self.lz_peer = peer_lz;
                 self.bulk_peer = peer_bulk;
+                self.fec_peer = peer_fec;
             }
             if self.state == State::AwaitTierSet && !self.got_tierset {
                 self.send_train();
@@ -364,11 +377,13 @@ impl Link {
         let call_id = self.call_id;
         let snr = self.my_snr;
         let peer_lz = self.lz_peer;
+        let peer_fec = self.fec_peer;
         let v = self.voice;
         self.reset_call(Role::Answerer, now);
         self.call_id = call_id;
         self.my_snr = snr;
         self.lz_peer = peer_lz;
+        self.fec_peer = peer_fec;
         self.voice = v;
         self.voice.info.token = token;
         self.voice.sends = 0;
@@ -464,9 +479,11 @@ impl Link {
             }
         }
         let peer_lz = caps & frame::CAP_LZ != 0;
+        let peer_fec = caps & frame::CAP_FEC != 0;
         if self.state == State::Idle && !self.engaged {
             self.call_id = call_id;
             self.lz_peer = peer_lz;
+            self.fec_peer = peer_fec;
             self.my_snr = info.snr_x4;
             self.voice.start(peer);
             // The request just ended: an answer waits for a quiet channel
@@ -492,6 +509,7 @@ impl Link {
             self.my_snr = info.snr_x4;
             if !self.is_connected() {
                 self.lz_peer = peer_lz;
+                self.fec_peer = peer_fec;
             }
             // The caller has not heard our answer: send it again soon once
             // the last one has gone out, within the send limit.
